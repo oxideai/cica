@@ -210,12 +210,13 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
             println!();
             println!("  claude setup-token");
             println!();
-            println!("Paste your token and press Enter:");
+            println!("Note: The token may display across two lines, but it's one");
+            println!("continuous string. Copy and paste it as a single line.");
+            println!();
 
-            // Read raw input to handle long tokens that might wrap
-            let mut token = String::new();
-            std::io::stdin().read_line(&mut token)?;
-            token.trim().to_string()
+            Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("Paste the setup token")
+                .interact()?
         }
         1 => {
             // API Key flow

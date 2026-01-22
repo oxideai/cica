@@ -80,16 +80,8 @@ pub struct TelegramConfig {
 /// Claude configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeConfig {
-    /// Anthropic API key
+    /// Anthropic API key or OAuth token
     pub api_key: Option<String>,
-
-    /// Model to use (e.g., "sonnet", "opus", "haiku")
-    #[serde(default = "default_model")]
-    pub model: String,
-}
-
-fn default_model() -> String {
-    "sonnet".to_string()
 }
 
 // ============================================================================

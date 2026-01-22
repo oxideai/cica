@@ -24,8 +24,8 @@ struct ClaudeResponse {
 pub struct QueryOptions {
     /// System prompt to use
     pub system_prompt: Option<String>,
-    /// Session ID for conversation continuity
-    pub session_id: Option<String>,
+    /// Resume an existing session by ID (uses --resume)
+    pub resume_session: Option<String>,
     /// Working directory for Claude
     pub cwd: Option<String>,
     /// Skip permission prompts (for automated flows)
@@ -73,14 +73,20 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(
         cmd.arg("--dangerously-skip-permissions");
     }
 
-    // Add system prompt if provided
+    // Add system prompt
     if let Some(ref system_prompt) = options.system_prompt {
-        cmd.args(["--system-prompt", system_prompt]);
+        if options.resume_session.is_none() {
+            // New session: full system prompt
+            cmd.args(["--system-prompt", system_prompt]);
+        } else {
+            // Resuming: append as reminder
+            cmd.args(["--append-system-prompt", system_prompt]);
+        }
     }
 
-    // Add session ID if provided
-    if let Some(ref session_id) = options.session_id {
-        cmd.args(["--session-id", session_id]);
+    // Resume existing session if provided
+    if let Some(ref session_id) = options.resume_session {
+        cmd.args(["--resume", session_id]);
     }
 
     // Set working directory

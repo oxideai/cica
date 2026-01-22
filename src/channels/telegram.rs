@@ -1,5 +1,6 @@
 use anyhow::Result;
 use teloxide::prelude::*;
+use teloxide::types::ChatAction;
 use tracing::{info, warn};
 
 use crate::claude;
@@ -73,6 +74,10 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
     if !onboarding::is_complete()? {
         // /start triggers onboarding greeting, not treated as an answer
         let message = if text == "/start" { "hi" } else { text };
+
+        // Show typing indicator
+        let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+
         let response = handle_onboarding(message).await?;
         bot.send_message(msg.chat.id, response).await?;
         return Ok(());
@@ -83,14 +88,43 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
         return Ok(());
     }
 
-    // Query Claude
-    let response = match claude::query(text).await {
-        Ok(response) => response,
+    // Show typing indicator
+    let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+
+    // Check if we have an existing session to resume
+    let existing_session = store
+        .sessions
+        .get(&format!("telegram:{}", user_id))
+        .cloned();
+
+    // Query Claude with context (and resume if we have a session)
+    let context_prompt = onboarding::build_context_prompt(Some("Telegram"))?;
+    let options = claude::QueryOptions {
+        system_prompt: Some(context_prompt),
+        resume_session: existing_session,
+        skip_permissions: true,
+        ..Default::default()
+    };
+
+    let (response, session_id) = match claude::query_with_options(text, options).await {
+        Ok((response, session_id)) => (response, session_id),
         Err(e) => {
             warn!("Claude error: {}", e);
-            format!("Sorry, I encountered an error: {}", e)
+            (
+                format!("Sorry, I encountered an error: {}", e),
+                String::new(),
+            )
         }
     };
+
+    // Save session ID for future messages
+    if !session_id.is_empty() {
+        let key = format!("telegram:{}", user_id);
+        if store.sessions.get(&key).map(|s| s.as_str()) != Some(&session_id) {
+            store.sessions.insert(key, session_id);
+            store.save()?;
+        }
+    }
 
     bot.send_message(msg.chat.id, response).await?;
 

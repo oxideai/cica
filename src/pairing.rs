@@ -28,6 +28,8 @@ pub struct PendingRequest {
 pub struct PairingStore {
     pub pending: Vec<PendingRequest>,
     pub approved: HashMap<String, Vec<String>>, // channel -> [user_ids]
+    #[serde(default)]
+    pub sessions: HashMap<String, String>, // "channel:user_id" -> session_id (UUID)
 }
 
 impl PairingStore {
@@ -150,6 +152,29 @@ impl PairingStore {
         self.prune_expired();
         self.pending.iter().collect()
     }
+
+    /// Get or create a session ID for a user
+    pub fn get_or_create_session(&mut self, channel: &str, user_id: &str) -> Result<String> {
+        let key = format!("{}:{}", channel, user_id);
+
+        if let Some(session_id) = self.sessions.get(&key) {
+            return Ok(session_id.clone());
+        }
+
+        // Generate a new UUID for the session
+        let session_id = generate_uuid();
+        self.sessions.insert(key, session_id.clone());
+        self.save()?;
+
+        Ok(session_id)
+    }
+
+    /// Reset a user's session (start fresh conversation)
+    pub fn reset_session(&mut self, channel: &str, user_id: &str) -> Result<()> {
+        let key = format!("{}:{}", channel, user_id);
+        self.sessions.remove(&key);
+        self.save()
+    }
 }
 
 /// Generate a unique pairing code
@@ -212,4 +237,37 @@ fn now_timestamp() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Generate a UUID v4 (random)
+fn generate_uuid() -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    let mut rng = SimpleRng::new(now ^ std::process::id() as u64);
+
+    let bytes: Vec<u8> = (0..16).map(|_| rng.next() as u8).collect();
+
+    // Format as UUID with version 4 and variant bits
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6] & 0x0f,
+        bytes[7],
+        (bytes[8] & 0x3f) | 0x80,
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }

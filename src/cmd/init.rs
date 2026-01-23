@@ -643,6 +643,7 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
 
         setup::ensure_bun().await?;
         setup::ensure_claude_code().await?;
+        setup::ensure_embedding_model()?;
 
         println!("done");
     }

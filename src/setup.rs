@@ -1,9 +1,10 @@
-//! Setup utilities for downloading and configuring Bun, Claude Code, Java, and signal-cli.
+//! Setup utilities for downloading and configuring Bun, Claude Code, Java, signal-cli, and embedding models.
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 
 use crate::config;
+use crate::memory;
 
 fn bun_download_url() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -347,4 +348,13 @@ async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> 
     archive.unpack(dest_dir)?;
 
     Ok(())
+}
+
+// ============================================================================
+// Embedding Model (for memory search)
+// ============================================================================
+
+/// Ensure the embedding model is downloaded
+pub fn ensure_embedding_model() -> Result<()> {
+    memory::ensure_model_downloaded()
 }

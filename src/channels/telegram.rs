@@ -5,6 +5,7 @@ use tracing::{info, warn};
 
 use crate::claude;
 use crate::config::TelegramConfig;
+use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
 
@@ -102,6 +103,7 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
         Some("Telegram"),
         Some("telegram"),
         Some(&user_id),
+        Some(text),
     )?;
     let session_key = format!("telegram:{}", user_id);
 
@@ -161,7 +163,27 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
 
     bot.send_message(msg.chat.id, response).await?;
 
+    // Re-index memories in case Claude saved new ones
+    reindex_user_memories("telegram", &user_id);
+
     Ok(())
+}
+
+/// Re-index memories for a user (called after Claude responds)
+fn reindex_user_memories(channel: &str, user_id: &str) {
+    match MemoryIndex::open() {
+        Ok(mut index) => {
+            if let Err(e) = index.index_user_memories(channel, user_id) {
+                warn!(
+                    "Failed to re-index memories for {}:{}: {}",
+                    channel, user_id, e
+                );
+            }
+        }
+        Err(e) => {
+            warn!("Failed to open memory index: {}", e);
+        }
+    }
 }
 
 /// Handle onboarding flow - Claude drives the conversation (per-user)

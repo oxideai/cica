@@ -7,6 +7,7 @@
 //! Per-user files (in users/{channel}_{user_id}/):
 //! - IDENTITY.md - who the assistant is for this user
 //! - USER.md - info about this user
+//! - memories/ - saved memories about conversations
 //!
 //! Shared files (configured by owner):
 //! - PERSONA.md - general behavior guidelines
@@ -14,8 +15,10 @@
 
 use anyhow::Result;
 use std::path::PathBuf;
+use tracing::warn;
 
 use crate::config;
+use crate::memory::{MemoryIndex, memories_dir};
 
 /// Onboarding phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,10 +197,14 @@ pub fn load_persona() -> Result<Option<String>> {
 }
 
 /// Build system prompt with all context for a specific user
+///
+/// If `user_message` is provided, it will be used to search for relevant memories
+/// to include in the context.
 pub fn build_context_prompt_for_user(
     channel_display: Option<&str>,
     channel_id: Option<&str>,
     user_id: Option<&str>,
+    user_message: Option<&str>,
 ) -> Result<String> {
     let paths = config::paths()?;
     let mut lines = Vec::new();
@@ -328,6 +335,71 @@ pub fn build_context_prompt_for_user(
         lines.push("## PERSONA.md".to_string());
         lines.push(content);
         lines.push(String::new());
+    }
+
+    // Memory system
+    if let (Some(ch), Some(uid)) = (channel_id, user_id) {
+        let mem_dir = memories_dir(ch, uid)?;
+
+        // Add memory guidance
+        lines.push("## Memories".to_string());
+        lines.push(format!(
+            "You can save important information about conversations to your memory system at: {}",
+            mem_dir.display()
+        ));
+        lines.push(String::new());
+        lines.push("When you learn something important about the user (preferences, projects they're working on, significant life events, technical details they share), you can save it as a memory file.".to_string());
+        lines.push(String::new());
+        lines.push("To save a memory:".to_string());
+        lines.push("1. Ask the user if they'd like you to remember this".to_string());
+        lines.push("2. If they agree, write a markdown file to the memories directory".to_string());
+        lines.push(
+            "3. Use a descriptive filename like `project-foo.md` or `preferences.md`".to_string(),
+        );
+        lines.push("4. Format the content clearly with headers and bullet points".to_string());
+        lines.push(String::new());
+        lines.push("DO ask before saving memories. DON'T save trivial information.".to_string());
+        lines.push(String::new());
+
+        // Search for relevant memories if we have a user message
+        if let Some(query) = user_message {
+            match MemoryIndex::open() {
+                Ok(index) => {
+                    // First ensure memories are indexed
+                    // Note: We don't call index_user_memories here because it's mutable
+                    // That should be done at startup or when files change
+
+                    match index.search(ch, uid, query, 3) {
+                        Ok(results) if !results.is_empty() => {
+                            lines.push("### Relevant Memories".to_string());
+                            lines.push(
+                                "The following memories may be relevant to this conversation:"
+                                    .to_string(),
+                            );
+                            lines.push(String::new());
+
+                            for result in results {
+                                if result.score > 0.3 {
+                                    // Only include reasonably relevant results
+                                    lines.push(format!("**From {}:**", result.path));
+                                    lines.push(result.chunk);
+                                    lines.push(String::new());
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // No relevant memories found, that's fine
+                        }
+                        Err(e) => {
+                            warn!("Failed to search memories: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to open memory index: {}", e);
+                }
+            }
+        }
     }
 
     Ok(lines.join("\n"))

@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::claude;
 use crate::config::{self, SignalConfig};
+use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
 use crate::setup;
@@ -381,8 +382,12 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
     let existing_session = store.sessions.get(&format!("signal:{}", sender)).cloned();
 
     // Query Claude with context (and resume if we have a session)
-    let context_prompt =
-        onboarding::build_context_prompt_for_user(Some("Signal"), Some("signal"), Some(&sender))?;
+    let context_prompt = onboarding::build_context_prompt_for_user(
+        Some("Signal"),
+        Some("signal"),
+        Some(&sender),
+        Some(&text),
+    )?;
     let options = claude::QueryOptions {
         system_prompt: Some(context_prompt),
         resume_session: existing_session,
@@ -412,7 +417,27 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
 
     send_message(client, account, &sender, &response).await?;
 
+    // Re-index memories in case Claude saved new ones
+    reindex_user_memories("signal", &sender);
+
     Ok(())
+}
+
+/// Re-index memories for a user (called after Claude responds)
+fn reindex_user_memories(channel: &str, user_id: &str) {
+    match MemoryIndex::open() {
+        Ok(mut index) => {
+            if let Err(e) = index.index_user_memories(channel, user_id) {
+                warn!(
+                    "Failed to re-index memories for {}:{}: {}",
+                    channel, user_id, e
+                );
+            }
+        }
+        Err(e) => {
+            warn!("Failed to open memory index: {}", e);
+        }
+    }
 }
 
 /// Handle onboarding flow (per-user)

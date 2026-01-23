@@ -44,3 +44,13 @@ which = "7"
 
 # JSON-RPC client (for signal-cli)
 jsonrpsee = { version = "0.24", features = ["async-client", "http-client"] }
+
+# Vector embeddings (local ONNX inference)
+fastembed = "5"
+
+# SQLite with vector search
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlite-vec = "0.1.7-alpha.2"
+
+# For zero-copy vector conversion
+zerocopy = { version = "0.8", features = ["derive"] }

@@ -258,6 +258,34 @@ pub fn build_context_prompt_for_user(
                 .to_string(),
         );
         lines.push(String::new());
+
+        // Channel-specific formatting
+        lines.push("### Text Formatting".to_string());
+        match channel_name.to_lowercase().as_str() {
+            "signal" => {
+                lines.push(
+                    "Do NOT use any text formatting (no markdown, no asterisks, no underscores)."
+                        .to_string(),
+                );
+                lines.push(
+                    "Signal requires special APIs for formatting that aren't available here."
+                        .to_string(),
+                );
+                lines.push("Just use plain text.".to_string());
+            }
+            "telegram" => {
+                lines.push("Telegram supports standard markdown:".to_string());
+                lines.push("- **bold** or __bold__".to_string());
+                lines.push("- *italic* or _italic_".to_string());
+                lines.push("- ~strikethrough~".to_string());
+                lines.push("- `monospace` and ```code blocks```".to_string());
+                lines.push("- [links](url)".to_string());
+            }
+            _ => {
+                lines.push("Use plain text formatting.".to_string());
+            }
+        }
+        lines.push(String::new());
     }
 
     // Skills section

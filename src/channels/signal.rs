@@ -370,9 +370,9 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
         return Ok(());
     }
 
-    // Check if onboarding is complete
-    if !onboarding::is_complete()? {
-        let response = handle_onboarding(&text).await?;
+    // Check if onboarding is complete for this user
+    if !onboarding::is_complete_for_user("signal", &sender)? {
+        let response = handle_onboarding("signal", &sender, &text).await?;
         send_message(client, account, &sender, &response).await?;
         return Ok(());
     }
@@ -381,7 +381,8 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
     let existing_session = store.sessions.get(&format!("signal:{}", sender)).cloned();
 
     // Query Claude with context (and resume if we have a session)
-    let context_prompt = onboarding::build_context_prompt(Some("Signal"))?;
+    let context_prompt =
+        onboarding::build_context_prompt_for_user(Some("Signal"), Some("signal"), Some(&sender))?;
     let options = claude::QueryOptions {
         system_prompt: Some(context_prompt),
         resume_session: existing_session,
@@ -414,13 +415,13 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
     Ok(())
 }
 
-/// Handle onboarding flow
-async fn handle_onboarding(message: &str) -> Result<String> {
-    let system_prompt = onboarding::system_prompt()?;
+/// Handle onboarding flow (per-user)
+async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> Result<String> {
+    let system_prompt = onboarding::system_prompt_for_user(channel, user_id)?;
 
     let options = claude::QueryOptions {
         system_prompt: Some(system_prompt),
-        skip_permissions: true,
+        skip_permissions: true, // Allow writing IDENTITY.md and USER.md
         ..Default::default()
     };
 

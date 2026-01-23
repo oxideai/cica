@@ -48,7 +48,7 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
 
     if !store.is_approved("telegram", &user_id) {
         // Create or get existing pairing request
-        let (code, is_new) =
+        let (code, _is_new) =
             store.get_or_create_pending("telegram", &user_id, username, display_name)?;
 
         let response = format!(
@@ -70,15 +70,15 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
 
     info!("Message from {}: {}", user_id, text);
 
-    // Check if onboarding is complete
-    if !onboarding::is_complete()? {
+    // Check if onboarding is complete for this user
+    if !onboarding::is_complete_for_user("telegram", &user_id)? {
         // /start triggers onboarding greeting, not treated as an answer
         let message = if text == "/start" { "hi" } else { text };
 
         // Show typing indicator
         let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
 
-        let response = handle_onboarding(message).await?;
+        let response = handle_onboarding("telegram", &user_id, message).await?;
         bot.send_message(msg.chat.id, response).await?;
         return Ok(());
     }
@@ -98,7 +98,11 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
         .cloned();
 
     // Query Claude with context (and resume if we have a session)
-    let context_prompt = onboarding::build_context_prompt(Some("Telegram"))?;
+    let context_prompt = onboarding::build_context_prompt_for_user(
+        Some("Telegram"),
+        Some("telegram"),
+        Some(&user_id),
+    )?;
     let session_key = format!("telegram:{}", user_id);
 
     let (response, session_id) = {
@@ -160,13 +164,13 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
     Ok(())
 }
 
-/// Handle onboarding flow - Claude drives the conversation
-async fn handle_onboarding(message: &str) -> Result<String> {
-    let system_prompt = onboarding::system_prompt()?;
+/// Handle onboarding flow - Claude drives the conversation (per-user)
+async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> Result<String> {
+    let system_prompt = onboarding::system_prompt_for_user(channel, user_id)?;
 
     let options = claude::QueryOptions {
         system_prompt: Some(system_prompt),
-        skip_permissions: true, // Allow writing IDENTITY.md
+        skip_permissions: true, // Allow writing IDENTITY.md and USER.md
         ..Default::default()
     };
 

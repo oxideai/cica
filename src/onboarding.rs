@@ -1,8 +1,16 @@
 //! Onboarding flow for new users
 //!
 //! Two phases:
-//! 1. Agent identity → writes IDENTITY.md
-//! 2. User profile → writes USER.md (must get name at minimum)
+//! 1. Agent identity (per-user) → writes users/{channel}_{user_id}/IDENTITY.md
+//! 2. User profile (per-user) → writes users/{channel}_{user_id}/USER.md
+//!
+//! Per-user files (in users/{channel}_{user_id}/):
+//! - IDENTITY.md - who the assistant is for this user
+//! - USER.md - info about this user
+//!
+//! Shared files (configured by owner):
+//! - PERSONA.md - general behavior guidelines
+//! - SKILLS.md - capabilities
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -12,55 +20,83 @@ use crate::config;
 /// Onboarding phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Need to configure agent identity
+    /// Need to configure agent identity (first user only)
     Identity,
-    /// Need to learn about the user
+    /// Need to learn about this specific user
     User,
-    /// Onboarding complete
+    /// Onboarding complete for this user
     Complete,
 }
 
-/// Get the path to IDENTITY.md
-pub fn identity_path() -> Result<PathBuf> {
-    Ok(config::paths()?.base.join("IDENTITY.md"))
+/// Get the user directory path for a specific user
+pub fn user_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
+    let dir = config::paths()?
+        .base
+        .join("users")
+        .join(format!("{}_{}", channel, user_id));
+    Ok(dir)
 }
 
-/// Get the path to USER.md
-pub fn user_path() -> Result<PathBuf> {
-    Ok(config::paths()?.base.join("USER.md"))
+/// Get the path to a user's IDENTITY.md
+pub fn identity_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
+    Ok(user_dir(channel, user_id)?.join("IDENTITY.md"))
 }
 
-/// Get current onboarding phase
-pub fn current_phase() -> Result<Phase> {
-    if !identity_path()?.exists() {
+/// Get the path to a user's USER.md
+pub fn user_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
+    Ok(user_dir(channel, user_id)?.join("USER.md"))
+}
+
+/// Check if a user's identity is configured
+pub fn is_identity_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
+    Ok(identity_path_for_user(channel, user_id)?.exists())
+}
+
+/// Check if a user's profile is configured
+pub fn is_user_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
+    Ok(user_path_for_user(channel, user_id)?.exists())
+}
+
+/// Get current onboarding phase for a specific user
+pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
+    // First check if this user's identity is set up
+    if !identity_path_for_user(channel, user_id)?.exists() {
         return Ok(Phase::Identity);
     }
-    if !user_path()?.exists() {
+
+    // Then check if this user's profile is complete
+    if !user_path_for_user(channel, user_id)?.exists() {
         return Ok(Phase::User);
     }
+
     Ok(Phase::Complete)
 }
 
-/// Check if onboarding is complete
-pub fn is_complete() -> Result<bool> {
-    Ok(current_phase()? == Phase::Complete)
+/// Check if onboarding is complete for a user
+pub fn is_complete_for_user(channel: &str, user_id: &str) -> Result<bool> {
+    Ok(current_phase_for_user(channel, user_id)? == Phase::Complete)
 }
 
-/// Get the system prompt for the current onboarding phase
-pub fn system_prompt() -> Result<String> {
-    match current_phase()? {
-        Phase::Identity => identity_system_prompt(),
-        Phase::User => user_system_prompt(),
+/// Get the system prompt for a specific user's onboarding phase
+pub fn system_prompt_for_user(channel: &str, user_id: &str) -> Result<String> {
+    match current_phase_for_user(channel, user_id)? {
+        Phase::Identity => identity_system_prompt(channel, user_id),
+        Phase::User => user_system_prompt(channel, user_id),
         Phase::Complete => Ok(String::new()),
     }
 }
 
-/// System prompt for identity phase
-fn identity_system_prompt() -> Result<String> {
-    let path = identity_path()?;
+/// System prompt for identity phase (per-user)
+fn identity_system_prompt(channel: &str, user_id: &str) -> Result<String> {
+    let path = identity_path_for_user(channel, user_id)?;
+
+    // Ensure user directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     Ok(format!(
-        r#"You are a new AI assistant being set up by your owner. You need to learn your identity before you can help them.
+        r#"You are a new AI assistant being set up by a user. You need to learn your identity before you can help them.
 
 On the FIRST message, introduce yourself briefly and ask ALL THREE questions at once:
 1. What's my name?
@@ -93,11 +129,10 @@ IMPORTANT: Do NOT write the file until you have all three answers."#,
     ))
 }
 
-/// System prompt for user profile phase
-fn user_system_prompt() -> Result<String> {
-    let identity_path = identity_path()?;
-    let user_path = user_path()?;
-
+/// System prompt for user profile phase (per-user)
+fn user_system_prompt(channel: &str, user_id: &str) -> Result<String> {
+    let identity_path = identity_path_for_user(channel, user_id)?;
+    let user_path = user_path_for_user(channel, user_id)?;
     let identity = std::fs::read_to_string(&identity_path).unwrap_or_default();
 
     Ok(format!(
@@ -105,46 +140,44 @@ fn user_system_prompt() -> Result<String> {
 
 {}
 
-You just asked the user to tell you about themselves. You need to learn their name - that's the only required thing.
+You just finished setting up your identity. Now ask the user to tell you about themselves.
 
-When they respond:
-1. Extract their name (REQUIRED - this is the only thing you must have)
-2. Note any other info they volunteered (pronouns, timezone, location, job, interests, etc.)
-3. Immediately write the profile and move on - do NOT ask follow-up questions
+Keep it casual and short. Example:
+"Now tell me about yourself - the more I know about you the better I'll be able to help, so don't be shy!"
 
-Write their profile to: {}
+When they respond, write their info to: {}
 
-Format (only include fields they actually mentioned):
+Use this format:
 ```
 # USER.md - User Profile
 
 - Name: [their name]
-- Pronouns: [if they mentioned]
-- Location: [if they mentioned]
-- Timezone: [if they mentioned]
-- Notes: [anything else they shared]
+- [any other info they shared, one item per line]
 ```
 
-After writing, say something brief like "Nice to meet you, [name]! What can I help you with?"
+After writing the file, greet them by name and ask how you can help.
 
-IMPORTANT: Name is the ONLY required field. Do NOT ask for anything else. Just save what they shared and move on."#,
+IMPORTANT:
+- Name is required, but accept whatever else they share
+- Do NOT ask follow-up questions about their profile
+- After saving, just move on to helping them"#,
         identity,
         user_path.display()
     ))
 }
 
-/// Load identity content
-pub fn load_identity() -> Result<Option<String>> {
-    let path = identity_path()?;
+/// Load identity content for a specific user
+pub fn load_identity_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
+    let path = identity_path_for_user(channel, user_id)?;
     if !path.exists() {
         return Ok(None);
     }
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-/// Load user profile content
-pub fn load_user() -> Result<Option<String>> {
-    let path = user_path()?;
+/// Load user profile content for a specific user
+pub fn load_user_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
+    let path = user_path_for_user(channel, user_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -160,13 +193,22 @@ pub fn load_persona() -> Result<Option<String>> {
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-/// Build system prompt with all context for normal operation
-pub fn build_context_prompt(channel: Option<&str>) -> Result<String> {
+/// Build system prompt with all context for a specific user
+pub fn build_context_prompt_for_user(
+    channel_display: Option<&str>,
+    channel_id: Option<&str>,
+    user_id: Option<&str>,
+) -> Result<String> {
     let paths = config::paths()?;
     let mut lines = Vec::new();
 
-    // Load identity to get assistant name
-    let identity = load_identity()?;
+    // Load per-user identity
+    let identity = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
+        load_identity_for_user(ch, uid)?
+    } else {
+        None
+    };
+
     let assistant_name = identity
         .as_ref()
         .and_then(|content| {
@@ -177,8 +219,17 @@ pub fn build_context_prompt(channel: Option<&str>) -> Result<String> {
         })
         .unwrap_or_else(|| "Cica".to_string());
 
+    // Load per-user profile
+    let user_content = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
+        load_user_for_user(ch, uid)?
+    } else {
+        None
+    };
+
     // Core identity with channel info
-    let channel_info = channel.map(|c| format!(" (via {})", c)).unwrap_or_default();
+    let channel_info = channel_display
+        .map(|c| format!(" (via {})", c))
+        .unwrap_or_default();
     lines.push(format!(
         "You are {}, a personal AI assistant. You are chatting with your user via a messaging app{}.",
         assistant_name, channel_info
@@ -196,7 +247,7 @@ pub fn build_context_prompt(channel: Option<&str>) -> Result<String> {
     lines.push(String::new());
 
     // Channel-specific guidance
-    if let Some(channel_name) = channel {
+    if let Some(channel_name) = channel_display {
         lines.push("## Messaging Channel".to_string());
         lines.push(format!(
             "You are currently communicating via {}.",
@@ -239,7 +290,7 @@ pub fn build_context_prompt(channel: Option<&str>) -> Result<String> {
         lines.push(String::new());
     }
 
-    if let Some(content) = load_user()? {
+    if let Some(content) = user_content {
         lines.push("## USER.md".to_string());
         lines.push(content);
         lines.push(String::new());

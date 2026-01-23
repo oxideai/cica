@@ -23,6 +23,17 @@ pub struct PendingRequest {
     pub created_at: u64, // Unix timestamp
 }
 
+/// Per-user profile data
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserProfile {
+    pub name: Option<String>,
+    pub pronouns: Option<String>,
+    pub location: Option<String>,
+    pub timezone: Option<String>,
+    pub notes: Option<String>,
+    pub onboarding_complete: bool,
+}
+
 /// Storage for all pairing data
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PairingStore {
@@ -30,6 +41,8 @@ pub struct PairingStore {
     pub approved: HashMap<String, Vec<String>>, // channel -> [user_ids]
     #[serde(default)]
     pub sessions: HashMap<String, String>, // "channel:user_id" -> session_id (UUID)
+    #[serde(default)]
+    pub user_profiles: HashMap<String, UserProfile>, // "channel:user_id" -> profile
 }
 
 impl PairingStore {
@@ -174,6 +187,37 @@ impl PairingStore {
         let key = format!("{}:{}", channel, user_id);
         self.sessions.remove(&key);
         self.save()
+    }
+
+    /// Get a user's profile
+    pub fn get_user_profile(&self, channel: &str, user_id: &str) -> Option<&UserProfile> {
+        let key = format!("{}:{}", channel, user_id);
+        self.user_profiles.get(&key)
+    }
+
+    /// Get or create a user's profile
+    pub fn get_or_create_user_profile(&mut self, channel: &str, user_id: &str) -> &mut UserProfile {
+        let key = format!("{}:{}", channel, user_id);
+        self.user_profiles.entry(key).or_default()
+    }
+
+    /// Update a user's profile
+    pub fn update_user_profile(
+        &mut self,
+        channel: &str,
+        user_id: &str,
+        profile: UserProfile,
+    ) -> Result<()> {
+        let key = format!("{}:{}", channel, user_id);
+        self.user_profiles.insert(key, profile);
+        self.save()
+    }
+
+    /// Check if a user's onboarding is complete
+    pub fn is_user_onboarded(&self, channel: &str, user_id: &str) -> bool {
+        self.get_user_profile(channel, user_id)
+            .map(|p| p.onboarding_complete)
+            .unwrap_or(false)
     }
 }
 

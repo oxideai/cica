@@ -435,28 +435,54 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
         Some(&text),
     )?;
     let options = claude::QueryOptions {
-        system_prompt: Some(context_prompt),
+        system_prompt: Some(context_prompt.clone()),
         resume_session: existing_session,
         skip_permissions: true,
         ..Default::default()
     };
 
+    let session_key = format!("signal:{}", sender);
     let (response, session_id) = match claude::query_with_options(&text, options).await {
         Ok((response, session_id)) => (response, session_id),
         Err(e) => {
-            warn!("Claude error: {}", e);
-            (
-                format!("Sorry, I encountered an error: {}", e),
-                String::new(),
-            )
+            let error_msg = e.to_string();
+            // If session not found, clear it and retry without resuming
+            if error_msg.contains("No conversation found with session ID") {
+                warn!("Session expired, starting fresh conversation");
+                store.sessions.remove(&session_key);
+                store.save()?;
+
+                let retry_options = claude::QueryOptions {
+                    system_prompt: Some(context_prompt),
+                    resume_session: None,
+                    skip_permissions: true,
+                    ..Default::default()
+                };
+
+                match claude::query_with_options(&text, retry_options).await {
+                    Ok((response, session_id)) => (response, session_id),
+                    Err(e) => {
+                        warn!("Claude error on retry: {}", e);
+                        (
+                            format!("Sorry, I encountered an error: {}", e),
+                            String::new(),
+                        )
+                    }
+                }
+            } else {
+                warn!("Claude error: {}", e);
+                (
+                    format!("Sorry, I encountered an error: {}", e),
+                    String::new(),
+                )
+            }
         }
     };
 
     // Save session ID for future messages
     if !session_id.is_empty() {
-        let key = format!("signal:{}", sender);
-        if store.sessions.get(&key).map(|s| s.as_str()) != Some(&session_id) {
-            store.sessions.insert(key, session_id);
+        if store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&session_id) {
+            store.sessions.insert(session_key, session_id);
             store.save()?;
         }
     }

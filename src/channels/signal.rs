@@ -15,9 +15,8 @@ use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::claude;
+use super::{handle_onboarding, query_claude_with_session, reindex_user_memories};
 use crate::config::{self, SignalConfig};
-use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
 use crate::setup;
@@ -424,9 +423,6 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
     // Start periodic typing indicator
     let typing_cancel = start_typing_indicator(client.clone(), sender.clone());
 
-    // Check if we have an existing session to resume
-    let existing_session = store.sessions.get(&format!("signal:{}", sender)).cloned();
-
     // Query Claude with context (and resume if we have a session)
     let context_prompt = onboarding::build_context_prompt_for_user(
         Some("Signal"),
@@ -434,58 +430,9 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
         Some(&sender),
         Some(&text),
     )?;
-    let options = claude::QueryOptions {
-        system_prompt: Some(context_prompt.clone()),
-        resume_session: existing_session,
-        skip_permissions: true,
-        ..Default::default()
-    };
 
-    let session_key = format!("signal:{}", sender);
-    let (response, session_id) = match claude::query_with_options(&text, options).await {
-        Ok((response, session_id)) => (response, session_id),
-        Err(e) => {
-            let error_msg = e.to_string();
-            // If session not found, clear it and retry without resuming
-            if error_msg.contains("No conversation found with session ID") {
-                warn!("Session expired, starting fresh conversation");
-                store.sessions.remove(&session_key);
-                store.save()?;
-
-                let retry_options = claude::QueryOptions {
-                    system_prompt: Some(context_prompt),
-                    resume_session: None,
-                    skip_permissions: true,
-                    ..Default::default()
-                };
-
-                match claude::query_with_options(&text, retry_options).await {
-                    Ok((response, session_id)) => (response, session_id),
-                    Err(e) => {
-                        warn!("Claude error on retry: {}", e);
-                        (
-                            format!("Sorry, I encountered an error: {}", e),
-                            String::new(),
-                        )
-                    }
-                }
-            } else {
-                warn!("Claude error: {}", e);
-                (
-                    format!("Sorry, I encountered an error: {}", e),
-                    String::new(),
-                )
-            }
-        }
-    };
-
-    // Save session ID for future messages
-    if !session_id.is_empty() {
-        if store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&session_id) {
-            store.sessions.insert(session_key, session_id);
-            store.save()?;
-        }
-    }
+    let (response, _session_id) =
+        query_claude_with_session(&mut store, "signal", &sender, &text, context_prompt).await?;
 
     // Stop typing indicator before sending response
     drop(typing_cancel);
@@ -496,37 +443,6 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
     reindex_user_memories("signal", &sender);
 
     Ok(())
-}
-
-/// Re-index memories for a user (called after Claude responds)
-fn reindex_user_memories(channel: &str, user_id: &str) {
-    match MemoryIndex::open() {
-        Ok(mut index) => {
-            if let Err(e) = index.index_user_memories(channel, user_id) {
-                warn!(
-                    "Failed to re-index memories for {}:{}: {}",
-                    channel, user_id, e
-                );
-            }
-        }
-        Err(e) => {
-            warn!("Failed to open memory index: {}", e);
-        }
-    }
-}
-
-/// Handle onboarding flow (per-user)
-async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> Result<String> {
-    let system_prompt = onboarding::system_prompt_for_user(channel, user_id)?;
-
-    let options = claude::QueryOptions {
-        system_prompt: Some(system_prompt),
-        skip_permissions: true, // Allow writing IDENTITY.md and USER.md
-        ..Default::default()
-    };
-
-    let (response, _) = claude::query_with_options(message, options).await?;
-    Ok(response)
 }
 
 /// Result of registration attempt

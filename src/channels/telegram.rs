@@ -1,6 +1,8 @@
 use anyhow::Result;
+use std::time::Duration;
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::claude;
@@ -8,6 +10,32 @@ use crate::config::TelegramConfig;
 use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
+
+/// Start sending periodic typing indicators until cancelled.
+/// Returns a sender that, when dropped or sent to, stops the typing loop.
+fn start_typing_indicator(bot: Bot, chat_id: ChatId) -> oneshot::Sender<()> {
+    let (cancel_tx, mut cancel_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        loop {
+            // Send typing indicator
+            let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+
+            // Wait 4 seconds or until cancelled (typing indicator lasts ~5s)
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(4)) => {
+                    // Continue loop, send typing again
+                }
+                _ = &mut cancel_rx => {
+                    // Cancelled, stop the loop
+                    break;
+                }
+            }
+        }
+    });
+
+    cancel_tx
+}
 
 /// Validate a Telegram bot token by calling getMe
 /// Returns the bot username on success
@@ -89,8 +117,8 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
         return Ok(());
     }
 
-    // Show typing indicator
-    let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+    // Start periodic typing indicator (will run until we drop the cancel handle)
+    let typing_cancel = start_typing_indicator(bot.clone(), msg.chat.id);
 
     // Check if we have an existing session to resume
     let existing_session = store
@@ -160,6 +188,9 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
             store.save()?;
         }
     }
+
+    // Stop typing indicator before sending response
+    drop(typing_cancel);
 
     bot.send_message(msg.chat.id, response).await?;
 

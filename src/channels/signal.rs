@@ -8,8 +8,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -251,14 +253,16 @@ pub async fn run(config: SignalConfig) -> Result<()> {
     let mut daemon = SignalDaemon::start(&config.phone_number).await?;
 
     // Create JSON-RPC client
-    let client = HttpClientBuilder::default()
-        .build(&daemon.rpc_url())
-        .context("Failed to create JSON-RPC client")?;
+    let client = Arc::new(
+        HttpClientBuilder::default()
+            .build(&daemon.rpc_url())
+            .context("Failed to create JSON-RPC client")?,
+    );
 
     info!("Signal bot running. Listening for messages...");
 
     // Set up graceful shutdown
-    let result = run_message_loop(&client, &config.phone_number).await;
+    let result = run_message_loop(client, &config.phone_number).await;
 
     // Shutdown daemon gracefully
     daemon.shutdown().await;
@@ -267,12 +271,12 @@ pub async fn run(config: SignalConfig) -> Result<()> {
 }
 
 /// Main message polling loop
-async fn run_message_loop(client: &HttpClient, phone_number: &str) -> Result<()> {
+async fn run_message_loop(client: Arc<HttpClient>, phone_number: &str) -> Result<()> {
     loop {
-        match receive_messages(client, phone_number).await {
+        match receive_messages(&client, phone_number).await {
             Ok(messages) => {
                 for msg in messages {
-                    if let Err(e) = handle_message(client, phone_number, msg).await {
+                    if let Err(e) = handle_message(client.clone(), phone_number, msg).await {
                         error!("Error handling message: {}", e);
                     }
                 }
@@ -324,8 +328,47 @@ async fn send_message(
     Ok(())
 }
 
+/// Send a typing indicator to a recipient
+async fn send_typing(client: &HttpClient, recipient: &str) -> Result<()> {
+    let mut params = ObjectParams::new();
+    params.insert("recipient", vec![recipient])?;
+
+    let _: Value = client
+        .request("sendTyping", params)
+        .await
+        .context("Failed to send typing indicator")?;
+
+    Ok(())
+}
+
+/// Start sending periodic typing indicators until cancelled.
+/// Returns a sender that, when dropped or sent to, stops the typing loop.
+fn start_typing_indicator(client: Arc<HttpClient>, recipient: String) -> oneshot::Sender<()> {
+    let (cancel_tx, mut cancel_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        loop {
+            // Send typing indicator (lasts 15 seconds on Signal)
+            let _ = send_typing(&client, &recipient).await;
+
+            // Wait 10 seconds or until cancelled
+            tokio::select! {
+                _ = sleep(Duration::from_secs(10)) => {
+                    // Continue loop, send typing again
+                }
+                _ = &mut cancel_rx => {
+                    // Cancelled, stop the loop
+                    break;
+                }
+            }
+        }
+    });
+
+    cancel_tx
+}
+
 /// Handle an incoming message
-async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) -> Result<()> {
+async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessage) -> Result<()> {
     let envelope = match msg.envelope {
         Some(e) => e,
         None => return Ok(()),
@@ -367,16 +410,19 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
             code, code
         );
 
-        send_message(client, account, &sender, &response).await?;
+        send_message(&client, account, &sender, &response).await?;
         return Ok(());
     }
 
     // Check if onboarding is complete for this user
     if !onboarding::is_complete_for_user("signal", &sender)? {
         let response = handle_onboarding("signal", &sender, &text).await?;
-        send_message(client, account, &sender, &response).await?;
+        send_message(&client, account, &sender, &response).await?;
         return Ok(());
     }
+
+    // Start periodic typing indicator
+    let typing_cancel = start_typing_indicator(client.clone(), sender.clone());
 
     // Check if we have an existing session to resume
     let existing_session = store.sessions.get(&format!("signal:{}", sender)).cloned();
@@ -415,7 +461,10 @@ async fn handle_message(client: &HttpClient, account: &str, msg: SignalMessage) 
         }
     }
 
-    send_message(client, account, &sender, &response).await?;
+    // Stop typing indicator before sending response
+    drop(typing_cancel);
+
+    send_message(&client, account, &sender, &response).await?;
 
     // Re-index memories in case Claude saved new ones
     reindex_user_memories("signal", &sender);

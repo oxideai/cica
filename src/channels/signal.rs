@@ -15,7 +15,10 @@ use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use super::{handle_onboarding, query_claude_with_session, reindex_user_memories};
+use super::{
+    CommandResult, handle_onboarding, process_command, query_claude_with_session,
+    reindex_user_memories,
+};
 use crate::config::{self, SignalConfig};
 use crate::onboarding;
 use crate::pairing::PairingStore;
@@ -416,6 +419,14 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
     // Check if onboarding is complete for this user
     if !onboarding::is_complete_for_user("signal", &sender)? {
         let response = handle_onboarding("signal", &sender, &text).await?;
+        send_message(&client, account, &sender, &response).await?;
+        return Ok(());
+    }
+
+    // Check for commands
+    if let CommandResult::Response(response) =
+        process_command(&mut store, "signal", &sender, &text)?
+    {
         send_message(&client, account, &sender, &response).await?;
         return Ok(());
     }

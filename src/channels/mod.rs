@@ -9,6 +9,50 @@ use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
 
+/// Result of processing a command
+pub enum CommandResult {
+    /// Not a command, continue with normal message processing
+    NotACommand,
+    /// Command was handled, return this response to the user
+    Response(String),
+}
+
+/// Available commands
+const COMMANDS: &[(&str, &str)] = &[
+    ("/commands", "Show available commands"),
+    ("/new", "Start a new conversation"),
+];
+
+/// Process a command if the message is one.
+/// Returns None if the message is not a command.
+pub fn process_command(
+    store: &mut PairingStore,
+    channel: &str,
+    user_id: &str,
+    text: &str,
+) -> Result<CommandResult> {
+    let text = text.trim();
+
+    if text == "/commands" {
+        let mut response = String::from("Available commands:\n");
+        for (cmd, desc) in COMMANDS {
+            response.push_str(&format!("\n{} - {}", cmd, desc));
+        }
+        return Ok(CommandResult::Response(response));
+    }
+
+    if text == "/new" {
+        let session_key = format!("{}:{}", channel, user_id);
+        store.sessions.remove(&session_key);
+        store.save()?;
+        return Ok(CommandResult::Response(
+            "Starting fresh! Our previous conversation has been cleared.".to_string(),
+        ));
+    }
+
+    Ok(CommandResult::NotACommand)
+}
+
 /// Query Claude with automatic session recovery.
 ///
 /// If the session has expired, clears it and retries with a fresh conversation.

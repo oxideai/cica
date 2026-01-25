@@ -5,7 +5,10 @@ use teloxide::types::ChatAction;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use super::{handle_onboarding, query_claude_with_session, reindex_user_memories};
+use super::{
+    CommandResult, handle_onboarding, process_command, query_claude_with_session,
+    reindex_user_memories,
+};
 use crate::config::TelegramConfig;
 use crate::onboarding;
 use crate::pairing::PairingStore;
@@ -113,6 +116,14 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
 
     // Ignore /start after onboarding (already set up)
     if text == "/start" {
+        return Ok(());
+    }
+
+    // Check for commands
+    if let CommandResult::Response(response) =
+        process_command(&mut store, "telegram", &user_id, text)?
+    {
+        bot.send_message(msg.chat.id, response).await?;
         return Ok(());
     }
 

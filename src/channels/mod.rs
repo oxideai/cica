@@ -68,11 +68,11 @@ pub async fn query_claude_with_session(
     };
 
     // Save session ID for future messages
-    if !session_id.is_empty() {
-        if store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&session_id) {
-            store.sessions.insert(session_key, session_id.clone());
-            store.save()?;
-        }
+    if !session_id.is_empty()
+        && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&session_id)
+    {
+        store.sessions.insert(session_key, session_id.clone());
+        store.save()?;
     }
 
     Ok((response, session_id))

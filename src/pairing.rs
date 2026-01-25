@@ -161,12 +161,14 @@ impl PairingStore {
     }
 
     /// List all pending requests
+    #[allow(dead_code)]
     pub fn list_pending(&mut self) -> Vec<&PendingRequest> {
         self.prune_expired();
         self.pending.iter().collect()
     }
 
     /// Get or create a session ID for a user
+    #[allow(dead_code)]
     pub fn get_or_create_session(&mut self, channel: &str, user_id: &str) -> Result<String> {
         let key = format!("{}:{}", channel, user_id);
 
@@ -183,6 +185,7 @@ impl PairingStore {
     }
 
     /// Reset a user's session (start fresh conversation)
+    #[allow(dead_code)]
     pub fn reset_session(&mut self, channel: &str, user_id: &str) -> Result<()> {
         let key = format!("{}:{}", channel, user_id);
         self.sessions.remove(&key);
@@ -190,18 +193,21 @@ impl PairingStore {
     }
 
     /// Get a user's profile
+    #[allow(dead_code)]
     pub fn get_user_profile(&self, channel: &str, user_id: &str) -> Option<&UserProfile> {
         let key = format!("{}:{}", channel, user_id);
         self.user_profiles.get(&key)
     }
 
     /// Get or create a user's profile
+    #[allow(dead_code)]
     pub fn get_or_create_user_profile(&mut self, channel: &str, user_id: &str) -> &mut UserProfile {
         let key = format!("{}:{}", channel, user_id);
         self.user_profiles.entry(key).or_default()
     }
 
     /// Update a user's profile
+    #[allow(dead_code)]
     pub fn update_user_profile(
         &mut self,
         channel: &str,
@@ -214,6 +220,7 @@ impl PairingStore {
     }
 
     /// Check if a user's onboarding is complete
+    #[allow(dead_code)]
     pub fn is_user_onboarded(&self, channel: &str, user_id: &str) -> bool {
         self.get_user_profile(channel, user_id)
             .map(|p| p.onboarding_complete)
@@ -284,6 +291,7 @@ fn now_timestamp() -> u64 {
 }
 
 /// Generate a UUID v4 (random)
+#[allow(dead_code)]
 fn generate_uuid() -> String {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

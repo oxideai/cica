@@ -17,9 +17,14 @@ static SQLITE_VEC_INIT: Once = Once::new();
 
 fn ensure_sqlite_vec_init() {
     SQLITE_VEC_INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite_vec::sqlite3_vec_init as *const ())));
     });
 }
 
@@ -327,6 +332,7 @@ impl MemoryIndex {
     }
 
     /// Get all memory file paths for a user (for context building)
+    #[allow(dead_code)]
     pub fn list_memory_files(&self, channel: &str, user_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .db

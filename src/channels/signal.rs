@@ -254,7 +254,7 @@ pub async fn run(config: SignalConfig) -> Result<()> {
     // Create JSON-RPC client
     let client = Arc::new(
         HttpClientBuilder::default()
-            .build(&daemon.rpc_url())
+            .build(daemon.rpc_url())
             .context("Failed to create JSON-RPC client")?,
     );
 

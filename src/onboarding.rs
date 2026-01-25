@@ -52,11 +52,13 @@ pub fn user_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
 }
 
 /// Check if a user's identity is configured
+#[allow(dead_code)]
 pub fn is_identity_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
     Ok(identity_path_for_user(channel, user_id)?.exists())
 }
 
 /// Check if a user's profile is configured
+#[allow(dead_code)]
 pub fn is_user_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
     Ok(user_path_for_user(channel, user_id)?.exists())
 }

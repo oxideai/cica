@@ -33,6 +33,7 @@ pub struct QueryOptions {
 }
 
 /// Query Claude with a prompt and return the response
+#[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
     let (result, _) = query_with_options(prompt, QueryOptions::default()).await?;
     Ok(result)
@@ -139,17 +140,19 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(
             continue;
         }
 
-        if let Ok(response) = serde_json::from_str::<ClaudeResponse>(line) {
-            if response.response_type == "result" {
-                if let Some(result) = response.result {
-                    info!(
-                        "Claude response received ({}ms)",
-                        response.duration_ms.unwrap_or(0)
-                    );
-                    let session_id = response.session_id.unwrap_or_default();
-                    return Ok((result, session_id));
-                }
-            }
+        let Ok(response) = serde_json::from_str::<ClaudeResponse>(line) else {
+            continue;
+        };
+
+        if response.response_type == "result"
+            && let Some(result) = response.result
+        {
+            info!(
+                "Claude response received ({}ms)",
+                response.duration_ms.unwrap_or(0)
+            );
+            let session_id = response.session_id.unwrap_or_default();
+            return Ok((result, session_id));
         }
     }
 

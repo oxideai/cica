@@ -49,6 +49,34 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
     Ok(skills)
 }
 
+/// Parse YAML frontmatter to extract name and description
+fn parse_frontmatter(
+    frontmatter: &str,
+    name: &mut Option<String>,
+    description: &mut Option<String>,
+) {
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("name:") {
+            *name = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
+        } else if let Some(value) = line.strip_prefix("description:") {
+            *description = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
+        }
+    }
+}
+
 /// Parse a SKILL.md file to extract skill metadata
 fn parse_skill(path: &PathBuf) -> Result<Skill> {
     let content = std::fs::read_to_string(path)?;
@@ -57,31 +85,11 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
     let mut name = None;
     let mut description = None;
 
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let frontmatter = &content[3..end + 3];
-
-            for line in frontmatter.lines() {
-                let line = line.trim();
-                if let Some(value) = line.strip_prefix("name:") {
-                    name = Some(
-                        value
-                            .trim()
-                            .trim_matches('"')
-                            .trim_matches('\'')
-                            .to_string(),
-                    );
-                } else if let Some(value) = line.strip_prefix("description:") {
-                    description = Some(
-                        value
-                            .trim()
-                            .trim_matches('"')
-                            .trim_matches('\'')
-                            .to_string(),
-                    );
-                }
-            }
-        }
+    if let Some(stripped) = content.strip_prefix("---")
+        && let Some(end) = stripped.find("---")
+    {
+        let frontmatter = &stripped[..end];
+        parse_frontmatter(frontmatter, &mut name, &mut description);
     }
 
     // Fall back to directory name if no name in frontmatter

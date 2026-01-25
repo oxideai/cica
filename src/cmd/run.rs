@@ -90,7 +90,7 @@ fn index_all_user_memories() {
     };
 
     // Index memories for each approved user
-    for (key, _) in &store.approved {
+    for key in store.approved.keys() {
         // Key format is "channel:user_id"
         let parts: Vec<&str> = key.splitn(2, ':').collect();
         if parts.len() != 2 {

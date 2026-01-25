@@ -8,6 +8,7 @@ Cica brings Claude's capabilities to your messaging apps. It can hold conversati
 
 - **Multi-channel**: Chat via Telegram or Signal
 - **Multi-user**: Each user gets their own agent identity and memory, while skills are shared
+- **Continuous conversations**: Conversations persist across messages, so context is maintained
 - **Memory**: Remembers important things about you across conversations
 - **Skills**: Extensible through custom skills you build together
 - **Self-contained**: All dependencies are managed locally, nothing is installed globally
@@ -58,6 +59,25 @@ cica approve <pairing-code>
 
 # Show where data is stored
 cica paths
+```
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Cica
+        direction LR
+        subgraph Channels
+            TG[Telegram]
+            SG[Signal]
+        end
+        MEM[(Memory)] --> PB
+        SK[Skills] --> PB
+        Channels --> PB[Prompt Builder]
+        PB --> CC[Claude Code]
+    end
+    
+    CC --> Tools[Web / Files / Shell]
 ```
 
 ## License

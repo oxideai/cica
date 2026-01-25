@@ -14,7 +14,7 @@ Cica brings Claude's capabilities to your messaging apps. It can hold conversati
 
 ## Requirements
 
-- macOS or Linux
+- macOS (Apple Silicon) or Linux
 - Claude Code subscription or Anthropic API key
 
 ## Installation

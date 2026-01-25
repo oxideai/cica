@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, ffi::sqlite3_auto_extension};
+use std::ffi::c_char;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once};
 use tracing::{debug, info, warn};
@@ -21,7 +22,7 @@ fn ensure_sqlite_vec_init() {
             *const (),
             unsafe extern "C" fn(
                 *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
+                *mut *mut c_char,
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
         >(sqlite_vec::sqlite3_vec_init as *const ())));

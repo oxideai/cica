@@ -56,6 +56,7 @@ pub async fn run(config: TelegramConfig) -> Result<()> {
     // Register bot commands for the UI menu
     let commands = vec![
         BotCommand::new("new", "Start a new conversation"),
+        BotCommand::new("skills", "List available skills"),
         BotCommand::new("commands", "Show available commands"),
     ];
     if let Err(e) = bot.set_my_commands(commands).await {

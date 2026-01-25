@@ -17,17 +17,35 @@ Cica brings Claude's capabilities to your messaging apps. It can hold conversati
 - macOS or Linux
 - Claude Code subscription or Anthropic API key
 
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dcvz/cica/main/install.sh | sh
+```
+
+Or with Cargo:
+
+```bash
+cargo install --git https://github.com/dcvz/cica
+```
+
+## Building from Source
+
+```bash
+git clone https://github.com/dcvz/cica
+cd cica
+cargo build --release
+./target/release/cica
+```
+
 ## Getting Started
 
 ```bash
-# Build
-cargo build --release
-
 # Run setup wizard
-./target/release/cica init
+cica init
 
 # Start the assistant
-./target/release/cica
+cica
 ```
 
 ## Usage

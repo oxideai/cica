@@ -112,9 +112,10 @@ impl SignalDaemon {
         info!("Starting signal-cli daemon on port {}...", DAEMON_PORT);
 
         // Build JAVA_HOME from java binary path
+        // On macOS, java is at .../Contents/Home/bin/java, so we need to go up 2 levels to get Contents/Home
         let java_home = java
-            .parent()
-            .and_then(|p| p.parent())
+            .parent() // bin
+            .and_then(|p| p.parent()) // Home (on macOS) or jdk root (on Linux)
             .ok_or_else(|| anyhow!("Could not determine JAVA_HOME"))?;
 
         // Ensure data directory exists
@@ -156,7 +157,7 @@ impl SignalDaemon {
             std::fs::write(&pid_file, pid.to_string())?;
         }
 
-        let daemon = Self { process, pid_file };
+        let mut daemon = Self { process, pid_file };
 
         // Wait for daemon to be ready
         daemon.wait_for_ready().await?;
@@ -165,9 +166,28 @@ impl SignalDaemon {
     }
 
     /// Wait for the daemon HTTP server to become available
-    async fn wait_for_ready(&self) -> Result<()> {
+    async fn wait_for_ready(&mut self) -> Result<()> {
         for i in 0..30 {
             sleep(Duration::from_millis(500)).await;
+
+            // Check if process has exited
+            if let Ok(Some(status)) = self.process.try_wait() {
+                // Process exited, try to get stderr
+                let stderr = self.process.stderr.take();
+                let stderr_msg = if let Some(mut stderr) = stderr {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = String::new();
+                    let _ = stderr.read_to_string(&mut buf).await;
+                    buf
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "signal-cli daemon exited with status {}: {}",
+                    status,
+                    stderr_msg.trim()
+                );
+            }
 
             if Self::is_daemon_ready().await {
                 info!("signal-cli daemon is ready");
@@ -417,16 +437,18 @@ async fn handle_message(client: Arc<HttpClient>, account: &str, msg: SignalMessa
     }
 
     // Check if onboarding is complete for this user
-    if !onboarding::is_complete_for_user("signal", &sender)? {
-        let response = handle_onboarding("signal", &sender, &text).await?;
+    let onboarding_complete = onboarding::is_complete_for_user("signal", &sender)?;
+
+    // Check for commands first (works even during onboarding)
+    if let CommandResult::Response(response) =
+        process_command(&mut store, "signal", &sender, &text, onboarding_complete)?
+    {
         send_message(&client, account, &sender, &response).await?;
         return Ok(());
     }
 
-    // Check for commands
-    if let CommandResult::Response(response) =
-        process_command(&mut store, "signal", &sender, &text)?
-    {
+    if !onboarding_complete {
+        let response = handle_onboarding("signal", &sender, &text).await?;
         send_message(&client, account, &sender, &response).await?;
         return Ok(());
     }

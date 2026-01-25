@@ -111,7 +111,16 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
     info!("Message from {}: {}", user_id, text);
 
     // Check if onboarding is complete for this user
-    if !onboarding::is_complete_for_user("telegram", &user_id)? {
+    let onboarding_complete = onboarding::is_complete_for_user("telegram", &user_id)?;
+
+    // Check for commands first (works even during onboarding)
+    let cmd_result = process_command(&mut store, "telegram", &user_id, text, onboarding_complete)?;
+    if let CommandResult::Response(response) = cmd_result {
+        bot.send_message(msg.chat.id, response).await?;
+        return Ok(());
+    }
+
+    if !onboarding_complete {
         // /start triggers onboarding greeting, not treated as an answer
         let message = if text == "/start" { "hi" } else { text };
 
@@ -125,14 +134,6 @@ async fn handle_message(bot: &Bot, msg: &Message) -> Result<()> {
 
     // Ignore /start after onboarding (already set up)
     if text == "/start" {
-        return Ok(());
-    }
-
-    // Check for commands
-    if let CommandResult::Response(response) =
-        process_command(&mut store, "telegram", &user_id, text)?
-    {
-        bot.send_message(msg.chat.id, response).await?;
         return Ok(());
     }
 

@@ -24,12 +24,12 @@ const COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Process a command if the message is one.
-/// Returns None if the message is not a command.
 pub fn process_command(
     store: &mut PairingStore,
     channel: &str,
     user_id: &str,
     text: &str,
+    onboarding_complete: bool,
 ) -> Result<CommandResult> {
     let text = text.trim();
 
@@ -42,6 +42,11 @@ pub fn process_command(
     }
 
     if text == "/new" {
+        if !onboarding_complete {
+            return Ok(CommandResult::Response(
+                "Please complete the onboarding first. Say \"hello\" to get started!".to_string(),
+            ));
+        }
         let session_key = format!("{}:{}", channel, user_id);
         store.sessions.remove(&session_key);
         store.save()?;

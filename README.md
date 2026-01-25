@@ -20,19 +20,19 @@ Cica brings Claude's capabilities to your messaging apps. It can hold conversati
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dcvz/cica/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/oxideai/cica/main/install.sh | sh
 ```
 
 Or with Cargo:
 
 ```bash
-cargo install --git https://github.com/dcvz/cica
+cargo install --git https://github.com/oxideai/cica
 ```
 
 ## Building from Source
 
 ```bash
-git clone https://github.com/dcvz/cica
+git clone https://github.com/oxideai/cica
 cd cica
 cargo build --release
 ./target/release/cica

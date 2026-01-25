@@ -4,7 +4,7 @@ set -e
 # cica installer script
 
 CICA_VERSION="${CICA_VERSION:-latest}"
-CICA_BASE_URL="https://github.com/dcvz/cica/releases"
+CICA_BASE_URL="https://github.com/oxideai/cica/releases"
 
 # Colors for output
 if [ -t 1 ]; then
@@ -71,7 +71,7 @@ should_install() {
 
         # Get latest version from GitHub API
         if command -v curl >/dev/null 2>&1; then
-            LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/dcvz/cica/releases/latest | grep -o '"tag_name": *"v[^"]*"' | sed 's/"tag_name": *"v\([^"]*\)"/\1/' 2>/dev/null || echo "$CURRENT_VERSION")
+            LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/oxideai/cica/releases/latest | grep -o '"tag_name": *"v[^"]*"' | sed 's/"tag_name": *"v\([^"]*\)"/\1/' 2>/dev/null || echo "$CURRENT_VERSION")
         else
             LATEST_VERSION="$CURRENT_VERSION"
         fi
@@ -202,7 +202,7 @@ main() {
    ┌─────────────────────────────────┐
    │  cica - agentic personal        │
    │         assistant               │
-   │  https://github.com/dcvz/cica   │
+   │  https://github.com/oxideai/cica │
    └─────────────────────────────────┘
     "
 

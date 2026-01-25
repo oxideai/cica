@@ -8,6 +8,69 @@ use crate::claude;
 use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
+use crate::skills;
+
+/// Result of processing a command
+pub enum CommandResult {
+    /// Not a command, continue with normal message processing
+    NotACommand,
+    /// Command was handled, return this response to the user
+    Response(String),
+}
+
+/// Available commands
+const COMMANDS: &[(&str, &str)] = &[
+    ("/commands", "Show available commands"),
+    ("/new", "Start a new conversation"),
+    ("/skills", "List available skills"),
+];
+
+/// Process a command if the message is one.
+pub fn process_command(
+    store: &mut PairingStore,
+    channel: &str,
+    user_id: &str,
+    text: &str,
+    onboarding_complete: bool,
+) -> Result<CommandResult> {
+    let text = text.trim();
+
+    if text == "/commands" {
+        let mut response = String::from("Available commands:\n");
+        for (cmd, desc) in COMMANDS {
+            response.push_str(&format!("\n{} - {}", cmd, desc));
+        }
+        return Ok(CommandResult::Response(response));
+    }
+
+    if text == "/new" {
+        if !onboarding_complete {
+            return Ok(CommandResult::Response(
+                "Please complete the onboarding first. Say \"hello\" to get started!".to_string(),
+            ));
+        }
+        let session_key = format!("{}:{}", channel, user_id);
+        store.sessions.remove(&session_key);
+        store.save()?;
+        return Ok(CommandResult::Response(
+            "Starting fresh! Our previous conversation has been cleared.".to_string(),
+        ));
+    }
+
+    if text == "/skills" {
+        let available_skills = skills::discover_skills().unwrap_or_default();
+        if available_skills.is_empty() {
+            return Ok(CommandResult::Response("No skills installed.".to_string()));
+        }
+        let mut response = String::from("Available skills:\n");
+        for skill in available_skills {
+            response.push_str(&format!("\n• {} - {}", skill.name, skill.description));
+        }
+        return Ok(CommandResult::Response(response));
+    }
+
+    Ok(CommandResult::NotACommand)
+}
 
 /// Query Claude with automatic session recovery.
 ///

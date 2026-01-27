@@ -164,12 +164,12 @@ async fn handle_message(
 
     // Download any photos in the message
     let mut image_paths: Vec<PathBuf> = Vec::new();
-    if let Some(photos) = msg.photo() {
-        if let Some(largest) = get_largest_photo(photos) {
-            match download_photo(bot, largest).await {
-                Ok(path) => image_paths.push(path),
-                Err(e) => warn!("Failed to download photo: {}", e),
-            }
+    if let Some(photos) = msg.photo()
+        && let Some(largest) = get_largest_photo(photos)
+    {
+        match download_photo(bot, largest).await {
+            Ok(path) => image_paths.push(path),
+            Err(e) => warn!("Failed to download photo: {}", e),
         }
     }
 

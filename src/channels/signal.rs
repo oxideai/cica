@@ -268,6 +268,7 @@ struct DataMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct Attachment {
     #[serde(rename = "contentType")]
     content_type: Option<String>,

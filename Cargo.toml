@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
 
 # Telegram bot
 teloxide = { version = "0.13", features = ["macros"] }
@@ -55,3 +56,8 @@ sqlite-vec = "0.1.7-alpha.2"
 
 # For zero-copy vector conversion
 zerocopy = { version = "0.8", features = ["derive"] }
+
+# Cron job scheduling
+croner = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

@@ -694,9 +694,19 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         .get(job_id, channel, user_id)
         .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
 
+    // Build context prompt so the job has access to skills, configs, etc.
+    let channel_display = get_channel_info(channel).map(|c| c.display_name);
+    let context_prompt = onboarding::build_context_prompt_for_user(
+        channel_display,
+        Some(channel),
+        Some(user_id),
+        Some(&job.prompt),
+    )?;
+
     let (response, _session_id) = claude::query_with_options(
         &job.prompt,
         QueryOptions {
+            system_prompt: Some(context_prompt),
             skip_permissions: true,
             ..Default::default()
         },

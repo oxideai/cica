@@ -22,7 +22,9 @@ use chrono::{DateTime, Local};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::channels::get_channel_info;
 use crate::claude::{self, QueryOptions};
+use crate::onboarding;
 
 /// Configuration for the cron service.
 #[derive(Clone)]
@@ -239,15 +241,30 @@ async fn execute_job<C: Clock>(
         let _ = store.save();
     }
 
+    // Build context prompt so the job has access to skills, configs, etc.
+    let channel_display = get_channel_info(&job.channel).map(|c| c.display_name);
+    let context_prompt = onboarding::build_context_prompt_for_user(
+        channel_display,
+        Some(&job.channel),
+        Some(&job.user_id),
+        Some(&job.prompt),
+    );
+
     // Execute the Claude prompt
-    let result = claude::query_with_options(
-        &job.prompt,
-        QueryOptions {
-            skip_permissions: true,
-            ..Default::default()
-        },
-    )
-    .await;
+    let result = match context_prompt {
+        Ok(ctx) => {
+            claude::query_with_options(
+                &job.prompt,
+                QueryOptions {
+                    system_prompt: Some(ctx),
+                    skip_permissions: true,
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
 
     let end_time = clock.now_millis();
     let duration_ms = end_time - start_time;

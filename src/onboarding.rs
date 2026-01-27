@@ -254,6 +254,7 @@ pub fn build_context_prompt_for_user(
     lines.push("- Read and write files in your workspace".to_string());
     lines.push("- Run shell commands when needed".to_string());
     lines.push("- Search the web for current information".to_string());
+    lines.push("- Schedule tasks to run automatically (cron jobs)".to_string());
     lines.push(String::new());
 
     // Channel-specific guidance

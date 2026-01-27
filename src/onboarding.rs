@@ -246,6 +246,14 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
+    // Current date/time
+    let now = chrono::Local::now();
+    lines.push(format!(
+        "Current date and time: {}",
+        now.format("%Y-%m-%d %H:%M (%A)")
+    ));
+    lines.push(String::new());
+
     // Capabilities section
     lines.push("## Capabilities".to_string());
     lines.push("You can:".to_string());

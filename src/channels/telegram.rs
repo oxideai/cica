@@ -8,36 +8,15 @@ use teloxide::types::{BotCommand, ChatAction, PhotoSize};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
-use crate::claude::{self, QueryOptions};
 use crate::config;
-use crate::cron::CronStore;
 
 use super::{
-    CommandResult, UserTaskManager, handle_onboarding, process_command, query_claude_with_session,
-    reindex_user_memories,
+    CommandResult, UserTaskManager, execute_cron_job, handle_onboarding, process_command,
+    query_claude_with_session, reindex_user_memories,
 };
 use crate::config::TelegramConfig;
 use crate::onboarding;
 use crate::pairing::PairingStore;
-
-/// Execute a cron job manually and return the output
-async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Result<String> {
-    let store = CronStore::load()?;
-    let job = store
-        .get(job_id, channel, user_id)
-        .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
-
-    let (response, _session_id) = claude::query_with_options(
-        &job.prompt,
-        QueryOptions {
-            skip_permissions: true,
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    Ok(format!("[Cron: {}]\n\n{}", job.name, response))
-}
 
 /// Start sending periodic typing indicators until cancelled.
 /// Returns a sender that, when dropped or sent to, stops the typing loop.

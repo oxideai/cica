@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::claude;
+use crate::claude::{self, QueryOptions};
 use crate::cron::{
     self, CronSchedule, CronStore, format_timestamp, parse_add_command, truncate_for_name,
 };
@@ -397,6 +397,26 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 .to_string(),
         )),
     }
+}
+
+/// Execute a cron job manually and return the output.
+/// Shared by all channel handlers.
+pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Result<String> {
+    let store = CronStore::load()?;
+    let job = store
+        .get(job_id, channel, user_id)
+        .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
+
+    let (response, _session_id) = claude::query_with_options(
+        &job.prompt,
+        QueryOptions {
+            skip_permissions: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    Ok(format!("[Cron: {}]\n\n{}", job.name, response))
 }
 
 /// Find a job ID by full ID or prefix match

@@ -11,6 +11,7 @@ use crate::config::{self, Config};
 use crate::setup;
 
 /// Password for the sandboxed keychain (not secret - just for isolation)
+#[cfg(target_os = "macos")]
 const KEYCHAIN_PASSWORD: &str = "cica";
 
 /// Default model to use if none specified

@@ -956,12 +956,13 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
     println!("Cursor CLI Setup");
     println!("────────────────");
 
-    // Ensure Cursor CLI is available
-    if setup::find_cursor_cli().is_none() {
+    // Ensure runtime dependencies are available
+    if setup::find_cursor_cli().is_none() || setup::find_bun().is_none() {
         println!();
-        print!("Downloading Cursor CLI... ");
+        print!("Setting up runtime... ");
         std::io::Write::flush(&mut std::io::stdout())?;
 
+        setup::ensure_bun().await?; // Needed for skills
         setup::ensure_cursor_cli().await?;
         setup::ensure_embedding_model()?;
 

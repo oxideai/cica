@@ -61,3 +61,12 @@ zerocopy = { version = "0.8", features = ["derive"] }
 croner = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+# Slack
+slack-morphism = { version = "2", features = ["hyper"] }
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# TLS (needed for slack-morphism)
+rustls = { version = "0.23", features = ["aws-lc-rs"] }

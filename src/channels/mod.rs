@@ -1,4 +1,5 @@
 pub mod signal;
+pub mod slack;
 pub mod telegram;
 
 use anyhow::Result;
@@ -949,6 +950,10 @@ pub const SUPPORTED_CHANNELS: &[ChannelInfo] = &[
     ChannelInfo {
         name: "signal",
         display_name: "Signal",
+    },
+    ChannelInfo {
+        name: "slack",
+        display_name: "Slack",
     },
 ];
 

@@ -7,7 +7,7 @@ use tokio::signal;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::channels::{signal as signal_channel, telegram};
+use crate::channels::{signal as signal_channel, slack, telegram};
 use crate::config::Config;
 use crate::cron::{CronConfig, CronService, SystemClock};
 use crate::memory::MemoryIndex;
@@ -65,6 +65,14 @@ pub async fn run() -> Result<()> {
         }));
     }
 
+    if let Some(slack_config) = config.channels.slack {
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = slack::run(slack_config).await {
+                error!("Slack channel error: {}", e);
+            }
+        }));
+    }
+
     // Wait for Ctrl+C
     tokio::select! {
         _ = signal::ctrl_c() => {
@@ -110,10 +118,12 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
         .signal
         .as_ref()
         .map(|c| c.phone_number.clone());
+    let slack_bot_token = config.channels.slack.as_ref().map(|c| c.bot_token.clone());
 
     let result_sender: crate::cron::ResultSender = Arc::new(move |channel, user_id, message| {
         let telegram_token = telegram_token.clone();
         let signal_phone = signal_phone.clone();
+        let slack_bot_token = slack_bot_token.clone();
 
         Box::pin(async move {
             match channel.as_str() {
@@ -129,6 +139,13 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
                         send_signal_message(&user_id, &message).await
                     } else {
                         Err(anyhow::anyhow!("Signal not configured"))
+                    }
+                }
+                "slack" => {
+                    if let Some(token) = slack_bot_token {
+                        send_slack_message(&token, &user_id, &message).await
+                    } else {
+                        Err(anyhow::anyhow!("Slack not configured"))
                     }
                 }
                 _ => Err(anyhow::anyhow!("Unknown channel: {}", channel)),
@@ -168,6 +185,23 @@ async fn send_signal_message(recipient: &str, message: &str) -> Result<()> {
     params.insert("message", message)?;
 
     let _: Value = client.request("send", params).await?;
+    Ok(())
+}
+
+/// Send a message via Slack
+async fn send_slack_message(bot_token: &str, channel_id: &str, message: &str) -> Result<()> {
+    use slack_morphism::prelude::*;
+
+    let client = SlackClient::new(SlackClientHyperConnector::new()?);
+    let token = SlackApiToken::new(bot_token.into());
+    let session = client.open_session(&token);
+
+    let request = SlackApiChatPostMessageRequest::new(
+        channel_id.into(),
+        SlackMessageContent::new().with_text(message.to_string()),
+    );
+
+    session.chat_post_message(&request).await?;
     Ok(())
 }
 

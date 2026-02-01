@@ -115,6 +115,7 @@ pub struct Config {
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
     pub signal: Option<SignalConfig>,
+    pub slack: Option<SlackConfig>,
 }
 
 /// Telegram-specific configuration
@@ -128,6 +129,15 @@ pub struct TelegramConfig {
 pub struct SignalConfig {
     /// Phone number with country code (e.g., "+1234567890")
     pub phone_number: String,
+}
+
+/// Slack-specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConfig {
+    /// Bot token (xoxb-...)
+    pub bot_token: String,
+    /// App-level token for Socket Mode (xapp-...)
+    pub app_token: String,
 }
 
 /// Claude configuration
@@ -180,6 +190,9 @@ impl Config {
         }
         if self.channels.signal.is_some() {
             channels.push("signal");
+        }
+        if self.channels.slack.is_some() {
+            channels.push("slack");
         }
 
         channels

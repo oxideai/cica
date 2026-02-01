@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
 use tracing::info;
 
-use crate::channels::{self, signal, telegram};
-use crate::config::{self, Config, SignalConfig, TelegramConfig};
+use crate::channels::{self, signal, slack, telegram};
+use crate::config::{self, Config, SignalConfig, SlackConfig, TelegramConfig};
 use crate::setup;
 
 /// Run the init command
@@ -92,6 +92,7 @@ async fn add_channel(existing_config: Option<Config>) -> Result<Config> {
     match channel.name {
         "telegram" => setup_telegram(existing_config).await,
         "signal" => setup_signal(existing_config).await,
+        "slack" => setup_slack(existing_config).await,
         _ => bail!("Channel not yet supported: {}", channel.name),
     }
 }
@@ -626,6 +627,81 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Signal linked successfully for {}", phone_number);
 
+    Ok(config)
+}
+
+/// Set up Slack
+async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
+    println!();
+    println!("Slack Setup");
+    println!("───────────");
+    println!();
+    println!("You'll need a Slack app with Socket Mode enabled.");
+    println!();
+    println!("If you haven't created one yet:");
+    println!("1. Go to https://api.slack.com/apps");
+    println!("2. Click 'Create New App' → 'From scratch'");
+    println!("3. Name it and select your workspace");
+    println!();
+    println!("Required setup in your Slack app:");
+    println!("─────────────────────────────────");
+    println!();
+    println!("1. Enable Socket Mode:");
+    println!("   Settings → Socket Mode → Enable");
+    println!("   Generate an App-Level Token with 'connections:write' scope");
+    println!();
+    println!("2. Enable App Home messages:");
+    println!("   Features → App Home → Show Tabs → Messages Tab: ON");
+    println!("   Check: 'Allow users to send Slash commands and messages'");
+    println!();
+    println!("3. Subscribe to events:");
+    println!("   Features → Event Subscriptions → Enable");
+    println!("   Subscribe to bot events: message.im");
+    println!();
+    println!("4. Add OAuth scopes:");
+    println!("   Features → OAuth & Permissions → Bot Token Scopes:");
+    println!("   - chat:write");
+    println!("   - im:history");
+    println!("   - im:read");
+    println!("   - im:write");
+    println!("   - users:read");
+    println!();
+    println!("5. Install the app to your workspace");
+    println!();
+
+    // Get Bot Token
+    let bot_token: String = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste your Bot Token (xoxb-...)")
+        .interact()?;
+
+    // Get App Token
+    let app_token: String = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste your App Token (xapp-...)")
+        .interact()?;
+
+    print!("Validating... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    match slack::validate_credentials(&bot_token, &app_token).await {
+        Ok(bot_user_id) => {
+            println!("OK");
+            println!("Connected as bot user: {}", bot_user_id);
+        }
+        Err(e) => {
+            println!("FAILED");
+            bail!("Invalid credentials: {}", e);
+        }
+    }
+
+    // Build config
+    let mut config = existing_config.unwrap_or_default();
+    config.channels.slack = Some(SlackConfig {
+        bot_token,
+        app_token,
+    });
+    config.save()?;
+
+    info!("Slack setup complete");
     Ok(config)
 }
 

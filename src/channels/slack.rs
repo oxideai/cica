@@ -11,8 +11,68 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::SlackConfig;
+use crate::config::{self, SlackConfig};
 use crate::pairing::PairingStore;
+
+// ============================================================================
+// File/Image Handling
+// ============================================================================
+
+/// Get the directory where Slack attachments are stored
+fn get_slack_attachments_dir() -> Result<PathBuf> {
+    let paths = config::paths()?;
+    let dir = paths.internal_dir.join("slack_attachments");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Download a file from Slack and save it locally
+/// Requires the bot token for authentication
+async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBuf> {
+    let url = file
+        .url_private_download
+        .as_ref()
+        .or(file.url_private.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("No download URL for file"))?;
+
+    let file_name = file.name.as_deref().unwrap_or("unknown");
+    let file_id = &file.id;
+
+    let attachments_dir = get_slack_attachments_dir()?;
+    let local_path = attachments_dir.join(format!("{}_{}", file_id, file_name));
+
+    // Skip download if file already exists
+    if local_path.exists() {
+        debug!("File already downloaded: {:?}", local_path);
+        return Ok(local_path);
+    }
+
+    // Download with authorization header
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url.as_str())
+        .header("Authorization", format!("Bearer {}", bot_token))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to download file: {}", response.status());
+    }
+
+    let bytes = response.bytes().await?;
+    std::fs::write(&local_path, &bytes)?;
+
+    info!("Downloaded Slack file to {:?}", local_path);
+    Ok(local_path)
+}
+
+/// Check if a file is an image based on mimetype
+fn is_image_file(file: &SlackFile) -> bool {
+    file.mimetype
+        .as_ref()
+        .map(|m| m.to_string().starts_with("image/"))
+        .unwrap_or(false)
+}
 
 // ============================================================================
 // Markdown to Slack mrkdwn conversion
@@ -131,6 +191,8 @@ impl Channel for SlackChannel {
 /// State passed to socket mode event handlers
 struct SlackUserState {
     bot_token: SlackApiToken,
+    /// Raw bot token string for file downloads (requires auth header)
+    bot_token_str: String,
     bot_user_id: SlackUserId,
     task_manager: Arc<UserTaskManager>,
     /// Track the last thread_ts per user to detect "New Chat" clicks
@@ -187,6 +249,7 @@ pub async fn run(config: SlackConfig) -> Result<()> {
     // Create user state
     let user_state = SlackUserState {
         bot_token: bot_token.clone(),
+        bot_token_str: config.bot_token.clone(),
         bot_user_id,
         task_manager,
         user_threads: Arc::new(RwLock::new(HashMap::new())),
@@ -237,6 +300,7 @@ async fn handle_push_events(
                 msg_event,
                 client,
                 user_state.bot_token.clone(),
+                user_state.bot_token_str.clone(),
                 user_state.bot_user_id.clone(),
                 user_state.task_manager.clone(),
                 user_state.user_threads.clone(),
@@ -258,6 +322,7 @@ async fn handle_message_event(
     event: SlackMessageEvent,
     client: Arc<SlackHyperClient>,
     token: SlackApiToken,
+    bot_token_str: String,
     bot_user_id: SlackUserId,
     task_manager: Arc<UserTaskManager>,
     user_threads: Arc<RwLock<HashMap<String, String>>>,
@@ -294,42 +359,57 @@ async fn handle_message_event(
         None => String::new(),
     };
 
-    // Skip empty messages
-    if text.is_empty() {
+    // Download any image files in the message
+    let mut image_paths: Vec<PathBuf> = Vec::new();
+    if let Some(content) = &event.content
+        && let Some(files) = &content.files
+    {
+        for file in files {
+            if is_image_file(file) {
+                match download_slack_file(file, &bot_token_str).await {
+                    Ok(path) => image_paths.push(path),
+                    Err(e) => warn!("Failed to download Slack file: {}", e),
+                }
+            }
+        }
+    }
+
+    // Skip if no text and no images
+    if text.is_empty() && image_paths.is_empty() {
         return Ok(());
     }
 
     info!(
-        "Message from {} in channel {} (thread: {:?}): {}",
-        user_id, channel_id, thread_ts, text
+        "Message from {} in channel {} (thread: {:?}): {}{}",
+        user_id,
+        channel_id,
+        thread_ts,
+        text,
+        if image_paths.is_empty() {
+            String::new()
+        } else {
+            format!(" [{} image(s)]", image_paths.len())
+        }
     );
 
-    // Detect "New Chat" by checking if thread_ts changed for this user
-    // This is a workaround since slack-morphism doesn't support assistant_thread_started yet
+    // For Slack AI apps, we key Claude sessions by thread_ts, not just user ID
+    // This allows users to have multiple conversations (threads) with separate contexts
+    // When they return to an old thread via History, we load that thread's Claude session
     if let Some(ref ts) = thread_ts {
-        let user_key = user_id.to_string();
         let ts_str = ts.to_string();
 
+        // Track current thread for this user (for logging/debugging)
         let mut threads = user_threads.write().await;
-        let is_new_thread = threads
-            .get(&user_key)
-            .map(|old| old != &ts_str)
-            .unwrap_or(true);
+        let previous_thread = threads.insert(user_id.to_string(), ts_str.clone());
 
-        if is_new_thread {
-            info!(
-                "New chat thread detected for user {}, clearing Claude session",
-                user_id
-            );
-            threads.insert(user_key.clone(), ts_str);
-
-            // Clear the Claude session (equivalent to /new command)
-            let session_key = format!("slack:{}", user_id);
-            if let Ok(mut store) = PairingStore::load() {
-                store.sessions.remove(&session_key);
-                if let Err(e) = store.save() {
-                    warn!("Failed to save pairing store after clearing session: {}", e);
-                }
+        if previous_thread.as_ref() != Some(&ts_str) {
+            if previous_thread.is_some() {
+                info!(
+                    "User {} switched to thread {} (was: {:?})",
+                    user_id, ts_str, previous_thread
+                );
+            } else {
+                info!("User {} started thread {}", user_id, ts_str);
             }
         }
     }
@@ -342,16 +422,25 @@ async fn handle_message_event(
         client.clone(),
         token.clone(),
         channel_id.clone(),
-        thread_ts,
+        thread_ts.clone(),
     ));
+
+    // For Slack, we use a composite user key that includes thread_ts
+    // This allows each thread to have its own Claude session/context
+    // Format: "user_id" for pairing/approval, "user_id:thread_ts" for sessions
+    let user_id_str = user_id.to_string();
+    let session_user_id = match &thread_ts {
+        Some(ts) => format!("{}:{}", user_id, ts),
+        None => user_id_str.clone(),
+    };
 
     // Determine what action to take
     let mut store = PairingStore::load()?;
-    let image_paths: Vec<PathBuf> = Vec::new(); // TODO: handle file attachments
 
+    // Use base user_id for pairing/approval checks (not thread-specific)
     let action = determine_action(
         channel.name(),
-        &user_id.to_string(),
+        &user_id_str,
         &text,
         &image_paths,
         &mut store,
@@ -359,18 +448,19 @@ async fn handle_message_event(
         display_name,
     )?;
 
-    // Execute the action
-    if let Some(query_text) = execute_action(channel.as_ref(), &user_id.to_string(), action).await?
-    {
+    // Execute the action - use session_user_id (includes thread) for Claude queries
+    if let Some(query_text) = execute_action(channel.as_ref(), &user_id_str, action).await? {
         // QueryClaude action - queue with task manager for debouncing
         let text_with_images = build_text_with_images(&query_text, &image_paths);
-        let user_key = format!("{}:{}", channel.name(), user_id);
+        // Use thread-aware key for task manager too
+        let user_key = format!("{}:{}", channel.name(), session_user_id);
         let channel_clone = channel.clone();
-        let user_id_str = user_id.to_string();
+        let session_user_id_clone = session_user_id.clone();
 
         task_manager
             .process_message(user_key, text_with_images, move |messages| async move {
-                execute_claude_query(channel_clone, &user_id_str, messages).await;
+                // Use session_user_id so each thread gets its own Claude session
+                execute_claude_query(channel_clone, &session_user_id_clone, messages).await;
             })
             .await;
     }

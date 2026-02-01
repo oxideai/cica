@@ -6,7 +6,7 @@ Cica brings Claude's capabilities to your messaging apps. It can hold conversati
 
 ## Features
 
-- **Multi-channel**: Chat via Telegram or Signal
+- **Multi-channel**: Chat via Telegram, Signal, or Slack
 - **Multi-user**: Each user gets their own agent identity and memory, while skills are shared
 - **Continuous conversations**: Conversations persist across messages, so context is maintained
 - **Memory**: Remembers important things about you across conversations
@@ -51,7 +51,7 @@ cica
 
 ## Usage
 
-Once running, message your bot on Telegram or Signal. On first contact, you'll go through a quick pairing flow, then Cica will learn who it is and who you are.
+Once running, message your bot on Telegram, Signal, or Slack. On first contact, you'll go through a quick pairing flow, then Cica will learn who it is and who you are.
 
 ```bash
 # Approve a new user
@@ -70,6 +70,7 @@ flowchart LR
         subgraph Channels
             TG[Telegram]
             SG[Signal]
+            SL[Slack]
         end
         MEM[(Memory)] --> PB
         SK[Skills] --> PB

@@ -370,7 +370,10 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         // Clean up the response text - remove lines that mention the file paths
         let cleaned_response = remove_file_path_lines(&response);
 
-        if let Err(e) = channel.send_message_with_attachments(&cleaned_response, &attachments).await {
+        if let Err(e) = channel
+            .send_message_with_attachments(&cleaned_response, &attachments)
+            .await
+        {
             warn!("Failed to send message with attachments: {}", e);
         }
     } else {

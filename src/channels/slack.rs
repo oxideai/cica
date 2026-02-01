@@ -13,6 +13,7 @@ use super::{
 };
 use crate::config::{self, SlackConfig};
 use crate::pairing::PairingStore;
+use crate::skills;
 
 // ============================================================================
 // File/Image Handling
@@ -72,6 +73,49 @@ fn is_image_file(file: &SlackFile) -> bool {
         .as_ref()
         .map(|m| m.to_string().starts_with("image/"))
         .unwrap_or(false)
+}
+
+/// Set suggested prompts for a new thread based on available skills
+async fn set_suggested_prompts(
+    client: &Arc<SlackHyperClient>,
+    token: &SlackApiToken,
+    channel_id: &SlackChannelId,
+    thread_ts: &SlackTs,
+) {
+    let session = client.open_session(token);
+
+    // Build prompts from available skills (up to 4, Slack's limit)
+    let mut prompts = Vec::new();
+
+    // Add a default "What can you do?" prompt
+    prompts.push(SlackAssistantPrompt::new(
+        "What can you help me with?".to_string(),
+        "What can you help me with?".to_string(),
+    ));
+
+    // Add skills as prompts
+    if let Ok(available_skills) = skills::discover_skills() {
+        for skill in available_skills.iter().take(3) {
+            // Leave room for default prompt
+            prompts.push(SlackAssistantPrompt::new(
+                skill.name.clone(),
+                format!("Help me with {}", skill.name),
+            ));
+        }
+    }
+
+    let request = SlackApiAssistantThreadsSetSuggestedPromptsRequest::new(
+        channel_id.clone(),
+        thread_ts.clone(),
+        prompts,
+    );
+
+    if let Err(e) = session
+        .assistant_threads_set_suggested_prompts(&request)
+        .await
+    {
+        warn!("Failed to set suggested prompts: {}", e);
+    }
 }
 
 // ============================================================================
@@ -178,9 +222,55 @@ impl Channel for SlackChannel {
     }
 
     fn start_typing(&self) -> TypingGuard {
-        // Slack doesn't support typing indicators for bots in the same way
-        // as Telegram. We return a no-op guard.
-        TypingGuard::noop()
+        // For Slack AI assistants, we use assistant.threads.setStatus
+        // to show a "thinking" indicator
+        if let Some(thread_ts) = &self.thread_ts {
+            let client = self.client.clone();
+            let token = self.token.clone();
+            let channel_id = self.channel_id.clone();
+            let thread_ts = thread_ts.clone();
+
+            // Set the status to show we're working
+            let client_clone = client.clone();
+            let token_clone = token.clone();
+            let channel_id_clone = channel_id.clone();
+            let thread_ts_clone = thread_ts.clone();
+
+            tokio::spawn(async move {
+                let session = client_clone.open_session(&token_clone);
+                let request = SlackApiAssistantThreadsSetStatusRequest::new(
+                    channel_id_clone,
+                    "is thinking...".to_string(),
+                    thread_ts_clone,
+                );
+                if let Err(e) = session.assistant_threads_set_status(&request).await {
+                    warn!("Failed to set assistant status: {}", e);
+                }
+            });
+
+            // Return a guard that will clear the status when dropped
+            // We use a custom approach since TypingGuard expects a oneshot channel
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+
+            // Spawn a task that clears status when cancelled
+            tokio::spawn(async move {
+                // Wait for the guard to be dropped
+                let _ = cancel_rx.await;
+
+                // Clear the status
+                let session = client.open_session(&token);
+                let request = SlackApiAssistantThreadsSetStatusRequest::new(
+                    channel_id,
+                    String::new(),
+                    thread_ts,
+                );
+                let _ = session.assistant_threads_set_status(&request).await;
+            });
+
+            TypingGuard::new(cancel_tx)
+        } else {
+            TypingGuard::noop()
+        }
     }
 }
 
@@ -402,7 +492,8 @@ async fn handle_message_event(
         let mut threads = user_threads.write().await;
         let previous_thread = threads.insert(user_id.to_string(), ts_str.clone());
 
-        if previous_thread.as_ref() != Some(&ts_str) {
+        let is_new_thread = previous_thread.as_ref() != Some(&ts_str);
+        if is_new_thread {
             if previous_thread.is_some() {
                 info!(
                     "User {} switched to thread {} (was: {:?})",
@@ -411,6 +502,9 @@ async fn handle_message_event(
             } else {
                 info!("User {} started thread {}", user_id, ts_str);
             }
+
+            // Set suggested prompts for new threads
+            set_suggested_prompts(&client, &token, &channel_id, ts).await;
         }
     }
 

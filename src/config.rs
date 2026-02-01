@@ -23,6 +23,9 @@ pub struct Paths {
     pub claude_code_dir: PathBuf,
     pub claude_home: PathBuf,
     pub signal_data_dir: PathBuf,
+    // Cursor CLI paths
+    pub cursor_cli_dir: PathBuf,
+    pub cursor_home: PathBuf,
 }
 
 /// Get all Cica paths
@@ -48,6 +51,9 @@ pub fn paths() -> Result<Paths> {
         claude_code_dir: deps_dir.join("claude-code"),
         claude_home: internal_dir.join("claude-home"),
         signal_data_dir: internal_dir.join("signal-data"),
+        // Cursor CLI paths
+        cursor_cli_dir: deps_dir.join("cursor-cli"),
+        cursor_home: internal_dir.join("cursor-home"),
         base,
     })
 }
@@ -100,6 +106,15 @@ Example: "I can't access your calendar directly, but we could create a calendar 
 // Config Types
 // ============================================================================
 
+/// Which AI backend to use
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AiBackend {
+    #[default]
+    Claude,
+    Cursor,
+}
+
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -108,6 +123,13 @@ pub struct Config {
 
     #[serde(default)]
     pub claude: ClaudeConfig,
+
+    #[serde(default)]
+    pub cursor: CursorConfig,
+
+    /// Which AI backend to use (claude or cursor)
+    #[serde(default)]
+    pub backend: AiBackend,
 }
 
 /// All channel configurations
@@ -145,6 +167,15 @@ pub struct SlackConfig {
 pub struct ClaudeConfig {
     /// Anthropic API key or OAuth token
     pub api_key: Option<String>,
+}
+
+/// Cursor CLI configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CursorConfig {
+    /// Cursor API key (from dashboard)
+    pub api_key: Option<String>,
+    /// Model to use (default: claude-sonnet-4-20250514)
+    pub model: Option<String>,
 }
 
 // ============================================================================
@@ -201,5 +232,18 @@ impl Config {
     /// Check if Claude is configured
     pub fn is_claude_configured(&self) -> bool {
         self.claude.api_key.is_some()
+    }
+
+    /// Check if Cursor is configured
+    pub fn is_cursor_configured(&self) -> bool {
+        self.cursor.api_key.is_some()
+    }
+
+    /// Check if the selected backend is configured
+    pub fn is_backend_configured(&self) -> bool {
+        match self.backend {
+            AiBackend::Claude => self.is_claude_configured(),
+            AiBackend::Cursor => self.is_cursor_configured(),
+        }
     }
 }

@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::claude::{self, QueryOptions};
+use crate::backend::{self, QueryOptions};
 use crate::cron::{
     self, CronSchedule, CronStore, format_timestamp, parse_add_command, truncate_for_name,
 };
@@ -340,8 +340,8 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         }
     };
 
-    // Query Claude with session
-    let (response, _session_id) = match query_claude_with_session(
+    // Query AI backend with session
+    let (response, _session_id) = match query_ai_with_session(
         &mut store,
         channel.name(),
         user_id,
@@ -352,7 +352,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
     {
         Ok(r) => r,
         Err(e) => {
-            warn!("Claude query failed: {}", e);
+            warn!("AI query failed: {}", e);
             let _ = channel
                 .send_message(&format!("Sorry, I encountered an error: {}", e))
                 .await;
@@ -789,7 +789,7 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         Some(&job.prompt),
     )?;
 
-    let (response, _session_id) = claude::query_with_options(
+    let (response, _session_id) = backend::query_with_options(
         &job.prompt,
         QueryOptions {
             system_prompt: Some(context_prompt),
@@ -838,11 +838,11 @@ fn find_job_id(
     }
 }
 
-/// Query Claude with automatic session recovery.
+/// Query AI backend with automatic session recovery.
 ///
 /// If the session has expired, clears it and retries with a fresh conversation.
 /// Returns the response text and the new session ID.
-pub async fn query_claude_with_session(
+pub async fn query_ai_with_session(
     store: &mut PairingStore,
     channel: &str,
     user_id: &str,
@@ -852,34 +852,36 @@ pub async fn query_claude_with_session(
     let session_key = format!("{}:{}", channel, user_id);
     let existing_session = store.sessions.get(&session_key).cloned();
 
-    let options = claude::QueryOptions {
+    let options = backend::QueryOptions {
         system_prompt: Some(context_prompt.clone()),
         resume_session: existing_session,
         skip_permissions: true,
         ..Default::default()
     };
 
-    let (response, session_id) = match claude::query_with_options(text, options).await {
+    let (response, session_id) = match backend::query_with_options(text, options).await {
         Ok((response, session_id)) => (response, session_id),
         Err(e) => {
             let error_msg = e.to_string();
             // If session not found, clear it and retry without resuming
-            if error_msg.contains("No conversation found with session ID") {
+            if error_msg.contains("No conversation found with session ID")
+                || error_msg.contains("session")
+            {
                 warn!("Session expired, starting fresh conversation");
                 store.sessions.remove(&session_key);
                 store.save()?;
 
-                let retry_options = claude::QueryOptions {
+                let retry_options = backend::QueryOptions {
                     system_prompt: Some(context_prompt),
                     resume_session: None,
                     skip_permissions: true,
                     ..Default::default()
                 };
 
-                match claude::query_with_options(text, retry_options).await {
+                match backend::query_with_options(text, retry_options).await {
                     Ok((response, session_id)) => (response, session_id),
                     Err(e) => {
-                        warn!("Claude error on retry: {}", e);
+                        warn!("AI backend error on retry: {}", e);
                         (
                             format!("Sorry, I encountered an error: {}", e),
                             String::new(),
@@ -887,7 +889,7 @@ pub async fn query_claude_with_session(
                     }
                 }
             } else {
-                warn!("Claude error: {}", e);
+                warn!("AI backend error: {}", e);
                 (
                     format!("Sorry, I encountered an error: {}", e),
                     String::new(),
@@ -907,17 +909,17 @@ pub async fn query_claude_with_session(
     Ok((response, session_id))
 }
 
-/// Handle onboarding flow - Claude drives the conversation
+/// Handle onboarding flow - AI drives the conversation
 pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> Result<String> {
     let system_prompt = onboarding::system_prompt_for_user(channel, user_id)?;
 
-    let options = claude::QueryOptions {
+    let options = backend::QueryOptions {
         system_prompt: Some(system_prompt),
         skip_permissions: true,
         ..Default::default()
     };
 
-    let (response, _) = claude::query_with_options(message, options).await?;
+    let (response, _) = backend::query_with_options(message, options).await?;
     Ok(response)
 }
 

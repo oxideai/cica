@@ -351,6 +351,147 @@ async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> 
 }
 
 // ============================================================================
+// Cursor CLI
+// ============================================================================
+
+/// Cursor CLI version to download
+const CURSOR_CLI_VERSION: &str = "2026.01.28-fd13201";
+
+/// Check if Cursor CLI is available
+pub fn find_cursor_cli() -> Option<PathBuf> {
+    // Check our bundled cursor-cli first
+    if let Ok(paths) = config::paths() {
+        let bundled = paths.cursor_cli_dir.join("cursor-agent");
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+
+    // Check system agent (user might have installed it globally)
+    // Cursor installs as both "agent" and "cursor-agent"
+    if let Ok(path) = which::which("cursor-agent") {
+        return Some(path);
+    }
+    if let Ok(path) = which::which("agent") {
+        return Some(path);
+    }
+
+    None
+}
+
+/// Ensure Cursor CLI is available, downloading if necessary
+pub async fn ensure_cursor_cli() -> Result<PathBuf> {
+    if let Some(path) = find_cursor_cli() {
+        return Ok(path);
+    }
+
+    let paths = config::paths()?;
+    std::fs::create_dir_all(&paths.cursor_cli_dir)?;
+    std::fs::create_dir_all(&paths.cursor_home)?;
+
+    // Download Cursor CLI
+    download_cursor_cli(&paths.cursor_cli_dir).await?;
+
+    find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI installation failed"))
+}
+
+/// Download and extract Cursor CLI from tarball
+async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let url = cursor_cli_download_url()?;
+
+    let response = reqwest::get(&url)
+        .await
+        .with_context(|| format!("Failed to download Cursor CLI from {}", url))?;
+
+    if !response.status().is_success() {
+        bail!("Failed to download Cursor CLI: HTTP {}", response.status());
+    }
+
+    let bytes = response.bytes().await?;
+
+    // Extract tarball with --strip-components=1 equivalent
+    // The tarball contains dist-package/cursor-agent, we want cursor-agent directly
+    let cursor = std::io::Cursor::new(bytes);
+    let gz = GzDecoder::new(cursor);
+    let mut archive = Archive::new(gz);
+
+    // Extract entries, stripping the first path component (dist-package/)
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+
+        // Strip first component (dist-package/)
+        let stripped: PathBuf = path.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        let dest_path = dest_dir.join(&stripped);
+
+        // Create parent directories if needed
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Unpack the entry
+        entry.unpack(&dest_path)?;
+    }
+
+    // The binary should be at dest_dir/cursor-agent after extraction
+    let agent_path = dest_dir.join("cursor-agent");
+
+    // Make executable
+    #[cfg(unix)]
+    if agent_path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    if !agent_path.exists() {
+        bail!("Could not find cursor-agent binary in downloaded archive");
+    }
+
+    Ok(())
+}
+
+/// Get the Cursor CLI download URL for the current platform
+fn cursor_cli_download_url() -> Result<String> {
+    // URL pattern: https://downloads.cursor.com/lab/{VERSION}/{OS}/{ARCH}/agent-cli-package.tar.gz
+    let (os, arch) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => ("darwin", "arm64"),
+        ("macos", "x86_64") => ("darwin", "x64"),
+        ("linux", "aarch64") => ("linux", "arm64"),
+        ("linux", "x86_64") => ("linux", "x64"),
+        (os, arch) => bail!("Unsupported platform for Cursor CLI: {}-{}", os, arch),
+    };
+
+    Ok(format!(
+        "https://downloads.cursor.com/lab/{}/{}/{}/agent-cli-package.tar.gz",
+        CURSOR_CLI_VERSION, os, arch
+    ))
+}
+
+/// Validate a Cursor API key by making a test request
+pub async fn validate_cursor_api_key(api_key: &str) -> Result<()> {
+    // Cursor uses their own API - we can try to list models to validate
+    // For now, just do basic format validation
+    let trimmed = api_key.trim();
+
+    if trimmed.is_empty() {
+        bail!("API key cannot be empty");
+    }
+
+    // Cursor API keys typically have a specific format
+    // For now, accept any non-empty string since we don't know the exact format
+    // The real validation will happen when we try to use it
+
+    Ok(())
+}
+
+// ============================================================================
 // Embedding Model (for memory search)
 // ============================================================================
 

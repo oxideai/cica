@@ -22,8 +22,8 @@ use chrono::{DateTime, Local};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::backend::{self, QueryOptions};
 use crate::channels::get_channel_info;
-use crate::claude::{self, QueryOptions};
 use crate::onboarding;
 
 /// Configuration for the cron service.
@@ -261,10 +261,10 @@ async fn execute_job<C: Clock>(
         Some(&job.prompt),
     );
 
-    // Execute the Claude prompt
+    // Execute the AI backend prompt
     let result = match context_prompt {
         Ok(ctx) => {
-            claude::query_with_options(
+            backend::query_with_options(
                 &job.prompt,
                 QueryOptions {
                     system_prompt: Some(ctx),

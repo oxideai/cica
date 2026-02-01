@@ -3,7 +3,7 @@ use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
 use tracing::info;
 
 use crate::channels::{self, signal, slack, telegram};
-use crate::config::{self, Config, SignalConfig, SlackConfig, TelegramConfig};
+use crate::config::{self, AiBackend, Config, SignalConfig, SlackConfig, TelegramConfig};
 use crate::setup;
 
 /// Run the init command
@@ -19,40 +19,58 @@ pub async fn run() -> Result<()> {
         let config = Config::load()?;
         let configured = config.configured_channels();
 
-        if !configured.is_empty() || config.is_claude_configured() {
+        if !configured.is_empty() || config.is_claude_configured() || config.is_cursor_configured()
+        {
             let mut status = Vec::new();
             if !configured.is_empty() {
                 status.push(format!("Channels: {}", configured.join(", ")));
             }
-            if config.is_claude_configured() {
-                status.push("Claude: configured".to_string());
+            let backend_name = match config.backend {
+                AiBackend::Claude => "Claude Code",
+                AiBackend::Cursor => "Cursor CLI",
+            };
+            if config.is_backend_configured() {
+                status.push(format!("AI Backend: {} (configured)", backend_name));
+            } else {
+                status.push(format!("AI Backend: {} (not configured)", backend_name));
             }
             println!("Current setup: {}", status.join(", "));
             println!();
 
-            let choices = vec![
+            // Build menu options dynamically
+            let mut choices = vec![
                 "Add/configure a channel",
-                "Configure Claude",
-                "Reconfigure from scratch",
-                "Cancel",
+                "Configure AI backend (Claude Code or Cursor CLI)",
             ];
+
+            // Add switch option if both backends are configured
+            let can_switch = config.is_claude_configured() && config.is_cursor_configured();
+            if can_switch {
+                choices.push("Switch active AI backend");
+            }
+
+            choices.push("Reconfigure from scratch");
+            choices.push("Cancel");
+
             let selection = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt("What would you like to do?")
                 .items(&choices)
                 .default(0)
                 .interact()?;
 
-            match selection {
-                0 => {
-                    add_channel(Some(config)).await?;
-                    return Ok(());
-                }
-                1 => return setup_claude(Some(config)).await,
-                2 => {} // Continue to fresh setup
-                _ => {
-                    println!("Cancelled.");
-                    return Ok(());
-                }
+            let selected = choices[selection];
+            if selected == "Add/configure a channel" {
+                add_channel(Some(config)).await?;
+                return Ok(());
+            } else if selected == "Configure AI backend (Claude Code or Cursor CLI)" {
+                return setup_ai_backend(Some(config)).await;
+            } else if selected == "Switch active AI backend" {
+                return switch_ai_backend(config).await;
+            } else if selected == "Reconfigure from scratch" {
+                // Continue to fresh setup below
+            } else {
+                println!("Cancelled.");
+                return Ok(());
             }
         }
     }
@@ -67,8 +85,82 @@ async fn full_setup() -> Result<()> {
     // Step 1: Channel
     let config = add_channel(None).await?;
 
-    // Step 2: Claude
-    setup_claude(Some(config)).await?;
+    // Step 2: AI Backend
+    setup_ai_backend(Some(config)).await?;
+
+    Ok(())
+}
+
+/// Set up AI backend (Claude Code or Cursor CLI)
+async fn setup_ai_backend(existing_config: Option<Config>) -> Result<()> {
+    println!();
+    println!("AI Backend Setup");
+    println!("────────────────");
+    println!();
+    println!("Cica can use either Claude Code or Cursor CLI as its AI backend.");
+    println!();
+
+    let choices = vec![
+        "Claude Code   Anthropic's official CLI (recommended)",
+        "Cursor CLI    Multi-model support (Claude, GPT, Gemini)",
+    ];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Which AI backend would you like to use?")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+
+    match selection {
+        0 => setup_claude(existing_config).await,
+        1 => setup_cursor(existing_config).await,
+        _ => unreachable!(),
+    }
+}
+
+/// Switch between configured AI backends
+async fn switch_ai_backend(mut config: Config) -> Result<()> {
+    println!();
+    println!("Switch AI Backend");
+    println!("─────────────────");
+    println!();
+
+    let current = match config.backend {
+        AiBackend::Claude => "Claude Code",
+        AiBackend::Cursor => "Cursor CLI",
+    };
+    let other = match config.backend {
+        AiBackend::Claude => "Cursor CLI",
+        AiBackend::Cursor => "Claude Code",
+    };
+
+    println!("Current backend: {}", current);
+    println!();
+
+    let choices = vec![format!("Switch to {}", other), "Cancel".to_string()];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("What would you like to do?")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+
+    if selection == 0 {
+        config.backend = match config.backend {
+            AiBackend::Claude => AiBackend::Cursor,
+            AiBackend::Cursor => AiBackend::Claude,
+        };
+        config.save()?;
+
+        let new_backend = match config.backend {
+            AiBackend::Claude => "Claude Code",
+            AiBackend::Cursor => "Cursor CLI",
+        };
+        println!();
+        println!("Switched to {}!", new_backend);
+    } else {
+        println!("Cancelled.");
+    }
 
     Ok(())
 }
@@ -820,18 +912,153 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
 
     // Save config
     let mut config = existing_config.unwrap_or_default();
+    let was_using_cursor = config.backend == AiBackend::Cursor && config.is_cursor_configured();
     config.claude.api_key = Some(credential);
+
+    // Ask whether to switch if another backend was active
+    if was_using_cursor {
+        println!();
+        let switch = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Switch to Claude Code as your active backend?")
+            .items(&["Yes", "No, keep using Cursor CLI"])
+            .default(0)
+            .interact()?;
+
+        if switch == 0 {
+            config.backend = AiBackend::Claude;
+        }
+    } else {
+        config.backend = AiBackend::Claude;
+    }
+
     config.save()?;
 
     let paths = config::paths()?;
+    let active = match config.backend {
+        AiBackend::Claude => "Claude Code",
+        AiBackend::Cursor => "Cursor CLI",
+    };
 
     println!();
-    println!("Setup complete!");
+    println!("Setup complete! Active backend: {}", active);
     println!();
     println!("Config saved to: {}", paths.config_file.display());
     println!();
     println!("Run `cica` to start your assistant.");
 
     info!("Claude setup complete");
+    Ok(())
+}
+
+/// Set up Cursor CLI
+async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
+    println!();
+    println!("Cursor CLI Setup");
+    println!("────────────────");
+
+    // Ensure Cursor CLI is available
+    if setup::find_cursor_cli().is_none() {
+        println!();
+        print!("Downloading Cursor CLI... ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        setup::ensure_cursor_cli().await?;
+        setup::ensure_embedding_model()?;
+
+        println!("done");
+    }
+
+    // Get API key
+    println!();
+    println!("Cursor CLI requires an API key for authentication.");
+    println!();
+    println!("To get your API key:");
+    println!("1. Go to https://cursor.com/settings");
+    println!("2. Navigate to: Integrations → User API Keys");
+    println!("3. Generate a new API key");
+    println!();
+
+    let api_key: String = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste your Cursor API key")
+        .interact()?;
+
+    let api_key = api_key.trim().to_string();
+
+    print!("Validating... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    match setup::validate_cursor_api_key(&api_key).await {
+        Ok(()) => println!("OK"),
+        Err(e) => {
+            println!("FAILED");
+            bail!("Invalid API key: {}", e);
+        }
+    }
+
+    // Ask about model preference
+    println!();
+    println!("Cursor CLI supports multiple AI models.");
+    println!();
+
+    let model_choices = vec![
+        "sonnet-4.5         Claude Sonnet 4.5 (recommended)",
+        "opus-4.5           Claude Opus 4.5",
+        "gpt-5.2            OpenAI GPT 5.2",
+        "gemini-3-pro       Google Gemini 3 Pro",
+        "auto               Let Cursor choose",
+    ];
+
+    let model_selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Which model would you like to use?")
+        .items(&model_choices)
+        .default(0)
+        .interact()?;
+
+    let model = match model_selection {
+        0 => Some("sonnet-4.5".to_string()),
+        1 => Some("opus-4.5".to_string()),
+        2 => Some("gpt-5.2".to_string()),
+        3 => Some("gemini-3-pro".to_string()),
+        _ => Some("auto".to_string()),
+    };
+
+    // Save config
+    let mut config = existing_config.unwrap_or_default();
+    let was_using_claude = config.backend == AiBackend::Claude && config.is_claude_configured();
+    config.cursor.api_key = Some(api_key);
+    config.cursor.model = model;
+
+    // Ask whether to switch if another backend was active
+    if was_using_claude {
+        println!();
+        let switch = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Switch to Cursor CLI as your active backend?")
+            .items(&["Yes", "No, keep using Claude Code"])
+            .default(0)
+            .interact()?;
+
+        if switch == 0 {
+            config.backend = AiBackend::Cursor;
+        }
+    } else {
+        config.backend = AiBackend::Cursor;
+    }
+
+    config.save()?;
+
+    let paths = config::paths()?;
+    let active = match config.backend {
+        AiBackend::Claude => "Claude Code",
+        AiBackend::Cursor => "Cursor CLI",
+    };
+
+    println!();
+    println!("Setup complete! Active backend: {}", active);
+    println!();
+    println!("Config saved to: {}", paths.config_file.display());
+    println!();
+    println!("Run `cica` to start your assistant.");
+
+    info!("Cursor CLI setup complete");
     Ok(())
 }

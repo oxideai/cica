@@ -1,8 +1,10 @@
+mod backend;
 mod channels;
 mod claude;
 mod cmd;
 mod config;
 mod cron;
+mod cursor;
 mod memory;
 mod onboarding;
 mod pairing;

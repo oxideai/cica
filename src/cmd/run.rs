@@ -34,10 +34,9 @@ pub async fn run() -> Result<()> {
 
     info!("Starting Cica with channels: {}", channels.join(", "));
 
-    // Ensure runtime dependencies are ready
     info!("Preparing runtime...");
-    if let Err(e) = setup::ensure_embedding_model() {
-        warn!("Failed to prepare embedding model: {}", e);
+    if let Err(e) = setup::ensure_deps(&config).await {
+        warn!("Failed to prepare dependencies: {}", e);
     }
 
     // Index memories for all approved users at startup

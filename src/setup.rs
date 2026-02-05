@@ -2,24 +2,61 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 use crate::config;
 use crate::memory;
 
-fn bun_download_url() -> Result<&'static str> {
+// ============================================================================
+// Pinned Versions
+// ============================================================================
+
+const BUN_VERSION: &str = "1.2.4";
+const CLAUDE_CODE_VERSION: &str = "2.1.32";
+
+const VERSION_FILE: &str = ".version";
+
+/// Read the installed version from a dependency directory
+fn read_installed_version(dep_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dep_dir.join(VERSION_FILE))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Write the installed version marker to a dependency directory
+fn write_installed_version(dep_dir: &Path, version: &str) -> Result<()> {
+    std::fs::write(dep_dir.join(VERSION_FILE), version)?;
+    Ok(())
+}
+
+/// Check if the installed version matches the expected version
+fn needs_update(dep_dir: &Path, expected: &str) -> bool {
+    read_installed_version(dep_dir).as_deref() != Some(expected)
+}
+
+// ============================================================================
+// Bun
+// ============================================================================
+
+fn bun_download_url() -> Result<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => {
-            Ok("https://github.com/oven-sh/bun/releases/download/bun-v1.2.4/bun-darwin-aarch64.zip")
-        }
-        ("macos", "x86_64") => {
-            Ok("https://github.com/oven-sh/bun/releases/download/bun-v1.2.4/bun-darwin-x64.zip")
-        }
-        ("linux", "aarch64") => {
-            Ok("https://github.com/oven-sh/bun/releases/download/bun-v1.2.4/bun-linux-aarch64.zip")
-        }
-        ("linux", "x86_64") => {
-            Ok("https://github.com/oven-sh/bun/releases/download/bun-v1.2.4/bun-linux-x64.zip")
-        }
+        ("macos", "aarch64") => Ok(format!(
+            "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-darwin-aarch64.zip",
+            BUN_VERSION
+        )),
+        ("macos", "x86_64") => Ok(format!(
+            "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-darwin-x64.zip",
+            BUN_VERSION
+        )),
+        ("linux", "aarch64") => Ok(format!(
+            "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-linux-aarch64.zip",
+            BUN_VERSION
+        )),
+        ("linux", "x86_64") => Ok(format!(
+            "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-linux-x64.zip",
+            BUN_VERSION
+        )),
         (os, arch) => bail!("Unsupported platform: {}-{}", os, arch),
     }
 }
@@ -42,29 +79,33 @@ pub fn find_bun() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Bun is available, downloading if necessary (async version)
+/// Ensure Bun is available and at the expected version
 pub async fn ensure_bun() -> Result<PathBuf> {
-    // Check if already available
-    if let Some(path) = find_bun() {
-        return Ok(path);
+    let paths = config::paths()?;
+
+    if find_bun().is_some() && !needs_update(&paths.bun_dir, BUN_VERSION) {
+        return find_bun().ok_or_else(|| anyhow!("Bun not found"));
     }
 
-    // Need to download
-    let paths = config::paths()?;
+    if needs_update(&paths.bun_dir, BUN_VERSION) {
+        info!("Updating Bun to v{}...", BUN_VERSION);
+        let _ = std::fs::remove_dir_all(&paths.bun_dir);
+    }
+
     std::fs::create_dir_all(&paths.bun_dir)?;
 
     let url = bun_download_url()?;
     let bun_path = paths.bun_dir.join("bun");
 
-    download_and_extract_bun(url, &paths.bun_dir).await?;
+    download_and_extract_bun(&url, &paths.bun_dir).await?;
 
-    // Make executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bun_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
+    write_installed_version(&paths.bun_dir, BUN_VERSION)?;
     Ok(bun_path)
 }
 
@@ -115,20 +156,28 @@ pub fn find_claude_code() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Claude Code is available, downloading if necessary
+/// Ensure Claude Code is available and at the expected version
 pub async fn ensure_claude_code() -> Result<PathBuf> {
-    if let Some(path) = find_claude_code() {
-        return Ok(path);
+    if find_claude_code().is_some()
+        && !needs_update(&config::paths()?.claude_code_dir, CLAUDE_CODE_VERSION)
+    {
+        return find_claude_code().ok_or_else(|| anyhow!("Claude Code not found"));
     }
 
     let paths = config::paths()?;
+
+    if needs_update(&paths.claude_code_dir, CLAUDE_CODE_VERSION) {
+        info!("Updating Claude Code to v{}...", CLAUDE_CODE_VERSION);
+        let _ = std::fs::remove_dir_all(&paths.claude_code_dir);
+    }
+
     std::fs::create_dir_all(&paths.claude_code_dir)?;
 
-    // Use bun to install claude-code
     let bun = find_bun().ok_or_else(|| anyhow!("Bun not found - run ensure_bun first"))?;
+    let pkg = format!("@anthropic-ai/claude-code@{}", CLAUDE_CODE_VERSION);
 
     let status = tokio::process::Command::new(&bun)
-        .args(["add", "@anthropic-ai/claude-code"])
+        .args(["add", &pkg])
         .current_dir(&paths.claude_code_dir)
         .status()
         .await
@@ -138,6 +187,7 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
         bail!("Failed to install Claude Code");
     }
 
+    write_installed_version(&paths.claude_code_dir, CLAUDE_CODE_VERSION)?;
     find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))
 }
 
@@ -217,9 +267,10 @@ fn validate_oauth_token(token: &str) -> Result<()> {
 }
 
 // ============================================================================
-// Java (for signal-cli)
+// Java & signal-cli
 // ============================================================================
 
+const JAVA_VERSION: &str = "21";
 const SIGNAL_CLI_VERSION: &str = "0.13.22";
 
 fn java_download_url() -> Result<&'static str> {
@@ -270,18 +321,25 @@ pub fn find_java() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Java is available, downloading if necessary
+/// Ensure Java is available and at the expected version
 pub async fn ensure_java() -> Result<PathBuf> {
-    if let Some(path) = find_java() {
-        return Ok(path);
+    let paths = config::paths()?;
+
+    if find_java().is_some() && !needs_update(&paths.java_dir, JAVA_VERSION) {
+        return find_java().ok_or_else(|| anyhow!("Java not found"));
     }
 
-    let paths = config::paths()?;
+    if needs_update(&paths.java_dir, JAVA_VERSION) {
+        info!("Updating Java JRE {}...", JAVA_VERSION);
+        let _ = std::fs::remove_dir_all(&paths.java_dir);
+    }
+
     std::fs::create_dir_all(&paths.java_dir)?;
 
     let url = java_download_url()?;
     download_and_extract_tarball(url, &paths.java_dir).await?;
 
+    write_installed_version(&paths.java_dir, JAVA_VERSION)?;
     find_java()
         .ok_or_else(|| anyhow!("Java installation failed - binary not found after extraction"))
 }
@@ -309,18 +367,25 @@ pub fn find_signal_cli() -> Option<PathBuf> {
     None
 }
 
-/// Ensure signal-cli is available, downloading if necessary
+/// Ensure signal-cli is available and at the expected version
 pub async fn ensure_signal_cli() -> Result<PathBuf> {
-    if let Some(path) = find_signal_cli() {
-        return Ok(path);
+    let paths = config::paths()?;
+
+    if find_signal_cli().is_some() && !needs_update(&paths.signal_cli_dir, SIGNAL_CLI_VERSION) {
+        return find_signal_cli().ok_or_else(|| anyhow!("signal-cli not found"));
     }
 
-    let paths = config::paths()?;
+    if needs_update(&paths.signal_cli_dir, SIGNAL_CLI_VERSION) {
+        info!("Updating signal-cli to v{}...", SIGNAL_CLI_VERSION);
+        let _ = std::fs::remove_dir_all(&paths.signal_cli_dir);
+    }
+
     std::fs::create_dir_all(&paths.signal_cli_dir)?;
 
     let url = signal_cli_download_url();
     download_and_extract_tarball(&url, &paths.signal_cli_dir).await?;
 
+    write_installed_version(&paths.signal_cli_dir, SIGNAL_CLI_VERSION)?;
     find_signal_cli().ok_or_else(|| {
         anyhow!("signal-cli installation failed - binary not found after extraction")
     })
@@ -379,19 +444,25 @@ pub fn find_cursor_cli() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Cursor CLI is available, downloading if necessary
+/// Ensure Cursor CLI is available and at the expected version
 pub async fn ensure_cursor_cli() -> Result<PathBuf> {
-    if let Some(path) = find_cursor_cli() {
-        return Ok(path);
+    let paths = config::paths()?;
+
+    if find_cursor_cli().is_some() && !needs_update(&paths.cursor_cli_dir, CURSOR_CLI_VERSION) {
+        return find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI not found"));
     }
 
-    let paths = config::paths()?;
+    if needs_update(&paths.cursor_cli_dir, CURSOR_CLI_VERSION) {
+        info!("Updating Cursor CLI to {}...", CURSOR_CLI_VERSION);
+        let _ = std::fs::remove_dir_all(&paths.cursor_cli_dir);
+    }
+
     std::fs::create_dir_all(&paths.cursor_cli_dir)?;
     std::fs::create_dir_all(&paths.cursor_home)?;
 
-    // Download Cursor CLI
     download_cursor_cli(&paths.cursor_cli_dir).await?;
 
+    write_installed_version(&paths.cursor_cli_dir, CURSOR_CLI_VERSION)?;
     find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI installation failed"))
 }
 
@@ -569,4 +640,33 @@ pub async fn validate_cursor_api_key(api_key: &str) -> Result<()> {
 /// Ensure the embedding model is downloaded
 pub fn ensure_embedding_model() -> Result<()> {
     memory::ensure_model_downloaded()
+}
+
+// ============================================================================
+// Startup Dependency Check
+// ============================================================================
+
+/// Ensure all dependencies for the active backend are installed and up to date.
+/// Called on `cica run` startup.
+pub async fn ensure_deps(config: &crate::config::Config) -> Result<()> {
+    use crate::config::AiBackend;
+
+    match config.backend {
+        AiBackend::Claude => {
+            ensure_bun().await?;
+            ensure_claude_code().await?;
+        }
+        AiBackend::Cursor => {
+            ensure_bun().await?;
+            ensure_cursor_cli().await?;
+        }
+    }
+
+    if config.channels.signal.is_some() {
+        ensure_java().await?;
+        ensure_signal_cli().await?;
+    }
+
+    ensure_embedding_model()?;
+    Ok(())
 }

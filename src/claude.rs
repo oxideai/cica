@@ -9,6 +9,13 @@ use tracing::{debug, info, warn};
 use crate::config::{self, Config};
 use crate::setup;
 
+/// Available models for Claude Code, newest first.
+pub const MODELS: &[(&str, &str)] = &[
+    ("claude-opus-4-6", "Claude Opus 4.6"),
+    ("claude-opus-4-5", "Claude Opus 4.5"),
+    ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+];
+
 /// Response from Claude CLI in JSON format
 #[derive(Debug, Deserialize)]
 struct ClaudeResponse {
@@ -30,7 +37,7 @@ pub struct QueryOptions {
     pub cwd: Option<String>,
     /// Skip permission prompts (for automated flows)
     pub skip_permissions: bool,
-    /// Model alias or full model name (e.g. "sonnet", "opus")
+    /// Model alias ("sonnet", "opus") or full model ID (e.g. "claude-sonnet-4-5-20250929")
     pub model: Option<String>,
 }
 

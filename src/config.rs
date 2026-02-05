@@ -262,7 +262,7 @@ impl Config {
 pub struct ClaudeConfig {
     /// Anthropic API key or OAuth token (used when not using Vertex AI)
     pub api_key: Option<String>,
-    /// Model alias or full model name (e.g. "sonnet", "opus", "claude-sonnet-4-5-20250929")
+    /// Model to use: an alias ("sonnet", "opus") or full model ID from the API (e.g. "claude-sonnet-4-5-20250929")
     pub model: Option<String>,
     /// Use Google Vertex AI instead of Anthropic API
     #[serde(default)]

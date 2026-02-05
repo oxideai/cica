@@ -17,6 +17,81 @@ const KEYCHAIN_PASSWORD: &str = "cica";
 /// Default model to use if none specified
 const DEFAULT_MODEL: &str = "opus-4.5";
 
+/// Fallback models when `--list-models` is unavailable
+pub const FALLBACK_MODELS: &[(&str, &str)] = &[
+    ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+    ("claude-opus-4-5", "Claude Opus 4.5"),
+    ("gpt-4o", "OpenAI GPT-4o"),
+    ("auto", "Auto (let Cursor choose)"),
+];
+
+/// Fetch available models via `cursor-agent --list-models`.
+/// Falls back to `FALLBACK_MODELS` if the CLI is unavailable or the command fails.
+pub async fn list_models(api_key: &str) -> Vec<(String, String)> {
+    let cli = match setup::find_cursor_cli() {
+        Some(p) => p,
+        None => return fallback_models(),
+    };
+
+    let paths = match config::paths() {
+        Ok(p) => p,
+        Err(_) => return fallback_models(),
+    };
+
+    let output = Command::new(&cli)
+        .args(["--list-models", "--api-key", api_key])
+        .env("HOME", &paths.cursor_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return fallback_models(),
+    };
+
+    // Output format:
+    //   Available models
+    //   <blank>
+    //   auto - Auto
+    //   opus-4.6 - Claude 4.6 Opus  (current)
+    //   opus-4.6-thinking - Claude 4.6 Opus (Thinking)  (default)
+    //   ...
+    //   <blank>
+    //   Tip: use --model ...
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let models: Vec<(String, String)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("Available") || line.starts_with("Tip:") {
+                return None;
+            }
+            let (id, rest) = line.split_once(" - ")?;
+            let name = rest
+                .trim_end_matches("(current)")
+                .trim_end_matches("(default)")
+                .trim();
+            Some((id.trim().to_string(), name.to_string()))
+        })
+        .collect();
+
+    if models.is_empty() {
+        fallback_models()
+    } else {
+        models
+    }
+}
+
+fn fallback_models() -> Vec<(String, String)> {
+    FALLBACK_MODELS
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect()
+}
+
 /// Response event from Cursor CLI in stream-json format
 #[derive(Debug, Deserialize)]
 struct CursorEvent {

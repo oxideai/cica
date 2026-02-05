@@ -3,7 +3,9 @@ use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
 use tracing::info;
 
 use crate::channels::{self, signal, slack, telegram};
+use crate::claude;
 use crate::config::{self, AiBackend, Config, SignalConfig, SlackConfig, TelegramConfig};
+use crate::cursor;
 use crate::setup;
 
 /// Run the init command
@@ -37,13 +39,11 @@ pub async fn run() -> Result<()> {
             println!("Current setup: {}", status.join(", "));
             println!();
 
-            // Build menu options dynamically
             let mut choices = vec![
                 "Add/configure a channel",
                 "Configure AI backend (Claude Code or Cursor CLI)",
             ];
 
-            // Add switch option if both backends are configured
             let can_switch = config.is_claude_configured() && config.is_cursor_configured();
             if can_switch {
                 choices.push("Switch active AI backend");
@@ -67,7 +67,7 @@ pub async fn run() -> Result<()> {
             } else if selected == "Switch active AI backend" {
                 return switch_ai_backend(config).await;
             } else if selected == "Reconfigure from scratch" {
-                // Continue to fresh setup below
+                // fall through to fresh setup
             } else {
                 println!("Cancelled.");
                 return Ok(());
@@ -97,6 +97,54 @@ async fn setup_ai_backend(existing_config: Option<Config>) -> Result<()> {
     println!("AI Backend Setup");
     println!("────────────────");
     println!();
+
+    let has_backend = existing_config
+        .as_ref()
+        .is_some_and(|c| c.is_backend_configured());
+
+    if has_backend {
+        let config = existing_config.as_ref().unwrap();
+        let backend_name = match config.backend {
+            AiBackend::Claude => "Claude Code",
+            AiBackend::Cursor => "Cursor CLI",
+        };
+        let current_model = match config.backend {
+            AiBackend::Claude => config.claude.model.as_deref(),
+            AiBackend::Cursor => config.cursor.model.as_deref(),
+        };
+        println!(
+            "Current: {} (model: {})",
+            backend_name,
+            current_model.unwrap_or("default")
+        );
+        println!();
+
+        let choices = vec![
+            "Change model",
+            "Reconfigure backend (Claude Code or Cursor CLI)",
+            "Cancel",
+        ];
+
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("What would you like to do?")
+            .items(&choices)
+            .default(0)
+            .interact()?;
+
+        return match selection {
+            0 => change_model(existing_config.unwrap()).await,
+            1 => pick_backend(existing_config).await,
+            _ => {
+                println!("Cancelled.");
+                Ok(())
+            }
+        };
+    }
+
+    pick_backend(existing_config).await
+}
+
+async fn pick_backend(existing_config: Option<Config>) -> Result<()> {
     println!("Cica can use either Claude Code or Cursor CLI as its AI backend.");
     println!();
 
@@ -116,6 +164,58 @@ async fn setup_ai_backend(existing_config: Option<Config>) -> Result<()> {
         1 => setup_cursor(existing_config).await,
         _ => unreachable!(),
     }
+}
+
+/// Change the model for the active backend
+async fn change_model(mut config: Config) -> Result<()> {
+    let (backend_name, current_model) = match config.backend {
+        AiBackend::Claude => ("Claude Code", config.claude.model.as_deref()),
+        AiBackend::Cursor => ("Cursor CLI", config.cursor.model.as_deref()),
+    };
+
+    println!();
+    println!("Change Model");
+    println!("────────────");
+    println!();
+    println!(
+        "Backend: {} | Current model: {}",
+        backend_name,
+        current_model.unwrap_or("default")
+    );
+    println!();
+
+    let new_model = match config.backend {
+        AiBackend::Claude => select_model(backend_name, claude::MODELS, current_model)?,
+        AiBackend::Cursor => {
+            let api_key = config
+                .cursor
+                .api_key
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
+            print!("Fetching available models... ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let models = cursor::list_models(&api_key).await;
+            println!("OK ({} models)", models.len());
+            println!();
+            select_model(backend_name, &models, current_model)?
+        }
+    };
+
+    match config.backend {
+        AiBackend::Claude => config.claude.model = new_model.clone(),
+        AiBackend::Cursor => config.cursor.model = new_model.clone(),
+    }
+
+    config.save()?;
+
+    println!();
+    println!(
+        "Model set to: {}",
+        new_model.as_deref().unwrap_or("default")
+    );
+
+    Ok(())
 }
 
 /// Switch between configured AI backends
@@ -1016,52 +1116,11 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
 
     // Model selection
     println!();
-    println!("Claude Code supports multiple models.");
-    println!("Aliases always point to the latest version.");
-    println!();
-
-    let model_choices = vec![
-        "default        Recommended for your account type",
-        "sonnet         Latest Sonnet (fast, daily coding)",
-        "opus           Latest Opus (complex reasoning)",
-        "haiku          Latest Haiku (fast, simple tasks)",
-        "opusplan       Opus for planning, Sonnet for execution",
-        "Custom         Enter a full model name",
-    ];
-
-    let current_model_idx = config
-        .claude
-        .model
-        .as_deref()
-        .map(|m| match m {
-            "default" => 0,
-            "sonnet" => 1,
-            "opus" => 2,
-            "haiku" => 3,
-            "opusplan" => 4,
-            _ => 5,
-        })
-        .unwrap_or(0);
-
-    let model_selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Which model would you like to use?")
-        .items(&model_choices)
-        .default(current_model_idx)
-        .interact()?;
-
-    config.claude.model = match model_selection {
-        0 => None,
-        1 => Some("sonnet".to_string()),
-        2 => Some("opus".to_string()),
-        3 => Some("haiku".to_string()),
-        4 => Some("opusplan".to_string()),
-        _ => {
-            let custom: String = Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Model name (e.g. claude-sonnet-4-5-20250929)")
-                .interact_text()?;
-            Some(custom.trim().to_string())
-        }
-    };
+    config.claude.model = select_model(
+        "Claude Code",
+        claude::MODELS,
+        config.claude.model.as_deref(),
+    )?;
 
     // Ask whether to switch if another backend was active
     if was_using_cursor {
@@ -1100,6 +1159,75 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
 
     info!("Claude setup complete");
     Ok(())
+}
+
+/// Interactive model picker shared across backends.
+fn select_model<S: AsRef<str>>(
+    backend_name: &str,
+    models: &[(S, S)],
+    current: Option<&str>,
+) -> Result<Option<String>> {
+    println!("Select a model for {}:", backend_name);
+    println!();
+
+    let max_id_len = models
+        .iter()
+        .map(|(id, _)| id.as_ref().len())
+        .max()
+        .unwrap_or(20);
+    let pad = max_id_len.max(20);
+
+    let mut choices: Vec<String> = Vec::with_capacity(models.len() + 2);
+    choices.push(format!(
+        "{:<pad$} Use the default model",
+        "default",
+        pad = pad
+    ));
+    for (id, name) in models {
+        choices.push(format!(
+            "{:<pad$} {}",
+            id.as_ref(),
+            name.as_ref(),
+            pad = pad
+        ));
+    }
+    choices.push(format!(
+        "{:<pad$} Enter a model name manually",
+        "custom",
+        pad = pad
+    ));
+
+    let current_idx = current
+        .and_then(|c| {
+            models
+                .iter()
+                .position(|(id, _)| id.as_ref() == c)
+                .map(|i| i + 1)
+        })
+        .unwrap_or(0);
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Which model would you like to use?")
+        .items(&choices)
+        .default(current_idx)
+        .interact()?;
+
+    if selection == 0 {
+        Ok(None)
+    } else if selection == choices.len() - 1 {
+        let custom: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Model name")
+            .interact_text()?;
+        let trimmed = custom.trim().to_string();
+        if trimmed.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(trimmed))
+        }
+    } else {
+        let (id, _) = &models[selection - 1];
+        Ok(Some(id.as_ref().to_string()))
+    }
 }
 
 /// Set up Cursor CLI
@@ -1148,32 +1276,14 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
         }
     }
 
-    // Ask about model preference
+    // Model selection
     println!();
-    println!("Cursor CLI supports multiple AI models.");
+    print!("Fetching available models... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let cursor_models = cursor::list_models(&api_key).await;
+    println!("OK ({} models)", cursor_models.len());
     println!();
-
-    let model_choices = vec![
-        "sonnet-4.5         Claude Sonnet 4.5 (recommended)",
-        "opus-4.5           Claude Opus 4.5",
-        "gpt-5.2            OpenAI GPT 5.2",
-        "gemini-3-pro       Google Gemini 3 Pro",
-        "auto               Let Cursor choose",
-    ];
-
-    let model_selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Which model would you like to use?")
-        .items(&model_choices)
-        .default(0)
-        .interact()?;
-
-    let model = match model_selection {
-        0 => Some("sonnet-4.5".to_string()),
-        1 => Some("opus-4.5".to_string()),
-        2 => Some("gpt-5.2".to_string()),
-        3 => Some("gemini-3-pro".to_string()),
-        _ => Some("auto".to_string()),
-    };
+    let model = select_model("Cursor CLI", &cursor_models, None)?;
 
     // Save config
     let mut config = existing_config.unwrap_or_default();

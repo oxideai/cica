@@ -221,6 +221,88 @@ impl Channel for SlackChannel {
         }
     }
 
+    async fn send_message_with_attachments(
+        &self,
+        message: &str,
+        attachment_paths: &[PathBuf],
+    ) -> Result<()> {
+        // If no attachments, just send the text message
+        if attachment_paths.is_empty() {
+            return self.send_message(message).await;
+        }
+
+        let session = self.client.open_session(&self.token);
+
+        let mut uploaded_files = Vec::new();
+
+        for path in attachment_paths {
+            if !path.exists() {
+                warn!("Attachment path does not exist: {:?}", path);
+                continue;
+            }
+
+            let file_bytes = std::fs::read(path)?;
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+
+            let get_url_req =
+                SlackApiFilesGetUploadUrlExternalRequest::new(filename.clone(), file_bytes.len());
+
+            let get_url_resp = session
+                .get_upload_url_external(&get_url_req)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get upload URL: {}", e))?;
+
+            let content_type = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string();
+
+            let upload_req = SlackApiFilesUploadViaUrlRequest::new(
+                get_url_resp.upload_url,
+                file_bytes,
+                content_type,
+            );
+
+            session
+                .files_upload_via_url(&upload_req)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to upload file: {}", e))?;
+
+            uploaded_files
+                .push(SlackApiFilesComplete::new(get_url_resp.file_id).with_title(filename));
+        }
+
+        if uploaded_files.is_empty() {
+            if !message.is_empty() {
+                return self.send_message(message).await;
+            }
+            return Ok(());
+        }
+
+        let mut complete_req = SlackApiFilesCompleteUploadExternalRequest::new(uploaded_files)
+            .with_channel_id(self.channel_id.clone());
+
+        if !message.is_empty() {
+            let mrkdwn_message = markdown_to_mrkdwn(message);
+            complete_req = complete_req.with_initial_comment(mrkdwn_message);
+        }
+
+        if let Some(ts) = &self.thread_ts {
+            complete_req = complete_req.with_thread_ts(ts.clone());
+        }
+
+        session
+            .files_complete_upload_external(&complete_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to complete file upload: {}", e))?;
+
+        info!("Sent message with attachments to Slack");
+        Ok(())
+    }
+
     fn start_typing(&self) -> TypingGuard {
         // For Slack AI assistants, we use assistant.threads.setStatus
         // to show a "thinking" indicator

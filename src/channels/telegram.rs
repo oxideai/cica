@@ -59,30 +59,40 @@ impl Channel for TelegramChannel {
             return self.send_message(message).await;
         }
 
-        // Send images as photos
+        let is_first_attachment = |path: &PathBuf| -> bool {
+            attachment_paths.first().map(|p| p == path).unwrap_or(false)
+        };
+
+        // Send each attachment using the appropriate Telegram method
         for path in attachment_paths {
             if !path.exists() {
                 warn!("Attachment path does not exist: {:?}", path);
                 continue;
             }
 
-            // Create InputFile from path
             let input_file = InputFile::file(path);
-
-            // Send the photo with the message as caption (only on first photo)
-            if path == attachment_paths.first().unwrap() && !message.is_empty() {
-                // First photo gets the caption
-                self.bot
-                    .send_photo(self.chat_id, input_file)
-                    .caption(message)
-                    .await?;
+            let caption = if is_first_attachment(path) && !message.is_empty() {
+                Some(message)
             } else {
-                // Subsequent photos without caption
-                self.bot.send_photo(self.chat_id, input_file).await?;
+                None
+            };
+
+            if is_video_file(path) {
+                let mut req = self.bot.send_video(self.chat_id, input_file);
+                if let Some(caption) = caption {
+                    req = req.caption(caption);
+                }
+                req.await?;
+            } else {
+                let mut req = self.bot.send_photo(self.chat_id, input_file);
+                if let Some(caption) = caption {
+                    req = req.caption(caption);
+                }
+                req.await?;
             }
         }
 
-        // If message exists but all photos failed, send just the text
+        // If message exists but all attachments were missing, send just the text
         if !message.is_empty() && attachment_paths.iter().all(|p| !p.exists()) {
             self.send_message(message).await?;
         }
@@ -118,8 +128,22 @@ impl Channel for TelegramChannel {
 }
 
 // ============================================================================
-// Photo Handling
+// Media Handling
 // ============================================================================
+
+/// Video file extensions supported for sending
+const VIDEO_EXTENSIONS: &[&str] = &[".mp4", ".mov", ".webm", ".avi"];
+
+/// Check if a file path points to a video based on its extension
+fn is_video_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let dot_ext = format!(".{}", ext.to_lowercase());
+            VIDEO_EXTENSIONS.contains(&dot_ext.as_str())
+        })
+        .unwrap_or(false)
+}
 
 /// Get the directory where Telegram attachments are stored
 fn get_telegram_attachments_dir() -> Result<PathBuf> {

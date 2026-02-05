@@ -255,21 +255,24 @@ pub async fn execute_action(
     }
 }
 
-/// Extract image paths from Claude's response text.
+/// Extract media file paths from Claude's response text.
 ///
-/// Looks for file paths in the response that point to image files.
-/// Specifically looks for paths in the skills/nano-banana/generated/ directory.
-fn extract_image_attachments(response: &str) -> Vec<PathBuf> {
+/// Looks for file paths in the response that point to image or video files.
+fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     let mut attachments = Vec::new();
 
-    // Look for file paths that end in image extensions
-    let image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+    // Look for file paths that end in media extensions
+    let media_extensions = [
+        // Images
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", // Videos
+        ".mp4", ".mov", ".webm", ".avi",
+    ];
 
     for line in response.lines() {
         let line = line.trim();
 
         // Check if line contains a file path
-        for ext in &image_extensions {
+        for ext in &media_extensions {
             if line.contains(ext) {
                 // Try to extract the path - look for paths starting with /Users/
                 if let Some(start) = line.find("/Users/") {
@@ -279,7 +282,7 @@ fn extract_image_attachments(response: &str) -> Vec<PathBuf> {
                         let path_str = &line[start..end_pos];
                         if std::path::Path::new(path_str).exists() {
                             attachments.push(PathBuf::from(path_str));
-                            break; // Found the image on this line, move to next line
+                            break;
                         }
                     }
                 }
@@ -293,17 +296,19 @@ fn extract_image_attachments(response: &str) -> Vec<PathBuf> {
 /// Remove lines from the response that contain file paths.
 ///
 /// This cleans up responses to avoid showing technical file paths to the user
-/// when images are being sent as attachments.
+/// when media files are being sent as attachments.
 fn remove_file_path_lines(response: &str) -> String {
     let lines: Vec<&str> = response
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            // Skip lines that contain /Users/ (file paths)
-            // Skip lines that are just "The image has been saved to:" or similar
+            let lower = trimmed.to_lowercase();
+            // Skip lines that contain file paths or mention saving files
             !trimmed.contains("/Users/")
-                && !trimmed.to_lowercase().contains("saved to")
-                && !trimmed.to_lowercase().contains("image has been saved")
+                && !lower.contains("saved to")
+                && !lower.contains("image has been saved")
+                && !lower.contains("video has been saved")
+                && !lower.contains("file has been saved")
                 && !trimmed.is_empty()
         })
         .collect();
@@ -368,8 +373,8 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         }
     };
 
-    // Extract any image attachments from the response
-    let attachments = extract_image_attachments(&response);
+    // Extract any media attachments (images, videos) from the response
+    let attachments = extract_media_attachments(&response);
 
     // Send response with attachments if any
     if !attachments.is_empty() {

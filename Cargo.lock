@@ -473,6 +473,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "jsonrpsee",
+ "mime_guess",
  "regex-lite",
  "reqwest 0.12.28",
  "rusqlite",

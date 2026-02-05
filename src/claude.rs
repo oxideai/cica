@@ -30,6 +30,8 @@ pub struct QueryOptions {
     pub cwd: Option<String>,
     /// Skip permission prompts (for automated flows)
     pub skip_permissions: bool,
+    /// Model alias or full model name (e.g. "sonnet", "opus")
+    pub model: Option<String>,
 }
 
 /// Query Claude with a prompt and return the response
@@ -98,6 +100,11 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(
     // Resume existing session if provided
     if let Some(ref session_id) = options.resume_session {
         cmd.args(["--resume", session_id]);
+    }
+
+    // Model selection
+    if let Some(ref model) = options.model {
+        cmd.args(["--model", model]);
     }
 
     // Set working directory

@@ -1014,6 +1014,55 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         config.claude.vertex_credentials_path = None;
     }
 
+    // Model selection
+    println!();
+    println!("Claude Code supports multiple models.");
+    println!("Aliases always point to the latest version.");
+    println!();
+
+    let model_choices = vec![
+        "default        Recommended for your account type",
+        "sonnet         Latest Sonnet (fast, daily coding)",
+        "opus           Latest Opus (complex reasoning)",
+        "haiku          Latest Haiku (fast, simple tasks)",
+        "opusplan       Opus for planning, Sonnet for execution",
+        "Custom         Enter a full model name",
+    ];
+
+    let current_model_idx = config
+        .claude
+        .model
+        .as_deref()
+        .map(|m| match m {
+            "default" => 0,
+            "sonnet" => 1,
+            "opus" => 2,
+            "haiku" => 3,
+            "opusplan" => 4,
+            _ => 5,
+        })
+        .unwrap_or(0);
+
+    let model_selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Which model would you like to use?")
+        .items(&model_choices)
+        .default(current_model_idx)
+        .interact()?;
+
+    config.claude.model = match model_selection {
+        0 => None,
+        1 => Some("sonnet".to_string()),
+        2 => Some("opus".to_string()),
+        3 => Some("haiku".to_string()),
+        4 => Some("opusplan".to_string()),
+        _ => {
+            let custom: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Model name (e.g. claude-sonnet-4-5-20250929)")
+                .interact_text()?;
+            Some(custom.trim().to_string())
+        }
+    };
+
     // Ask whether to switch if another backend was active
     if was_using_cursor {
         println!();
@@ -1037,9 +1086,13 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         AiBackend::Claude => "Claude Code",
         AiBackend::Cursor => "Cursor CLI",
     };
+    let model_display = config.claude.model.as_deref().unwrap_or("default");
 
     println!();
-    println!("Setup complete! Active backend: {}", active);
+    println!(
+        "Setup complete! Active backend: {} (model: {})",
+        active, model_display
+    );
     println!();
     println!("Config saved to: {}", paths.config_file.display());
     println!();

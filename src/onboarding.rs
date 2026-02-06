@@ -400,6 +400,57 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
+    // MCP configuration
+    let cfg = config::Config::load().unwrap_or_default();
+    lines.push("## MCP (Model Context Protocol)".to_string());
+    lines.push("You can extend your capabilities by adding MCP servers. MCP servers provide additional tools (API access, databases, services, etc.) that become available to you automatically.".to_string());
+    lines.push(String::new());
+    match cfg.backend {
+        config::AiBackend::Claude => {
+            let mcp_config_path = paths.claude_home.join(".claude").join("settings.json");
+            lines.push(format!(
+                "To add an MCP server, edit: {}",
+                mcp_config_path.display()
+            ));
+            lines.push(String::new());
+            lines.push("The file uses this format:".to_string());
+            lines.push("```json".to_string());
+            lines.push(r#"{
+  "mcpServers": {
+    "server-name": {
+      "command": "npx",
+      "args": ["-y", "some-mcp-package"],
+      "env": {}
+    }
+  }
+}"#.to_string());
+            lines.push("```".to_string());
+        }
+        config::AiBackend::Cursor => {
+            let mcp_config_path = paths.cursor_home.join(".cursor").join("mcp.json");
+            lines.push(format!(
+                "To add an MCP server, edit: {}",
+                mcp_config_path.display()
+            ));
+            lines.push(String::new());
+            lines.push("The file uses this format:".to_string());
+            lines.push("```json".to_string());
+            lines.push(r#"{
+  "mcpServers": {
+    "server-name": {
+      "command": "npx",
+      "args": ["-y", "some-mcp-package"],
+      "env": {}
+    }
+  }
+}"#.to_string());
+            lines.push("```".to_string());
+        }
+    }
+    lines.push(String::new());
+    lines.push("After adding an MCP server, it will be available on the next message (new session). The user may need to send /new to start a fresh session for new MCP servers to take effect.".to_string());
+    lines.push(String::new());
+
     // Project context from files
     lines.push("# Project Context".to_string());
     lines.push(String::new());

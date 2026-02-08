@@ -60,7 +60,13 @@ pub struct CronService<C: Clock> {
 impl<C: Clock> CronService<C> {
     /// Create a new cron service.
     pub fn new(clock: C, config: CronConfig) -> Result<Self> {
-        let store = CronStore::load()?;
+        let mut store = CronStore::load()?;
+
+        let recovered = store.recover_stuck_jobs(clock.now_millis());
+        if recovered > 0 {
+            info!("Recovered {} stuck cron job(s) from previous run", recovered);
+            let _ = store.save();
+        }
 
         Ok(Self {
             clock,
@@ -93,12 +99,12 @@ impl<C: Clock> CronService<C> {
                         break;
                     }
                     _ = clock.sleep(tick_interval) => {
-                        // Reload store from disk to pick up external changes
-                        // (e.g., agent modifying cron.json directly)
+                        // Merge disk changes (e.g., agent modifying cron.json)
+                        // while preserving in-memory state for running jobs
                         {
                             let mut store_guard = store.lock().await;
                             match CronStore::load() {
-                                Ok(fresh) => *store_guard = fresh,
+                                Ok(fresh) => store_guard.merge_from_disk(fresh),
                                 Err(e) => warn!("Failed to reload cron store: {}", e),
                             }
                         }

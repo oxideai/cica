@@ -243,6 +243,53 @@ impl CronStore {
     pub fn get_enabled_jobs(&self) -> Vec<&CronJob> {
         self.jobs.values().filter(|j| j.enabled).collect()
     }
+
+    /// Reset any jobs stuck in Running state (e.g., after a crash).
+    /// Recalculates next_run_at so they get scheduled again.
+    pub fn recover_stuck_jobs(&mut self, now_ms: u64) -> usize {
+        let stuck_ids: Vec<JobId> = self
+            .jobs
+            .values()
+            .filter(|j| j.state.last_status == JobStatus::Running)
+            .map(|j| j.id.clone())
+            .collect();
+
+        let count = stuck_ids.len();
+        for id in &stuck_ids {
+            if let Some(job) = self.jobs.get_mut(id) {
+                job.state.last_status = JobStatus::Success;
+                job.update_next_run(now_ms);
+            }
+        }
+
+        count
+    }
+
+    /// Merge disk state into the current store, preserving in-flight job states.
+    /// Jobs currently marked as Running in memory keep their in-memory state
+    /// to avoid losing completion updates from concurrent tasks.
+    pub fn merge_from_disk(&mut self, disk: CronStore) {
+        let running_ids: std::collections::HashSet<String> = self
+            .jobs
+            .values()
+            .filter(|j| j.state.last_status == JobStatus::Running)
+            .map(|j| j.id.clone())
+            .collect();
+
+        let disk_ids: std::collections::HashSet<String> =
+            disk.jobs.keys().cloned().collect();
+
+        for (id, disk_job) in disk.jobs {
+            if running_ids.contains(&id) {
+                continue;
+            }
+            self.jobs.insert(id, disk_job);
+        }
+
+        self.jobs.retain(|id, _| {
+            disk_ids.contains(id) || running_ids.contains(id)
+        });
+    }
 }
 
 /// Generate a unique job ID.

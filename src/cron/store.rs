@@ -276,8 +276,7 @@ impl CronStore {
             .map(|j| j.id.clone())
             .collect();
 
-        let disk_ids: std::collections::HashSet<String> =
-            disk.jobs.keys().cloned().collect();
+        let disk_ids: std::collections::HashSet<String> = disk.jobs.keys().cloned().collect();
 
         for (id, disk_job) in disk.jobs {
             if running_ids.contains(&id) {
@@ -286,9 +285,8 @@ impl CronStore {
             self.jobs.insert(id, disk_job);
         }
 
-        self.jobs.retain(|id, _| {
-            disk_ids.contains(id) || running_ids.contains(id)
-        });
+        self.jobs
+            .retain(|id, _| disk_ids.contains(id) || running_ids.contains(id));
     }
 }
 

@@ -64,7 +64,10 @@ impl<C: Clock> CronService<C> {
 
         let recovered = store.recover_stuck_jobs(clock.now_millis());
         if recovered > 0 {
-            info!("Recovered {} stuck cron job(s) from previous run", recovered);
+            info!(
+                "Recovered {} stuck cron job(s) from previous run",
+                recovered
+            );
             let _ = store.save();
         }
 

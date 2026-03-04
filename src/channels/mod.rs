@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::audit;
-use crate::backends::{self, QueryOptions};
+use crate::backends::{self, QueryOptions, QueryResult};
 use crate::cron::{
     self, CronSchedule, CronStore, format_timestamp, parse_add_command, truncate_for_name,
 };
@@ -355,7 +355,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
     };
 
     // Query AI backend with session
-    let (response, session_id, duration_ms, is_error) = match query_ai_with_session(
+    let qr = match query_ai_with_session(
         &mut store,
         channel.name(),
         user_id,
@@ -364,7 +364,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
     )
     .await
     {
-        Ok((resp, sid, dur)) => (resp, sid, dur, false),
+        Ok(qr) => qr,
         Err(e) => {
             warn!("AI query failed: {}", e);
             let err_msg = format!("Sorry, I encountered an error: {}", e);
@@ -375,6 +375,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
                 &err_msg,
                 None,
                 None,
+                None,
                 true,
             );
             let _ = channel.send_message(&err_msg).await;
@@ -382,30 +383,33 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         }
     };
 
+    let response = &qr.response;
+
     // Audit log the exchange
     audit::log_message(
         channel.name(),
         user_id,
         &combined_text,
-        &response,
-        if session_id.is_empty() {
+        response,
+        if qr.session_id.is_empty() {
             None
         } else {
-            Some(session_id.as_str())
+            Some(qr.session_id.as_str())
         },
-        duration_ms,
-        is_error,
+        qr.duration_ms,
+        qr.cost_usd,
+        false,
     );
 
     // Extract any media attachments (images, videos) from the response
-    let attachments = extract_media_attachments(&response);
+    let attachments = extract_media_attachments(response);
 
     // Send response with attachments if any
     if !attachments.is_empty() {
         debug!("Sending response with {} attachment(s)", attachments.len());
 
         // Clean up the response text - remove lines that mention the file paths
-        let cleaned_response = remove_file_path_lines(&response);
+        let cleaned_response = remove_file_path_lines(response);
 
         if let Err(e) = channel
             .send_message_with_attachments(&cleaned_response, &attachments)
@@ -415,7 +419,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         }
     } else {
         // Send regular text message
-        if let Err(e) = channel.send_message(&response).await {
+        if let Err(e) = channel.send_message(response).await {
             warn!("Failed to send message: {}", e);
         }
     }
@@ -532,6 +536,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a new conversation"),
     ("/skills", "List available skills"),
     ("/cron", "Manage scheduled jobs"),
+    ("/usage", "Show your usage stats"),
 ];
 
 /// Process a command if the message is one.
@@ -581,6 +586,26 @@ pub fn process_command(
         return Ok(CommandResult::Response(
             "Starting fresh! Our previous conversation has been cleared.".to_string(),
         ));
+    }
+
+    if text == "/usage" {
+        audit::log_event(
+            "command_used",
+            Some(channel),
+            Some(user_id),
+            Some("{\"command\":\"/usage\"}"),
+        );
+        let response = match audit::get_usage(channel, user_id) {
+            Ok((count, total_cost)) => {
+                let cost_line = match total_cost {
+                    Some(cost) if cost > 0.0 => format!("Total cost: ${:.4}\n", cost),
+                    _ => String::new(),
+                };
+                format!("Your usage:\n\nMessages: {}\n{}", count, cost_line)
+            }
+            Err(_) => "Usage stats not available.".to_string(),
+        };
+        return Ok(CommandResult::Response(response));
     }
 
     if text == "/skills" {
@@ -855,7 +880,7 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         Some(&job.prompt),
     )?;
 
-    let (response, _session_id, _duration_ms) = backends::query_with_options(
+    let qr = backends::query_with_options(
         &job.prompt,
         QueryOptions {
             system_prompt: Some(context_prompt),
@@ -865,7 +890,7 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
     )
     .await?;
 
-    Ok(format!("[Cron: {}]\n\n{}", job.name, response))
+    Ok(format!("[Cron: {}]\n\n{}", job.name, qr.response))
 }
 
 /// Find a job ID by full ID or prefix match
@@ -914,7 +939,7 @@ pub async fn query_ai_with_session(
     user_id: &str,
     text: &str,
     context_prompt: String,
-) -> Result<(String, String, Option<u64>)> {
+) -> Result<QueryResult> {
     let session_key = format!("{}:{}", channel, user_id);
     let existing_session = store.sessions.get(&session_key).cloned();
 
@@ -925,61 +950,62 @@ pub async fn query_ai_with_session(
         ..Default::default()
     };
 
-    let (response, session_id, duration_ms) =
-        match backends::query_with_options(text, options).await {
-            Ok((response, session_id, duration_ms)) => (response, session_id, duration_ms),
-            Err(e) => {
-                let error_msg = e.to_string();
-                // If session not found, clear it and retry without resuming
-                if error_msg.contains("No conversation found with session ID")
-                    || error_msg.contains("session")
-                {
-                    warn!("Session expired, starting fresh conversation");
-                    store.sessions.remove(&session_key);
-                    store.save()?;
+    let qr = match backends::query_with_options(text, options).await {
+        Ok(qr) => qr,
+        Err(e) => {
+            let error_msg = e.to_string();
+            // If session not found, clear it and retry without resuming
+            if error_msg.contains("No conversation found with session ID")
+                || error_msg.contains("session")
+            {
+                warn!("Session expired, starting fresh conversation");
+                store.sessions.remove(&session_key);
+                store.save()?;
 
-                    audit::log_event("session_expired", Some(channel), Some(user_id), None);
+                audit::log_event("session_expired", Some(channel), Some(user_id), None);
 
-                    let retry_options = backends::QueryOptions {
-                        system_prompt: Some(context_prompt),
-                        resume_session: None,
-                        skip_permissions: true,
-                        ..Default::default()
-                    };
+                let retry_options = backends::QueryOptions {
+                    system_prompt: Some(context_prompt),
+                    resume_session: None,
+                    skip_permissions: true,
+                    ..Default::default()
+                };
 
-                    match backends::query_with_options(text, retry_options).await {
-                        Ok((response, session_id, duration_ms)) => {
-                            (response, session_id, duration_ms)
-                        }
-                        Err(e) => {
-                            warn!("AI backend error on retry: {}", e);
-                            (
-                                format!("Sorry, I encountered an error: {}", e),
-                                String::new(),
-                                None,
-                            )
+                match backends::query_with_options(text, retry_options).await {
+                    Ok(qr) => qr,
+                    Err(e) => {
+                        warn!("AI backend error on retry: {}", e);
+                        QueryResult {
+                            response: format!("Sorry, I encountered an error: {}", e),
+                            session_id: String::new(),
+                            duration_ms: None,
+                            cost_usd: None,
                         }
                     }
-                } else {
-                    warn!("AI backend error: {}", e);
-                    (
-                        format!("Sorry, I encountered an error: {}", e),
-                        String::new(),
-                        None,
-                    )
+                }
+            } else {
+                warn!("AI backend error: {}", e);
+                QueryResult {
+                    response: format!("Sorry, I encountered an error: {}", e),
+                    session_id: String::new(),
+                    duration_ms: None,
+                    cost_usd: None,
                 }
             }
-        };
+        }
+    };
 
     // Save session ID for future messages
-    if !session_id.is_empty()
-        && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&session_id)
+    if !qr.session_id.is_empty()
+        && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&qr.session_id)
     {
-        store.sessions.insert(session_key, session_id.clone());
+        store
+            .sessions
+            .insert(session_key, qr.session_id.clone());
         store.save()?;
     }
 
-    Ok((response, session_id, duration_ms))
+    Ok(qr)
 }
 
 /// Handle onboarding flow - AI drives the conversation
@@ -992,8 +1018,8 @@ pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> R
         ..Default::default()
     };
 
-    let (response, _, _) = backends::query_with_options(message, options).await?;
-    Ok(response)
+    let qr = backends::query_with_options(message, options).await?;
+    Ok(qr.response)
 }
 
 /// Re-index memories for a user (called after Claude responds)

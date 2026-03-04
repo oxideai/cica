@@ -6,6 +6,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::backends::QueryResult;
 use crate::config::{self, Config};
 use crate::setup;
 
@@ -22,6 +23,7 @@ struct ClaudeResponse {
     result: Option<String>,
     session_id: Option<String>,
     duration_ms: Option<u64>,
+    total_cost_usd: Option<f64>,
 }
 
 #[derive(Default)]
@@ -36,14 +38,11 @@ pub struct QueryOptions {
 
 #[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
-    let (result, _, _) = query_with_options(prompt, QueryOptions::default()).await?;
-    Ok(result)
+    let result = query_with_options(prompt, QueryOptions::default()).await?;
+    Ok(result.response)
 }
 
-pub async fn query_with_options(
-    prompt: &str,
-    options: QueryOptions,
-) -> Result<(String, String, Option<u64>)> {
+pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
     let config = Config::load()?;
     let paths = config::paths()?;
 
@@ -184,11 +183,16 @@ pub async fn query_with_options(
             && let Some(result) = response.result
         {
             info!(
-                "Claude response received ({}ms)",
-                response.duration_ms.unwrap_or(0)
+                "Claude response received ({}ms, ${:.4})",
+                response.duration_ms.unwrap_or(0),
+                response.total_cost_usd.unwrap_or(0.0)
             );
-            let session_id = response.session_id.unwrap_or_default();
-            return Ok((result, session_id, response.duration_ms));
+            return Ok(QueryResult {
+                response: result,
+                session_id: response.session_id.unwrap_or_default(),
+                duration_ms: response.duration_ms,
+                cost_usd: response.total_cost_usd,
+            });
         }
     }
 

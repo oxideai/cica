@@ -15,11 +15,18 @@ pub struct QueryOptions {
     pub skip_permissions: bool,
 }
 
-/// Query the configured AI backend, returning (response, session_id, duration_ms).
-pub async fn query_with_options(
-    prompt: &str,
-    options: QueryOptions,
-) -> Result<(String, String, Option<u64>)> {
+/// Result returned by all AI backends.
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub response: String,
+    pub session_id: String,
+    pub duration_ms: Option<u64>,
+    /// Cost of this query in USD (backend-dependent; Claude provides this, Cursor does not).
+    pub cost_usd: Option<f64>,
+}
+
+/// Query the configured AI backend.
+pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
     let config = Config::load()?;
 
     match config.backend {
@@ -32,7 +39,7 @@ async fn query_claude(
     prompt: &str,
     options: QueryOptions,
     config: &Config,
-) -> Result<(String, String, Option<u64>)> {
+) -> Result<QueryResult> {
     let claude_options = claude::QueryOptions {
         system_prompt: options.system_prompt,
         resume_session: options.resume_session,
@@ -48,7 +55,7 @@ async fn query_cursor(
     prompt: &str,
     options: QueryOptions,
     config: &Config,
-) -> Result<(String, String, Option<u64>)> {
+) -> Result<QueryResult> {
     let cursor_options = cursor::QueryOptions {
         context: options.system_prompt,
         resume_session: options.resume_session,

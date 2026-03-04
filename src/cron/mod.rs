@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::audit;
-use crate::backends::{self, QueryOptions};
+use crate::backends::{self, QueryOptions, QueryResult};
 use crate::channels::get_channel_info;
 use crate::onboarding;
 
@@ -335,7 +335,7 @@ async fn execute_job<C: Clock>(
     // Send result to user if notify is enabled
     if job.notify {
         let message = match result {
-            Ok((response, _session_id, _duration_ms)) => {
+            Ok(QueryResult { response, .. }) => {
                 format!("[Cron: {}]\n\n{}", job.name, response)
             }
             Err(e) => {

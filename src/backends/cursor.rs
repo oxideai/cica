@@ -7,6 +7,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::backends::QueryResult;
 use crate::config::{self, Config};
 use crate::setup;
 
@@ -109,14 +110,11 @@ pub struct QueryOptions {
 
 #[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
-    let (result, _, _) = query_with_options(prompt, QueryOptions::default()).await?;
-    Ok(result)
+    let result = query_with_options(prompt, QueryOptions::default()).await?;
+    Ok(result.response)
 }
 
-pub async fn query_with_options(
-    prompt: &str,
-    options: QueryOptions,
-) -> Result<(String, String, Option<u64>)> {
+pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
     let config = Config::load()?;
     let paths = config::paths()?;
 
@@ -219,9 +217,12 @@ pub async fn query_with_options(
     }
 
     match final_result {
-        Some((result, duration)) => {
-            Ok((result, final_session_id.unwrap_or_default(), duration))
-        }
+        Some((result, duration)) => Ok(QueryResult {
+            response: result,
+            session_id: final_session_id.unwrap_or_default(),
+            duration_ms: duration,
+            cost_usd: None,
+        }),
         None => Err(anyhow!("No result found in Cursor output")),
     }
 }

@@ -632,7 +632,13 @@ pub fn process_command(
             "command_used",
             Some(channel),
             Some(user_id),
-            Some(&format!("{{\"command\":\"{}\"}}", text.split_whitespace().take(2).collect::<Vec<_>>().join(" "))),
+            Some(&format!(
+                "{{\"command\":\"{}\"}}",
+                text.split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )),
         );
         let args = text.strip_prefix("/cron").unwrap_or("").trim();
         return process_cron_command(channel, user_id, args);
@@ -999,9 +1005,7 @@ pub async fn query_ai_with_session(
     if !qr.session_id.is_empty()
         && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&qr.session_id)
     {
-        store
-            .sessions
-            .insert(session_key, qr.session_id.clone());
+        store.sessions.insert(session_key, qr.session_id.clone());
         store.save()?;
     }
 

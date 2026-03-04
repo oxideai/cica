@@ -35,11 +35,7 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
     }
 }
 
-async fn query_claude(
-    prompt: &str,
-    options: QueryOptions,
-    config: &Config,
-) -> Result<QueryResult> {
+async fn query_claude(prompt: &str, options: QueryOptions, config: &Config) -> Result<QueryResult> {
     let claude_options = claude::QueryOptions {
         system_prompt: options.system_prompt,
         resume_session: options.resume_session,
@@ -51,11 +47,7 @@ async fn query_claude(
     claude::query_with_options(prompt, claude_options).await
 }
 
-async fn query_cursor(
-    prompt: &str,
-    options: QueryOptions,
-    config: &Config,
-) -> Result<QueryResult> {
+async fn query_cursor(prompt: &str, options: QueryOptions, config: &Config) -> Result<QueryResult> {
     let cursor_options = cursor::QueryOptions {
         context: options.system_prompt,
         resume_session: options.resume_session,

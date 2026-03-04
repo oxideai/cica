@@ -191,10 +191,7 @@ fn log_event_inner(
 }
 
 /// Query per-user usage stats from the audit database.
-pub fn get_usage(
-    channel: &str,
-    user_id: &str,
-) -> Result<(u64, Option<f64>)> {
+pub fn get_usage(channel: &str, user_id: &str) -> Result<(u64, Option<f64>)> {
     with_db(|conn| {
         let (count, total_cost): (u64, Option<f64>) = conn.query_row(
             "SELECT COUNT(*), SUM(cost_usd) FROM messages WHERE channel = ?1 AND user_id = ?2 AND error = 0",

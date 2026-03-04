@@ -1,3 +1,4 @@
+mod audit;
 mod backends;
 mod channels;
 mod cmd;

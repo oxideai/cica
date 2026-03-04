@@ -15,8 +15,11 @@ pub struct QueryOptions {
     pub skip_permissions: bool,
 }
 
-/// Query the configured AI backend, returning (response, session_id).
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(String, String)> {
+/// Query the configured AI backend, returning (response, session_id, duration_ms).
+pub async fn query_with_options(
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<(String, String, Option<u64>)> {
     let config = Config::load()?;
 
     match config.backend {
@@ -29,7 +32,7 @@ async fn query_claude(
     prompt: &str,
     options: QueryOptions,
     config: &Config,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<u64>)> {
     let claude_options = claude::QueryOptions {
         system_prompt: options.system_prompt,
         resume_session: options.resume_session,
@@ -45,7 +48,7 @@ async fn query_cursor(
     prompt: &str,
     options: QueryOptions,
     config: &Config,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<u64>)> {
     let cursor_options = cursor::QueryOptions {
         context: options.system_prompt,
         resume_session: options.resume_session,

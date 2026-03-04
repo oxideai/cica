@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use crate::audit;
 use crate::config;
 
 /// How long a pairing code remains valid
@@ -130,6 +131,13 @@ impl PairingStore {
         self.pending.push(request);
         self.save()?;
 
+        audit::log_event(
+            "pairing_requested",
+            Some(channel),
+            Some(user_id),
+            Some(&format!("{{\"code\":\"{}\"}}", code)),
+        );
+
         Ok((code, true))
     }
 
@@ -157,6 +165,22 @@ impl PairingStore {
 
         self.save()?;
 
+        let detail = format!(
+            "{{\"code\":\"{}\",\"username\":{}}}",
+            code_upper,
+            request
+                .username
+                .as_deref()
+                .map(|u| format!("\"{}\"", u))
+                .unwrap_or_else(|| "null".to_string()),
+        );
+        audit::log_event(
+            "user_approved",
+            Some(&request.channel),
+            Some(&request.user_id),
+            Some(&detail),
+        );
+
         Ok(request)
     }
 
@@ -165,14 +189,27 @@ impl PairingStore {
         &mut self,
         channel: &str,
         user_id: &str,
-        _username: Option<String>,
+        username: Option<String>,
         _display_name: Option<String>,
     ) -> Result<()> {
         self.approved
             .entry(channel.to_string())
             .or_default()
             .push(user_id.to_string());
-        self.save()
+        self.save()?;
+
+        let detail = username
+            .as_deref()
+            .map(|u| format!("{{\"username\":\"{}\"}}", u))
+            .unwrap_or_else(|| "{}".to_string());
+        audit::log_event(
+            "user_auto_approved",
+            Some(channel),
+            Some(user_id),
+            Some(&detail),
+        );
+
+        Ok(())
     }
 
     /// List all pending requests

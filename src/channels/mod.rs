@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::audit;
 use crate::backends::{self, QueryOptions};
 use crate::cron::{
     self, CronSchedule, CronStore, format_timestamp, parse_add_command, truncate_for_name,
@@ -354,7 +355,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
     };
 
     // Query AI backend with session
-    let (response, _session_id) = match query_ai_with_session(
+    let (response, session_id, duration_ms, is_error) = match query_ai_with_session(
         &mut store,
         channel.name(),
         user_id,
@@ -363,15 +364,38 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
     )
     .await
     {
-        Ok(r) => r,
+        Ok((resp, sid, dur)) => (resp, sid, dur, false),
         Err(e) => {
             warn!("AI query failed: {}", e);
-            let _ = channel
-                .send_message(&format!("Sorry, I encountered an error: {}", e))
-                .await;
+            let err_msg = format!("Sorry, I encountered an error: {}", e);
+            audit::log_message(
+                channel.name(),
+                user_id,
+                &combined_text,
+                &err_msg,
+                None,
+                None,
+                true,
+            );
+            let _ = channel.send_message(&err_msg).await;
             return;
         }
     };
+
+    // Audit log the exchange
+    audit::log_message(
+        channel.name(),
+        user_id,
+        &combined_text,
+        &response,
+        if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id.as_str())
+        },
+        duration_ms,
+        is_error,
+    );
 
     // Extract any media attachments (images, videos) from the response
     let attachments = extract_media_attachments(&response);
@@ -535,14 +559,37 @@ pub fn process_command(
             ));
         }
         let session_key = format!("{}:{}", channel, user_id);
-        store.sessions.remove(&session_key);
+        let old_session_id = store.sessions.remove(&session_key);
         store.save()?;
+
+        let detail = old_session_id
+            .as_ref()
+            .map(|sid| format!("{{\"old_session_id\":\"{}\"}}", sid));
+        audit::log_event(
+            "session_reset",
+            Some(channel),
+            Some(user_id),
+            detail.as_deref(),
+        );
+        audit::log_event(
+            "command_used",
+            Some(channel),
+            Some(user_id),
+            Some("{\"command\":\"/new\"}"),
+        );
+
         return Ok(CommandResult::Response(
             "Starting fresh! Our previous conversation has been cleared.".to_string(),
         ));
     }
 
     if text == "/skills" {
+        audit::log_event(
+            "command_used",
+            Some(channel),
+            Some(user_id),
+            Some("{\"command\":\"/skills\"}"),
+        );
         let available_skills = skills::discover_skills().unwrap_or_default();
         if available_skills.is_empty() {
             return Ok(CommandResult::Response("No skills installed.".to_string()));
@@ -556,6 +603,12 @@ pub fn process_command(
 
     // Handle /cron commands
     if text.starts_with("/cron") {
+        audit::log_event(
+            "command_used",
+            Some(channel),
+            Some(user_id),
+            Some(&format!("{{\"command\":\"{}\"}}", text.split_whitespace().take(2).collect::<Vec<_>>().join(" "))),
+        );
         let args = text.strip_prefix("/cron").unwrap_or("").trim();
         return process_cron_command(channel, user_id, args);
     }
@@ -802,7 +855,7 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         Some(&job.prompt),
     )?;
 
-    let (response, _session_id) = backends::query_with_options(
+    let (response, _session_id, _duration_ms) = backends::query_with_options(
         &job.prompt,
         QueryOptions {
             system_prompt: Some(context_prompt),
@@ -861,7 +914,7 @@ pub async fn query_ai_with_session(
     user_id: &str,
     text: &str,
     context_prompt: String,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<u64>)> {
     let session_key = format!("{}:{}", channel, user_id);
     let existing_session = store.sessions.get(&session_key).cloned();
 
@@ -872,44 +925,51 @@ pub async fn query_ai_with_session(
         ..Default::default()
     };
 
-    let (response, session_id) = match backends::query_with_options(text, options).await {
-        Ok((response, session_id)) => (response, session_id),
-        Err(e) => {
-            let error_msg = e.to_string();
-            // If session not found, clear it and retry without resuming
-            if error_msg.contains("No conversation found with session ID")
-                || error_msg.contains("session")
-            {
-                warn!("Session expired, starting fresh conversation");
-                store.sessions.remove(&session_key);
-                store.save()?;
+    let (response, session_id, duration_ms) =
+        match backends::query_with_options(text, options).await {
+            Ok((response, session_id, duration_ms)) => (response, session_id, duration_ms),
+            Err(e) => {
+                let error_msg = e.to_string();
+                // If session not found, clear it and retry without resuming
+                if error_msg.contains("No conversation found with session ID")
+                    || error_msg.contains("session")
+                {
+                    warn!("Session expired, starting fresh conversation");
+                    store.sessions.remove(&session_key);
+                    store.save()?;
 
-                let retry_options = backends::QueryOptions {
-                    system_prompt: Some(context_prompt),
-                    resume_session: None,
-                    skip_permissions: true,
-                    ..Default::default()
-                };
+                    audit::log_event("session_expired", Some(channel), Some(user_id), None);
 
-                match backends::query_with_options(text, retry_options).await {
-                    Ok((response, session_id)) => (response, session_id),
-                    Err(e) => {
-                        warn!("AI backend error on retry: {}", e);
-                        (
-                            format!("Sorry, I encountered an error: {}", e),
-                            String::new(),
-                        )
+                    let retry_options = backends::QueryOptions {
+                        system_prompt: Some(context_prompt),
+                        resume_session: None,
+                        skip_permissions: true,
+                        ..Default::default()
+                    };
+
+                    match backends::query_with_options(text, retry_options).await {
+                        Ok((response, session_id, duration_ms)) => {
+                            (response, session_id, duration_ms)
+                        }
+                        Err(e) => {
+                            warn!("AI backend error on retry: {}", e);
+                            (
+                                format!("Sorry, I encountered an error: {}", e),
+                                String::new(),
+                                None,
+                            )
+                        }
                     }
+                } else {
+                    warn!("AI backend error: {}", e);
+                    (
+                        format!("Sorry, I encountered an error: {}", e),
+                        String::new(),
+                        None,
+                    )
                 }
-            } else {
-                warn!("AI backend error: {}", e);
-                (
-                    format!("Sorry, I encountered an error: {}", e),
-                    String::new(),
-                )
             }
-        }
-    };
+        };
 
     // Save session ID for future messages
     if !session_id.is_empty()
@@ -919,7 +979,7 @@ pub async fn query_ai_with_session(
         store.save()?;
     }
 
-    Ok((response, session_id))
+    Ok((response, session_id, duration_ms))
 }
 
 /// Handle onboarding flow - AI drives the conversation
@@ -932,7 +992,7 @@ pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> R
         ..Default::default()
     };
 
-    let (response, _) = backends::query_with_options(message, options).await?;
+    let (response, _, _) = backends::query_with_options(message, options).await?;
     Ok(response)
 }
 

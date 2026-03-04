@@ -26,6 +26,8 @@ pub struct Paths {
     // Cursor CLI paths
     pub cursor_cli_dir: PathBuf,
     pub cursor_home: PathBuf,
+    // Audit database
+    pub audit_db: PathBuf,
 }
 
 /// Get all Cica paths
@@ -54,6 +56,8 @@ pub fn paths() -> Result<Paths> {
         // Cursor CLI paths
         cursor_cli_dir: deps_dir.join("cursor-cli"),
         cursor_home: internal_dir.join("cursor-home"),
+        // Audit database
+        audit_db: base.join("audit.db"),
         base,
     })
 }
@@ -102,6 +106,10 @@ Example: "I can't access your calendar directly, but we could create a calendar 
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 // ============================================================================
 // Config Types
 // ============================================================================
@@ -130,6 +138,10 @@ pub struct Config {
     /// Which AI backend to use (claude or cursor)
     #[serde(default)]
     pub backend: AiBackend,
+
+    /// Enable audit logging of conversations and system events (default: true)
+    #[serde(default = "default_true")]
+    pub audit: bool,
 
     /// Global onboarding prompt (can be overridden per channel)
     pub onboarding_prompt: Option<String>,

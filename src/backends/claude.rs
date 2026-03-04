@@ -36,11 +36,14 @@ pub struct QueryOptions {
 
 #[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
-    let (result, _) = query_with_options(prompt, QueryOptions::default()).await?;
+    let (result, _, _) = query_with_options(prompt, QueryOptions::default()).await?;
     Ok(result)
 }
 
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(String, String)> {
+pub async fn query_with_options(
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<(String, String, Option<u64>)> {
     let config = Config::load()?;
     let paths = config::paths()?;
 
@@ -185,7 +188,7 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(
                 response.duration_ms.unwrap_or(0)
             );
             let session_id = response.session_id.unwrap_or_default();
-            return Ok((result, session_id));
+            return Ok((result, session_id, response.duration_ms));
         }
     }
 

@@ -109,11 +109,14 @@ pub struct QueryOptions {
 
 #[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
-    let (result, _) = query_with_options(prompt, QueryOptions::default()).await?;
+    let (result, _, _) = query_with_options(prompt, QueryOptions::default()).await?;
     Ok(result)
 }
 
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(String, String)> {
+pub async fn query_with_options(
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<(String, String, Option<u64>)> {
     let config = Config::load()?;
     let paths = config::paths()?;
 
@@ -210,13 +213,15 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<(
                     "Cursor response received ({}ms)",
                     event.duration_ms.unwrap_or(0)
                 );
-                final_result = Some(result);
+                final_result = Some((result, event.duration_ms));
             }
         }
     }
 
     match final_result {
-        Some(result) => Ok((result, final_session_id.unwrap_or_default())),
+        Some((result, duration)) => {
+            Ok((result, final_session_id.unwrap_or_default(), duration))
+        }
         None => Err(anyhow!("No result found in Cursor output")),
     }
 }

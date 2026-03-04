@@ -22,6 +22,7 @@ use chrono::{DateTime, Local};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::audit;
 use crate::backends::{self, QueryOptions};
 use crate::channels::get_channel_info;
 use crate::onboarding;
@@ -289,6 +290,18 @@ async fn execute_job<C: Clock>(
     let end_time = clock.now_millis();
     let duration_ms = end_time - start_time;
 
+    // Audit log
+    let status_str = if result.is_ok() { "success" } else { "failed" };
+    audit::log_event(
+        "cron_executed",
+        Some(&job.channel),
+        Some(&job.user_id),
+        Some(&format!(
+            "{{\"job_id\":\"{}\",\"job_name\":\"{}\",\"status\":\"{}\",\"duration_ms\":{}}}",
+            job.id, job.name, status_str, duration_ms
+        )),
+    );
+
     // Update job state
     {
         let mut store = store.lock().await;
@@ -322,7 +335,7 @@ async fn execute_job<C: Clock>(
     // Send result to user if notify is enabled
     if job.notify {
         let message = match result {
-            Ok((response, _session_id)) => {
+            Ok((response, _session_id, _duration_ms)) => {
                 format!("[Cron: {}]\n\n{}", job.name, response)
             }
             Err(e) => {

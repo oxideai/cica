@@ -572,8 +572,13 @@ async fn handle_message_event(
         None => return Ok(()),
     };
 
-    // Get thread_ts - this is crucial for AI Assistant apps
-    // For AI apps, messages come with a thread_ts that we must reply to
+    // Only process DMs here. Channel messages (including thread replies)
+    // require an @mention and are handled by handle_app_mention_event.
+    let channel_str = channel_id.to_string();
+    if !channel_str.starts_with('D') {
+        return Ok(());
+    }
+
     let thread_ts = event.origin.thread_ts.clone();
 
     // Get message text

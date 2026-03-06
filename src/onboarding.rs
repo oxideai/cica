@@ -289,7 +289,7 @@ pub fn build_context_prompt_for_user(
             channel_name
         ));
         lines.push(
-            "IMPORTANT: Never send streaming/partial replies to external messaging surfaces."
+            "IMPORTANT: Your final response is the ONLY thing sent to the user. Tool calls, intermediate reasoning, and earlier assistant messages are NOT visible. If a task produces a deliverable (report, analysis, code, etc.), the full deliverable MUST be in your final response — not a summary of what you did."
                 .to_string(),
         );
         lines.push(String::new());

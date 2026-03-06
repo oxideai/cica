@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::config;
+use crate::setup;
 
 /// A discovered skill
 #[derive(Debug, Clone)]
@@ -39,6 +40,8 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
         }
 
         if let Ok(skill) = parse_skill(&skill_file) {
+            // Ensure npm dependencies are installed for this skill
+            setup::ensure_skill_deps(&path);
             skills.push(skill);
         }
     }

@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
-use tracing::info;
+use std::process::Stdio;
+use tracing::{info, warn};
 
 use crate::config;
 use crate::memory;
@@ -669,4 +670,61 @@ pub async fn ensure_deps(config: &crate::config::Config) -> Result<()> {
 
     ensure_embedding_model()?;
     Ok(())
+}
+
+/// Run `bun install` for a skill directory if it has a package.json with
+/// dependencies but no node_modules. Called at runtime when skills are discovered.
+pub fn ensure_skill_deps(skill_dir: &Path) {
+    let pkg_json = skill_dir.join("package.json");
+    let node_modules = skill_dir.join("node_modules");
+
+    if !pkg_json.exists() || node_modules.exists() {
+        return;
+    }
+
+    // Check if package.json actually has dependencies
+    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+        let has_deps =
+            content.contains("\"dependencies\"") && !content.contains("\"dependencies\": {}");
+        if !has_deps {
+            return;
+        }
+    } else {
+        return;
+    }
+
+    let bun = match find_bun() {
+        Some(b) => b,
+        None => return,
+    };
+
+    let skill_name = skill_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    info!("Installing dependencies for skill: {}", skill_name);
+
+    match std::process::Command::new(&bun)
+        .arg("install")
+        .current_dir(skill_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            info!("Dependencies installed for skill: {}", skill_name);
+        }
+        Ok(output) => {
+            warn!(
+                "bun install failed for skill {} (exit {:?}): {}",
+                skill_name,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(e) => {
+            warn!("Failed to run bun install for skill {}: {}", skill_name, e);
+        }
+    }
 }

@@ -291,16 +291,15 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
         let line = line.trim();
 
         for ext in &media_extensions {
-            if line.contains(ext) {
-                if let Some(start) = line.find("/Users/") {
-                    if let Some(ext_pos) = line[start..].find(ext) {
-                        let end_pos = start + ext_pos + ext.len();
-                        let path_str = &line[start..end_pos];
-                        if std::path::Path::new(path_str).exists() {
-                            attachments.push(PathBuf::from(path_str));
-                            break;
-                        }
-                    }
+            if line.contains(ext)
+                && let Some(start) = line.find("/Users/")
+                && let Some(ext_pos) = line[start..].find(ext)
+            {
+                let end_pos = start + ext_pos + ext.len();
+                let path_str = &line[start..end_pos];
+                if std::path::Path::new(path_str).exists() {
+                    attachments.push(PathBuf::from(path_str));
+                    break;
                 }
             }
         }

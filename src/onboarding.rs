@@ -294,6 +294,19 @@ pub fn build_context_prompt_for_user(
         );
         lines.push(String::new());
 
+        // Media attachments
+        lines.push("### Media Attachments".to_string());
+        lines.push(
+            "When your response includes a file that should be sent to the user (image, video, etc.), output it on its own line using this format:"
+                .to_string(),
+        );
+        lines.push("`[attachment:/path/to/file.png]`".to_string());
+        lines.push(
+            "The messaging system will automatically detect it, attach the file, and remove the marker line from the message. Use this for any generated images, videos, or other media files."
+                .to_string(),
+        );
+        lines.push(String::new());
+
         // Channel-specific formatting
         lines.push("### Text Formatting".to_string());
         match channel_name.to_lowercase().as_str() {

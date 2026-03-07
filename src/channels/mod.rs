@@ -258,11 +258,29 @@ pub async fn execute_action(
 
 /// Extract media file paths from Claude's response text.
 ///
-/// Looks for file paths in the response that point to image or video files.
+/// First looks for explicit `[attachment:/path/to/file]` markers (reliable),
+/// then falls back to heuristic path detection for backwards compatibility.
 fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     let mut attachments = Vec::new();
 
-    // Look for file paths that end in media extensions
+    // First pass: explicit [attachment:path] markers
+    for cap in response.match_indices("[attachment:") {
+        let start = cap.0 + "[attachment:".len();
+        if let Some(end) = response[start..].find(']') {
+            let path_str = response[start..start + end].trim();
+            let path = PathBuf::from(path_str);
+            if path.exists() && !attachments.contains(&path) {
+                attachments.push(path);
+            }
+        }
+    }
+
+    // If we found explicit markers, use only those
+    if !attachments.is_empty() {
+        return attachments;
+    }
+
+    // Fallback: heuristic detection for paths ending in media extensions
     let media_extensions = [
         // Images
         ".png", ".jpg", ".jpeg", ".gif", ".webp", // Videos
@@ -272,12 +290,9 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     for line in response.lines() {
         let line = line.trim();
 
-        // Check if line contains a file path
         for ext in &media_extensions {
             if line.contains(ext) {
-                // Try to extract the path - look for paths starting with /Users/
                 if let Some(start) = line.find("/Users/") {
-                    // Find the end of the extension (not whitespace, since paths can have spaces)
                     if let Some(ext_pos) = line[start..].find(ext) {
                         let end_pos = start + ext_pos + ext.len();
                         let path_str = &line[start..end_pos];
@@ -294,7 +309,7 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     attachments
 }
 
-/// Remove lines from the response that contain file paths.
+/// Remove lines from the response that contain file paths or attachment markers.
 ///
 /// This cleans up responses to avoid showing technical file paths to the user
 /// when media files are being sent as attachments.
@@ -304,8 +319,9 @@ fn remove_file_path_lines(response: &str) -> String {
         .filter(|line| {
             let trimmed = line.trim();
             let lower = trimmed.to_lowercase();
-            // Skip lines that contain file paths or mention saving files
-            !trimmed.contains("/Users/")
+            // Skip lines with attachment markers or file paths
+            !trimmed.contains("[attachment:")
+                && !trimmed.contains("/Users/")
                 && !lower.contains("saved to")
                 && !lower.contains("image has been saved")
                 && !lower.contains("video has been saved")

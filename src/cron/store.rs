@@ -13,6 +13,56 @@ use super::schedule::CronSchedule;
 /// Unique identifier for a cron job.
 pub type JobId = String;
 
+/// Where to deliver cron job results.
+///
+/// Generic across platforms. For single-channel platforms (Telegram, Signal),
+/// the target is always the owner's DM (represented by the default).
+/// For multi-channel platforms (Slack, Discord), the target can be a specific
+/// channel ID and optionally a thread ID.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DeliveryTarget {
+    /// Target channel/conversation ID (e.g., Slack channel ID "C0123456789").
+    /// When None, delivers to the owner's DM (the user_id field on the job).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+
+    /// Optional thread ID for threaded delivery (e.g., Slack thread_ts).
+    /// Only meaningful when channel_id is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+impl DeliveryTarget {
+    /// Create a target that delivers to the owner's DM.
+    #[allow(dead_code)]
+    pub fn owner_dm() -> Self {
+        Self::default()
+    }
+
+    /// Create a target that delivers to a specific channel.
+    pub fn channel(channel_id: String) -> Self {
+        Self {
+            channel_id: Some(channel_id),
+            thread_id: None,
+        }
+    }
+
+    /// Create a target that delivers to a specific thread in a channel.
+    #[allow(dead_code)]
+    pub fn thread(channel_id: String, thread_id: String) -> Self {
+        Self {
+            channel_id: Some(channel_id),
+            thread_id: Some(thread_id),
+        }
+    }
+
+    /// Resolve the effective channel_id for delivery.
+    /// Falls back to user_id (owner DM) when no explicit channel is set.
+    pub fn resolve_channel_id<'a>(&'a self, user_id: &'a str) -> &'a str {
+        self.channel_id.as_deref().unwrap_or(user_id)
+    }
+}
+
 /// Status of last job execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(tag = "status", content = "error")]
@@ -77,6 +127,10 @@ pub struct CronJob {
     /// Owner: user ID within the channel.
     pub user_id: String,
 
+    /// Where to deliver results. Defaults to owner's DM when absent.
+    #[serde(default)]
+    pub target: DeliveryTarget,
+
     /// Whether to send results back to the user's chat.
     #[serde(default = "default_true")]
     pub notify: bool,
@@ -105,6 +159,7 @@ impl CronJob {
         schedule: CronSchedule,
         channel: String,
         user_id: String,
+        target: Option<DeliveryTarget>,
     ) -> Self {
         let now = now_millis();
         let mut job = Self {
@@ -114,6 +169,7 @@ impl CronJob {
             schedule,
             channel,
             user_id,
+            target: target.unwrap_or_default(),
             notify: true,
             enabled: true,
             created_at: now,
@@ -315,6 +371,7 @@ mod tests {
             CronSchedule::Every(60_000),
             "telegram".to_string(),
             "12345".to_string(),
+            None,
         );
 
         assert!(!job.id.is_empty());
@@ -323,6 +380,27 @@ mod tests {
         assert!(job.enabled);
         assert!(job.notify);
         assert!(job.state.next_run_at.is_some());
+        assert_eq!(job.target, DeliveryTarget::default());
+    }
+
+    #[test]
+    fn test_job_creation_with_target() {
+        let job = CronJob::new(
+            "Test Job".to_string(),
+            "Test prompt".to_string(),
+            CronSchedule::Every(60_000),
+            "slack".to_string(),
+            "U12345".to_string(),
+            Some(DeliveryTarget::channel("C98765".to_string())),
+        );
+
+        assert_eq!(
+            job.target,
+            DeliveryTarget {
+                channel_id: Some("C98765".to_string()),
+                thread_id: None,
+            }
+        );
     }
 
     #[test]
@@ -333,6 +411,7 @@ mod tests {
             CronSchedule::Every(60_000),
             "test".to_string(),
             "user1".to_string(),
+            None,
         );
 
         // Set next_run to 1000
@@ -355,8 +434,44 @@ mod tests {
             CronSchedule::Every(60_000),
             "telegram".to_string(),
             "12345".to_string(),
+            None,
         );
 
         assert_eq!(job.user_key(), "telegram:12345");
+    }
+
+    #[test]
+    fn test_delivery_target_resolve() {
+        let default_target = DeliveryTarget::default();
+        assert_eq!(default_target.resolve_channel_id("U12345"), "U12345");
+
+        let channel_target = DeliveryTarget::channel("C98765".to_string());
+        assert_eq!(channel_target.resolve_channel_id("U12345"), "C98765");
+
+        let thread_target =
+            DeliveryTarget::thread("C98765".to_string(), "1234567890.123456".to_string());
+        assert_eq!(thread_target.resolve_channel_id("U12345"), "C98765");
+    }
+
+    #[test]
+    fn test_delivery_target_serde_backward_compat() {
+        // Simulate a CronJob JSON without a target field (old format)
+        let json = r#"{
+            "id": "test-id",
+            "name": "Test",
+            "prompt": "Hello",
+            "schedule": {"type": "Every", "value": 60000},
+            "channel": "telegram",
+            "user_id": "12345",
+            "notify": true,
+            "enabled": true,
+            "created_at": 1700000000000,
+            "state": {}
+        }"#;
+
+        let job: CronJob = serde_json::from_str(json).unwrap();
+        assert_eq!(job.target, DeliveryTarget::default());
+        assert!(job.target.channel_id.is_none());
+        assert!(job.target.thread_id.is_none());
     }
 }

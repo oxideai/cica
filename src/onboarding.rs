@@ -414,6 +414,14 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
+    // Current user context (for skills/tools that need channel and user_id)
+    if let (Some(ch), Some(uid)) = (channel_id, user_id) {
+        lines.push("## Current User Context".to_string());
+        lines.push(format!("- Channel: {}", ch));
+        lines.push(format!("- User ID: {}", uid));
+        lines.push(String::new());
+    }
+
     // MCP configuration
     let cfg = config::Config::load().unwrap_or_default();
     lines.push("## MCP (Model Context Protocol)".to_string());
@@ -478,6 +486,89 @@ pub fn build_context_prompt_for_user(
     }
     lines.push(String::new());
     lines.push("After adding an MCP server, it will be available on the next message (new session). The user may need to send /new to start a fresh session for new MCP servers to take effect.".to_string());
+    lines.push(String::new());
+
+    // Cron job management
+    lines.push("## Cron Job Management".to_string());
+    lines.push(
+        "You can manage scheduled cron jobs conversationally by reading and writing the cron store file directly."
+            .to_string(),
+    );
+    lines.push(format!(
+        "The cron store is a JSON file at: {}",
+        paths.base.join("cron.json").display()
+    ));
+    lines.push(String::new());
+    lines.push(
+        r#"### Cron Store Format
+
+The file is a JSON object with a `jobs` key mapping job IDs to job objects:
+
+```json
+{
+  "jobs": {
+    "uuid-string": {
+      "id": "uuid-string",
+      "name": "Short name (max 30 chars)",
+      "prompt": "The prompt to execute",
+      "schedule": { "type": "Every", "value": 3600000 },
+      "channel": "slack",
+      "user_id": "U12345678",
+      "target": {
+        "channel_id": "C12345678"
+      },
+      "notify": true,
+      "enabled": true,
+      "created_at": 1700000000000,
+      "state": {
+        "next_run_at": 1700003600000,
+        "last_run_at": null,
+        "last_status": "Pending",
+        "last_duration_ms": null,
+        "failure_count": 0
+      }
+    }
+  }
+}
+```
+
+### Schedule Types
+
+- Recurring interval (milliseconds): `{ "type": "Every", "value": 3600000 }` (common: 10s=10000, 1m=60000, 5m=300000, 1h=3600000, 1d=86400000)
+- One-time (Unix ms timestamp): `{ "type": "At", "value": 1700000000000 }`
+- Cron expression (5-field): `{ "type": "Cron", "value": "0 9 * * *" }` (minute hour day-of-month month day-of-week)
+
+### Delivery Target
+
+Controls where results are sent. Omit entirely or use `{}` for owner DM (default).
+
+- `channel_id`: a platform channel ID (e.g., Slack channel "C0123456789"). Null/absent = owner DM.
+- `thread_id`: optional thread identifier (e.g., Slack thread_ts). Only meaningful with channel_id.
+
+For Telegram and Signal, target is ignored (always DMs the owner).
+
+### Creating a Job
+
+1. Generate a UUID (use `uuidgen` command)
+2. Set `channel` and `user_id` from Current User Context above
+3. Set `created_at` to current Unix milliseconds
+4. For `state`, use defaults: `{ "next_run_at": null, "last_run_at": null, "last_status": "Pending", "last_duration_ms": null, "failure_count": 0 }`
+5. Calculate `next_run_at`: for Every schedules use `current_time_ms + interval_ms`, for At use the timestamp, for Cron set to null (the scheduler calculates it)
+6. Read existing cron.json, add the job, write it back
+
+The scheduler automatically reloads cron.json every 60 seconds — changes take effect without a restart.
+
+### Other Operations
+
+- **List**: Read cron.json, filter by channel + user_id
+- **Pause**: Set `enabled` to false and `next_run_at` to null
+- **Resume**: Set `enabled` to true and recalculate `next_run_at`
+- **Delete**: Remove the job entry from the jobs map
+- **Edit**: Update fields (prompt, schedule, target, name), recalculate `next_run_at` if schedule changed
+
+IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"` — they are being executed."#
+            .to_string(),
+    );
     lines.push(String::new());
 
     // Project context from files

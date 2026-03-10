@@ -123,7 +123,7 @@ async fn set_suggested_prompts(
 // ============================================================================
 
 /// Convert standard Markdown to Slack's mrkdwn format
-fn markdown_to_mrkdwn(text: &str) -> String {
+pub fn markdown_to_mrkdwn(text: &str) -> String {
     let mut result = text.to_string();
 
     // Convert bold: **text** -> *text*

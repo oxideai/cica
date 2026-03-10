@@ -6,7 +6,7 @@ pub mod store;
 
 pub use clock::{Clock, SystemClock};
 pub use schedule::CronSchedule;
-pub use store::{CronJob, CronStore, JobId, JobStatus};
+pub use store::{CronJob, CronStore, DeliveryTarget, JobId, JobStatus};
 
 // Re-export for tests
 #[cfg(test)]
@@ -43,9 +43,14 @@ impl Default for CronConfig {
 }
 
 /// Type alias for the result sender callback.
-/// (channel, user_id, message) -> Result<()>
+/// (channel, user_id, target, message) -> Result<()>
 pub type ResultSender = Arc<
-    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+    dyn Fn(
+            String,
+            String,
+            DeliveryTarget,
+            String,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -158,8 +163,9 @@ impl<C: Clock> CronService<C> {
         schedule: CronSchedule,
         channel: String,
         user_id: String,
+        target: Option<DeliveryTarget>,
     ) -> Result<JobId> {
-        let job = CronJob::new(name, prompt, schedule, channel, user_id);
+        let job = CronJob::new(name, prompt, schedule, channel, user_id, target);
         let mut store = self.store.lock().await;
         store.add(job)
     }
@@ -343,7 +349,10 @@ async fn execute_job<C: Clock>(
             }
         };
 
-        if let Err(e) = result_sender(job.channel.clone(), job.user_id.clone(), message).await {
+        if let Err(e) =
+            result_sender(job.channel.clone(), job.user_id.clone(), job.target.clone(), message)
+                .await
+        {
             warn!("Failed to send cron result to user: {}", e);
         }
     }

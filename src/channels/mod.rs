@@ -15,7 +15,8 @@ use tracing::{debug, warn};
 use crate::audit;
 use crate::backends::{self, QueryOptions, QueryResult};
 use crate::cron::{
-    self, CronSchedule, CronStore, format_timestamp, parse_add_command, truncate_for_name,
+    self, CronSchedule, CronStore, DeliveryTarget, format_timestamp, parse_add_command,
+    truncate_for_name,
 };
 use crate::memory::MemoryIndex;
 use crate::onboarding;
@@ -662,6 +663,29 @@ pub fn process_command(
     Ok(CommandResult::NotACommand)
 }
 
+/// Extract --target <value> from a command string, returning (target, remaining_text).
+fn extract_target_flag(input: &str) -> (Option<DeliveryTarget>, String) {
+    if let Some(idx) = input.find("--target ") {
+        let after_flag = &input[idx + "--target ".len()..];
+        let value_end = after_flag.find(' ').unwrap_or(after_flag.len());
+        let target_value = &after_flag[..value_end];
+
+        // Build remaining text without the flag
+        let before = input[..idx].trim();
+        let after = if value_end < after_flag.len() {
+            after_flag[value_end..].trim()
+        } else {
+            ""
+        };
+        let remaining = format!("{} {}", before, after).trim().to_string();
+
+        let target = DeliveryTarget::channel(target_value.to_string());
+        (Some(target), remaining)
+    } else {
+        (None, input.to_string())
+    }
+}
+
 /// Process /cron subcommands
 fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<CommandResult> {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
@@ -689,13 +713,27 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                     .map(format_timestamp)
                     .unwrap_or_else(|| "—".to_string());
                 let enabled = if job.enabled { "" } else { " (paused)" };
+                let target_info = if job.target.channel_id.is_some() {
+                    format!(
+                        "  Target: {}{}\n",
+                        job.target.channel_id.as_deref().unwrap_or("DM"),
+                        job.target
+                            .thread_id
+                            .as_ref()
+                            .map(|t| format!(" (thread: {})", t))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    String::new()
+                };
 
                 response.push_str(&format!(
-                    "\n[{}] {}{}\n  Schedule: {}\n  Status: {} | Next: {}\n",
+                    "\n[{}] {}{}\n  Schedule: {}\n{}  Status: {} | Next: {}\n",
                     job.short_id(),
                     job.name,
                     enabled,
                     job.schedule.description(),
+                    target_info,
                     status,
                     next
                 ));
@@ -706,16 +744,19 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
         "add" => {
             if rest.is_empty() {
                 return Ok(CommandResult::Response(
-                    "Usage: /cron add <schedule> <prompt>\n\n\
+                    "Usage: /cron add <schedule> <prompt> [--target <channel_id>]\n\n\
                      Examples:\n\
                      /cron add every 1h Check my emails\n\
                      /cron add every 10s Say hello\n\
-                     /cron add 0 9 * * * Good morning!"
+                     /cron add 0 9 * * * Good morning!\n\
+                     /cron add every 1h Check emails --target C0123456789"
                         .to_string(),
                 ));
             }
 
-            let (schedule, prompt) = match parse_add_command(rest) {
+            let (target, rest_without_target) = extract_target_flag(rest);
+
+            let (schedule, prompt) = match parse_add_command(&rest_without_target) {
                 Ok(result) => result,
                 Err(e) => return Ok(CommandResult::Response(format!("Error: {}", e))),
             };
@@ -728,6 +769,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 schedule.clone(),
                 channel.to_string(),
                 user_id.to_string(),
+                target,
             );
             let id = store.add(job)?;
 
@@ -866,7 +908,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
         _ => Ok(CommandResult::Response(
             "Cron job commands:\n\n\
              /cron list - List your scheduled jobs\n\
-             /cron add <schedule> <prompt> - Create a new job\n\
+             /cron add <schedule> <prompt> [--target <channel_id>] - Create a new job\n\
              /cron remove <job-id> - Delete a job\n\
              /cron run <job-id> - Run immediately (for testing)\n\
              /cron pause <job-id> - Pause a job\n\
@@ -875,10 +917,13 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
              • every 10s / every 5m / every 1h - Recurring interval\n\
              • at 2024-01-28 14:00 - One-time execution\n\
              • 0 9 * * * - Cron expression (9 AM daily)\n\n\
+             Options:\n\
+             • --target <channel_id> - Send results to a specific channel (default: DM)\n\n\
              Examples:\n\
              /cron add every 1h Check my inbox\n\
              /cron add every 10s Say hello\n\
-             /cron add 0 9 * * * Good morning!"
+             /cron add 0 9 * * * Good morning!\n\
+             /cron add every 1h Check emails --target C0123456789"
                 .to_string(),
         )),
     }

@@ -119,38 +119,48 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
         .map(|c| c.phone_number.clone());
     let slack_bot_token = config.channels.slack.as_ref().map(|c| c.bot_token.clone());
 
-    let result_sender: crate::cron::ResultSender = Arc::new(move |channel, user_id, message| {
-        let telegram_token = telegram_token.clone();
-        let signal_phone = signal_phone.clone();
-        let slack_bot_token = slack_bot_token.clone();
+    let result_sender: crate::cron::ResultSender =
+        Arc::new(move |channel, user_id, target, message| {
+            let telegram_token = telegram_token.clone();
+            let signal_phone = signal_phone.clone();
+            let slack_bot_token = slack_bot_token.clone();
 
-        Box::pin(async move {
-            match channel.as_str() {
-                "telegram" => {
-                    if let Some(token) = telegram_token {
-                        send_telegram_message(&token, &user_id, &message).await
-                    } else {
-                        Err(anyhow::anyhow!("Telegram not configured"))
+            Box::pin(async move {
+                match channel.as_str() {
+                    "telegram" => {
+                        // Telegram: target is ignored, always DM to user_id (chat_id)
+                        if let Some(token) = telegram_token {
+                            send_telegram_message(&token, &user_id, &message).await
+                        } else {
+                            Err(anyhow::anyhow!("Telegram not configured"))
+                        }
                     }
-                }
-                "signal" => {
-                    if let Some(_phone) = signal_phone {
-                        send_signal_message(&user_id, &message).await
-                    } else {
-                        Err(anyhow::anyhow!("Signal not configured"))
+                    "signal" => {
+                        // Signal: target is ignored, always DM to user_id (phone number)
+                        if let Some(_phone) = signal_phone {
+                            send_signal_message(&user_id, &message).await
+                        } else {
+                            Err(anyhow::anyhow!("Signal not configured"))
+                        }
                     }
-                }
-                "slack" => {
-                    if let Some(token) = slack_bot_token {
-                        send_slack_message(&token, &user_id, &message).await
-                    } else {
-                        Err(anyhow::anyhow!("Slack not configured"))
+                    "slack" => {
+                        if let Some(token) = slack_bot_token {
+                            let effective_channel = target.resolve_channel_id(&user_id);
+                            send_slack_message(
+                                &token,
+                                effective_channel,
+                                target.thread_id.as_deref(),
+                                &message,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!("Slack not configured"))
+                        }
                     }
+                    _ => Err(anyhow::anyhow!("Unknown channel: {}", channel)),
                 }
-                _ => Err(anyhow::anyhow!("Unknown channel: {}", channel)),
-            }
-        }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
-    });
+            }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+        });
 
     service.start(result_sender);
     info!("Cron scheduler started");
@@ -188,17 +198,29 @@ async fn send_signal_message(recipient: &str, message: &str) -> Result<()> {
 }
 
 /// Send a message via Slack
-async fn send_slack_message(bot_token: &str, channel_id: &str, message: &str) -> Result<()> {
+async fn send_slack_message(
+    bot_token: &str,
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    message: &str,
+) -> Result<()> {
     use slack_morphism::prelude::*;
 
     let client = SlackClient::new(SlackClientHyperConnector::new()?);
     let token = SlackApiToken::new(bot_token.into());
     let session = client.open_session(&token);
 
-    let request = SlackApiChatPostMessageRequest::new(
+    // Apply markdown-to-mrkdwn conversion
+    let mrkdwn_message = crate::channels::slack::markdown_to_mrkdwn(message);
+
+    let mut request = SlackApiChatPostMessageRequest::new(
         channel_id.into(),
-        SlackMessageContent::new().with_text(message.to_string()),
+        SlackMessageContent::new().with_text(mrkdwn_message),
     );
+
+    if let Some(ts) = thread_ts {
+        request = request.with_thread_ts(ts.into());
+    }
 
     session.chat_post_message(&request).await?;
     Ok(())

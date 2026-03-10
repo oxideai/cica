@@ -349,9 +349,13 @@ async fn execute_job<C: Clock>(
             }
         };
 
-        if let Err(e) =
-            result_sender(job.channel.clone(), job.user_id.clone(), job.target.clone(), message)
-                .await
+        if let Err(e) = result_sender(
+            job.channel.clone(),
+            job.user_id.clone(),
+            job.target.clone(),
+            message,
+        )
+        .await
         {
             warn!("Failed to send cron result to user: {}", e);
         }

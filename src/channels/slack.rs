@@ -656,19 +656,20 @@ async fn handle_message_event(
         thread_ts.clone(),
     ));
 
-    // For Slack, we use a composite user key that includes thread_ts
-    // This allows each thread to have its own Claude session/context
-    // Format: "user_id" for pairing/approval, "user_id:thread_ts" for sessions
+    // For DMs, each thread gets its own session keyed by user_id:thread_ts
     let user_id_str = user_id.to_string();
-    let session_user_id = match &thread_ts {
-        Some(ts) => format!("{}:{}", user_id, ts),
-        None => user_id_str.clone(),
+    let session_key = thread_ts
+        .as_ref()
+        .map(|ts| format!("slack:{}:{}", user_id, ts));
+    // Debounce key includes thread to keep per-thread batching
+    let debounce_id = match &thread_ts {
+        Some(ts) => format!("{}:{}:{}", channel.name(), user_id, ts),
+        None => format!("{}:{}", channel.name(), user_id),
     };
 
     // Determine what action to take
     let mut store = PairingStore::load()?;
 
-    // Use base user_id for pairing/approval checks (not thread-specific)
     let action = determine_action(
         channel.name(),
         &user_id_str,
@@ -679,19 +680,16 @@ async fn handle_message_event(
         display_name,
     )?;
 
-    // Execute the action - use session_user_id (includes thread) for Claude queries
     if let Some(query_text) = execute_action(channel.as_ref(), &user_id_str, action).await? {
-        // QueryClaude action - queue with task manager for debouncing
         let text_with_images = build_text_with_images(&query_text, &image_paths);
-        // Use thread-aware key for task manager too
-        let user_key = format!("{}:{}", channel.name(), session_user_id);
         let channel_clone = channel.clone();
-        let session_user_id_clone = session_user_id.clone();
+        let user_id_clone = user_id_str.clone();
+        let session_key_clone = session_key.clone();
 
         task_manager
-            .process_message(user_key, text_with_images, move |messages| async move {
-                // Use session_user_id so each thread gets its own Claude session
-                execute_claude_query(channel_clone, &session_user_id_clone, messages).await;
+            .process_message(debounce_id, text_with_images, move |messages| async move {
+                execute_claude_query(channel_clone, &user_id_clone, messages, session_key_clone)
+                    .await;
             })
             .await;
     }
@@ -803,6 +801,10 @@ async fn handle_app_mention_event(
         }
     }
 
+    // Get user display name to identify speakers in shared thread context
+    let (_, display_name) = get_user_info(&client, &token, &user_id).await;
+    let speaker_name = display_name.unwrap_or_else(|| user_id.to_string());
+
     // Create channel wrapper - always reply in thread
     let channel: Arc<dyn Channel> = Arc::new(SlackChannel::new(
         client.clone(),
@@ -811,17 +813,24 @@ async fn handle_app_mention_event(
         Some(thread_ts.clone()),
     ));
 
-    // Session key includes thread for continuity
-    let session_user_id = format!("{}:{}", user_id, thread_ts);
+    // In public channels, all users in the same thread share one Claude session.
+    // The session is keyed by thread_ts so context carries across different speakers.
+    let shared_session_key = format!("slack:thread:{}", thread_ts);
+    let user_id_str = user_id.to_string();
 
-    let text_with_images = build_text_with_images(&text, &image_paths);
-    let user_key = format!("{}:{}", channel.name(), session_user_id);
+    // Prefix message with speaker name so Claude knows who's talking
+    let text_with_speaker = format!("[{}]: {}", speaker_name, text);
+    let text_with_images = build_text_with_images(&text_with_speaker, &image_paths);
+
+    // Debounce per user (so rapid messages from one user batch), but session is shared
+    let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);
     let channel_clone = channel.clone();
-    let session_user_id_clone = session_user_id.clone();
+    let user_id_clone = user_id_str.clone();
+    let session_key = Some(shared_session_key);
 
     task_manager
         .process_message(user_key, text_with_images, move |messages| async move {
-            execute_claude_query(channel_clone, &session_user_id_clone, messages).await;
+            execute_claude_query(channel_clone, &user_id_clone, messages, session_key).await;
         })
         .await;
 

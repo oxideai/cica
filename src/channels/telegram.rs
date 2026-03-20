@@ -301,7 +301,7 @@ async fn handle_message(
 
         task_manager
             .process_message(user_key, text_with_images, move |messages| async move {
-                execute_claude_query(channel_clone, &user_id_clone, messages).await;
+                execute_claude_query(channel_clone, &user_id_clone, messages, None).await;
             })
             .await;
     }

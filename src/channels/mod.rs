@@ -337,7 +337,12 @@ fn remove_file_path_lines(response: &str) -> String {
 ///
 /// This is called from within the task_manager callback after messages
 /// have been debounced and batched.
-pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, messages: Vec<String>) {
+pub async fn execute_claude_query(
+    channel: Arc<dyn Channel>,
+    user_id: &str,
+    messages: Vec<String>,
+    session_key: Option<String>,
+) {
     let combined_text = messages.join("\n\n");
     let _typing = channel.start_typing();
 
@@ -377,6 +382,7 @@ pub async fn execute_claude_query(channel: Arc<dyn Channel>, user_id: &str, mess
         user_id,
         &combined_text,
         context_prompt,
+        session_key.as_deref(),
     )
     .await
     {
@@ -1005,8 +1011,12 @@ pub async fn query_ai_with_session(
     user_id: &str,
     text: &str,
     context_prompt: String,
+    session_key_override: Option<&str>,
 ) -> Result<QueryResult> {
-    let session_key = format!("{}:{}", channel, user_id);
+    let session_key = match session_key_override {
+        Some(key) => key.to_string(),
+        None => format!("{}:{}", channel, user_id),
+    };
     let existing_session = store.sessions.get(&session_key).cloned();
 
     let options = backends::QueryOptions {

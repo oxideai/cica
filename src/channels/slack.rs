@@ -158,6 +158,8 @@ pub struct SlackChannel {
     channel_id: SlackChannelId,
     /// Thread timestamp - required for AI Assistant apps to reply in the correct thread
     thread_ts: Option<SlackTs>,
+    /// Whether to allow Slack to unfurl (preview) links in messages
+    unfurl_links: bool,
 }
 
 impl SlackChannel {
@@ -166,12 +168,14 @@ impl SlackChannel {
         token: SlackApiToken,
         channel_id: SlackChannelId,
         thread_ts: Option<SlackTs>,
+        unfurl_links: bool,
     ) -> Self {
         Self {
             client,
             token,
             channel_id,
             thread_ts,
+            unfurl_links,
         }
     }
 }
@@ -200,7 +204,9 @@ impl Channel for SlackChannel {
         let mut request = SlackApiChatPostMessageRequest::new(
             self.channel_id.clone(),
             SlackMessageContent::new().with_text(mrkdwn_message),
-        );
+        )
+        .with_unfurl_links(self.unfurl_links)
+        .with_unfurl_media(self.unfurl_links);
 
         // Reply in the thread if we have a thread_ts
         if let Some(ts) = &self.thread_ts {
@@ -370,6 +376,8 @@ struct SlackUserState {
     /// Track the last thread_ts per user to detect "New Chat" clicks
     /// When thread_ts changes, we clear the Claude session
     user_threads: Arc<RwLock<HashMap<String, String>>>,
+    /// Whether to allow Slack to unfurl (preview) links in messages
+    unfurl_links: bool,
 }
 
 // ============================================================================
@@ -425,6 +433,7 @@ pub async fn run(config: SlackConfig) -> Result<()> {
         bot_user_id,
         task_manager,
         user_threads: Arc::new(RwLock::new(HashMap::new())),
+        unfurl_links: config.unfurl_links,
     };
 
     // Set up Socket Mode client with callbacks
@@ -475,6 +484,7 @@ async fn handle_push_events(
             let bot_user_id = user_state.bot_user_id.clone();
             let task_manager = user_state.task_manager.clone();
             let user_threads = user_state.user_threads.clone();
+            let unfurl_links = user_state.unfurl_links;
 
             tokio::spawn(async move {
                 if let Err(e) = handle_message_event(
@@ -485,6 +495,7 @@ async fn handle_push_events(
                     bot_user_id,
                     task_manager,
                     user_threads,
+                    unfurl_links,
                 )
                 .await
                 {
@@ -515,8 +526,10 @@ async fn handle_push_events(
 
             let bot_token = user_state.bot_token.clone();
             let bot_token_str = user_state.bot_token_str.clone();
+            let bot_user_id = user_state.bot_user_id.clone();
             let task_manager = user_state.task_manager.clone();
             let user_threads = user_state.user_threads.clone();
+            let unfurl_links = user_state.unfurl_links;
 
             tokio::spawn(async move {
                 if let Err(e) = handle_app_mention_event(
@@ -524,8 +537,10 @@ async fn handle_push_events(
                     client,
                     bot_token,
                     bot_token_str,
+                    bot_user_id,
                     task_manager,
                     user_threads,
+                    unfurl_links,
                 )
                 .await
                 {
@@ -549,6 +564,7 @@ async fn handle_message_event(
     bot_user_id: SlackUserId,
     task_manager: Arc<UserTaskManager>,
     user_threads: Arc<RwLock<HashMap<String, String>>>,
+    unfurl_links: bool,
 ) -> Result<()> {
     // Skip messages from bots (including ourselves)
     if event.sender.bot_id.is_some() {
@@ -654,6 +670,7 @@ async fn handle_message_event(
         token.clone(),
         channel_id.clone(),
         thread_ts.clone(),
+        unfurl_links,
     ));
 
     // For DMs, each thread gets its own session keyed by user_id:thread_ts
@@ -697,14 +714,81 @@ async fn handle_message_event(
     Ok(())
 }
 
+/// Fetch thread messages that the bot hasn't seen yet.
+///
+/// On first mention (no prior bot replies), returns all thread messages as context.
+/// On subsequent mentions, returns only messages after the bot's last reply.
+/// Messages are formatted as `[speaker]: text` lines.
+const THREAD_CONTEXT_LIMIT: u16 = 50;
+
+async fn fetch_thread_context(
+    client: &Arc<SlackHyperClient>,
+    token: &SlackApiToken,
+    channel_id: &SlackChannelId,
+    thread_ts: &SlackTs,
+    bot_user_id: &SlackUserId,
+    current_msg_ts: &SlackTs,
+) -> Vec<String> {
+    let session = client.open_session(token);
+    let request = SlackApiConversationsRepliesRequest::new(channel_id.clone(), thread_ts.clone())
+        .with_limit(THREAD_CONTEXT_LIMIT);
+
+    let replies = match session.conversations_replies(&request).await {
+        Ok(response) => response.messages,
+        Err(e) => {
+            warn!("Failed to fetch thread replies: {}", e);
+            return Vec::new();
+        }
+    };
+
+    // Find the bot's last message timestamp to use as a watermark
+    let bot_last_ts = replies
+        .iter()
+        .rev()
+        .find(|msg| msg.sender.user.as_ref() == Some(bot_user_id))
+        .map(|msg| &msg.origin.ts);
+
+    // Collect non-bot messages after the watermark (or all if no bot reply yet)
+    replies
+        .iter()
+        .filter(|msg| {
+            // Skip the current message (it's already being sent)
+            if msg.origin.ts == *current_msg_ts {
+                return false;
+            }
+            // Skip bot's own messages
+            if msg.sender.user.as_ref() == Some(bot_user_id) {
+                return false;
+            }
+            // If bot has replied before, only include messages after its last reply
+            if let Some(watermark) = bot_last_ts {
+                return msg.origin.ts.to_string() > watermark.to_string();
+            }
+            true
+        })
+        .map(|msg| {
+            let speaker = msg
+                .sender
+                .user
+                .as_ref()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let text = msg.content.text.clone().unwrap_or_default();
+            format!("[{}]: {}", speaker, text)
+        })
+        .collect()
+}
+
 /// Handle @mention events in channels
 async fn handle_app_mention_event(
     event: SlackAppMentionEvent,
     client: Arc<SlackHyperClient>,
     token: SlackApiToken,
     bot_token_str: String,
+    bot_user_id: SlackUserId,
     task_manager: Arc<UserTaskManager>,
     user_threads: Arc<RwLock<HashMap<String, String>>>,
+    unfurl_links: bool,
 ) -> Result<()> {
     let user_id = event.user.clone();
     let channel_id = event.channel.clone();
@@ -805,12 +889,24 @@ async fn handle_app_mention_event(
     let (_, display_name) = get_user_info(&client, &token, &user_id).await;
     let speaker_name = display_name.unwrap_or_else(|| user_id.to_string());
 
+    // Fetch thread messages the bot hasn't seen yet for context
+    let unseen_context = fetch_thread_context(
+        &client,
+        &token,
+        &channel_id,
+        &thread_ts,
+        &bot_user_id,
+        &event.origin.ts,
+    )
+    .await;
+
     // Create channel wrapper - always reply in thread
     let channel: Arc<dyn Channel> = Arc::new(SlackChannel::new(
         client.clone(),
         token.clone(),
         channel_id.clone(),
         Some(thread_ts.clone()),
+        unfurl_links,
     ));
 
     // In public channels, all users in the same thread share one Claude session.
@@ -818,9 +914,18 @@ async fn handle_app_mention_event(
     let shared_session_key = format!("slack:thread:{}", thread_ts);
     let user_id_str = user_id.to_string();
 
-    // Prefix message with speaker name so Claude knows who's talking
-    let text_with_speaker = format!("[{}]: {}", speaker_name, text);
-    let text_with_images = build_text_with_images(&text_with_speaker, &image_paths);
+    // Build message: unseen thread context + current message with speaker prefix
+    let current_msg = format!("[{}]: {}", speaker_name, text);
+    let full_text = if unseen_context.is_empty() {
+        current_msg
+    } else {
+        format!(
+            "[thread context]\n{}\n[/thread context]\n\n{}",
+            unseen_context.join("\n"),
+            current_msg
+        )
+    };
+    let text_with_images = build_text_with_images(&full_text, &image_paths);
 
     // Debounce per user (so rapid messages from one user batch), but session is shared
     let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);

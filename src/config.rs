@@ -209,6 +209,9 @@ pub struct SlackConfig {
     #[serde(default)]
     pub shared_identity: bool,
     pub onboarding_prompt: Option<String>,
+    /// Allow Slack to unfurl (preview) links in bot messages (default: false)
+    #[serde(default)]
+    pub unfurl_links: bool,
 }
 
 impl SlackConfig {

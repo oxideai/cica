@@ -4,7 +4,7 @@
 //! local subprocess (today's behavior). Later phases add container-based
 //! providers behind the same `SandboxProvider` trait.
 
-mod local;
+pub mod local;
 
 pub use local::LocalProcessProvider;
 

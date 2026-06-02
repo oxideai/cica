@@ -32,6 +32,26 @@ fn job_to_query_options(job: &TurnJob) -> backends::QueryOptions {
     }
 }
 
+/// Convert a backend `QueryResult` into a `TurnResult`.
+pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
+    TurnResult {
+        response: qr.response,
+        backend_session_id: qr.session_id,
+        cost_usd: qr.cost_usd,
+        duration_ms: qr.duration_ms,
+    }
+}
+
+/// Convert a `TurnResult` back into a `QueryResult` for existing call sites.
+pub fn query_result_from_turn(tr: TurnResult) -> QueryResult {
+    QueryResult {
+        response: tr.response,
+        session_id: tr.backend_session_id,
+        duration_ms: tr.duration_ms,
+        cost_usd: tr.cost_usd,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +80,33 @@ mod tests {
         assert_eq!(opts.resume_session.as_deref(), Some("sess-1"));
         assert_eq!(opts.cwd.as_deref(), Some("/tmp/work"));
         assert!(opts.skip_permissions);
+    }
+
+    #[test]
+    fn query_result_maps_to_turn_result() {
+        let qr = QueryResult {
+            response: "hi".into(),
+            session_id: "sess-9".into(),
+            duration_ms: Some(123),
+            cost_usd: Some(0.5),
+        };
+        let tr = turn_result_from_query(qr);
+        assert_eq!(tr.response, "hi");
+        assert_eq!(tr.backend_session_id, "sess-9");
+        assert_eq!(tr.duration_ms, Some(123));
+        assert_eq!(tr.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn turn_result_maps_back_to_query_result() {
+        let tr = TurnResult {
+            response: "yo".into(),
+            backend_session_id: "sess-3".into(),
+            cost_usd: None,
+            duration_ms: None,
+        };
+        let qr = query_result_from_turn(tr);
+        assert_eq!(qr.response, "yo");
+        assert_eq!(qr.session_id, "sess-3");
     }
 }

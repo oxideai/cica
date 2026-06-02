@@ -13,8 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::audit;
-use crate::backends::{self, QueryOptions, QueryResult};
-use crate::sandbox::{self, TurnJob};
+use crate::backends::{self, QueryResult};
 use crate::cron::{
     self, CronSchedule, CronStore, DeliveryTarget, format_timestamp, parse_add_command,
     truncate_for_name,
@@ -22,6 +21,7 @@ use crate::cron::{
 use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
+use crate::sandbox::{self, TurnJob};
 use crate::skills;
 
 // ============================================================================

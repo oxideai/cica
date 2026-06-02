@@ -8,7 +8,6 @@ pub use clock::{Clock, SystemClock};
 pub use schedule::CronSchedule;
 pub use store::{CronJob, CronStore, DeliveryTarget, JobId, JobStatus};
 
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

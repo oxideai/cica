@@ -969,3 +969,19 @@ git commit -m "feat(sandbox): compose HydratingProvider when a state store is co
 ## Next phase (separate plan)
 
 Phase 3: `cica worker` subcommand; container/Fargate/Cloud Run launchers (feature-gated); real S3/GCS `StateStore` impls; worker `Dockerfile` + deployment contract; result-return-from-worker; cwd canonicalization; feature-gated cloud release artifacts + `--all-features` CI.
+
+## Manual round-trip resume test (run in a configured environment)
+
+The real `claude --resume` round-trip needs the `claude` CLI + credentials + a configured cica, so it is a manual integration test (not CI). Run before relying on Phase 2:
+
+1. Set in `config.toml`:
+   ```toml
+   [deployment]
+   store = "filesystem"
+   ```
+2. Send a message to the bot. Confirm it replies, and that `internal/state-store/session/<id>/` and `internal/state-store/mem/<channel>_<user>/` appear.
+3. Delete the local transcript: `rm -rf internal/claude-home/.claude/projects/*`.
+4. Send a follow-up in the same conversation. Confirm the assistant resumes context (the transcript was restored from the store before `--resume`).
+5. Confirm a memory written in step 2 is still searchable after step 4.
+
+If resume fails after step 3, expand `ClaudeSessionArtifacts::capture`/`restore` to include any additional files Claude needs (e.g. a `.claude.json` project entry) and re-run.

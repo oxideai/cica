@@ -6,6 +6,7 @@
 
 mod local;
 pub mod artifacts;
+pub mod hydrating;
 pub mod state;
 
 pub use local::{LocalProcessProvider, query_result_from_turn};

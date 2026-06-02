@@ -123,6 +123,24 @@ pub enum AiBackend {
     Cursor,
 }
 
+/// Which durable state store to use (none = all-local, today's behavior).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreKind {
+    Filesystem,
+}
+
+/// Distributed-deployment configuration. All optional; absent = single-box.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeploymentConfig {
+    /// State store backend. `None` disables hydration (default).
+    #[serde(default)]
+    pub store: Option<StoreKind>,
+    /// Filesystem store root. Defaults to `internal/state-store` when unset.
+    #[serde(default)]
+    pub state_path: Option<String>,
+}
+
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -138,6 +156,10 @@ pub struct Config {
     /// Which AI backend to use (claude or cursor)
     #[serde(default)]
     pub backend: AiBackend,
+
+    /// Distributed-deployment settings (state store, etc.)
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 
     /// Enable audit logging of conversations and system events (default: true)
     #[serde(default = "default_true")]
@@ -374,5 +396,29 @@ impl Config {
             AiBackend::Claude => self.is_claude_configured(),
             AiBackend::Cursor => self.is_cursor_configured(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deployment_defaults_to_no_store() {
+        let cfg = Config::default();
+        assert!(cfg.deployment.store.is_none());
+    }
+
+    #[test]
+    fn deployment_parses_filesystem_store() {
+        let toml = r#"
+            backend = "claude"
+            [deployment]
+            store = "filesystem"
+            state_path = "/tmp/cica-state"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.store, Some(StoreKind::Filesystem));
+        assert_eq!(cfg.deployment.state_path.as_deref(), Some("/tmp/cica-state"));
     }
 }

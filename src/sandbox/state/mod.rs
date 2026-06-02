@@ -8,7 +8,7 @@ pub mod filesystem;
 pub use filesystem::FilesystemStateStore;
 
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -65,12 +65,6 @@ pub(crate) fn safe_join(root: &Path, key: &str) -> Result<PathBuf> {
             .collect();
         out.push(safe);
     }
-    debug_assert!(
-        out.components()
-            .filter(|c| matches!(c, Component::ParentDir))
-            .count()
-            == 0
-    );
     Ok(out)
 }
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::sandbox::state::{copy_dir_all, copy_path};
+use crate::sandbox::state::{clear_dir, copy_dir_all, copy_path};
 
 /// Slugify a working directory the way Claude Code names its project dir:
 /// every non-alphanumeric character becomes `-`.
@@ -29,7 +29,7 @@ impl ClaudeSessionArtifacts {
     /// Returns `false` (capturing nothing) if no transcript is found.
     pub fn capture(claude_home: &Path, session_id: &str, staging: &Path) -> Result<bool> {
         let dot = claude_home.join(".claude");
-        fs::create_dir_all(staging)?;
+        clear_dir(staging)?;
 
         // Transcript: find <session_id>.jsonl under any projects/<slug>/ dir.
         let projects = dot.join("projects");
@@ -89,9 +89,22 @@ impl ClaudeSessionArtifacts {
             if let Some(parent) = env_dst.parent() {
                 fs::create_dir_all(parent)?;
             }
+            // Remove any stale destination so a file<->dir type change can't
+            // make the copy fail.
+            if env_dst.exists() {
+                if env_dst.is_dir() {
+                    fs::remove_dir_all(&env_dst)?;
+                } else {
+                    fs::remove_file(&env_dst)?;
+                }
+            }
             copy_path(&env_staged, &env_dst)?;
         }
 
+        // `.claude/todos/` is shared across ALL sessions (files are named
+        // `<session_id>-agent-*.json`), so we merge our session's todos in
+        // rather than clearing the directory, which would delete other
+        // sessions' todos.
         let todos_staged = staging.join("todos");
         if todos_staged.is_dir() {
             copy_dir_all(&todos_staged, &dot.join("todos"))?;

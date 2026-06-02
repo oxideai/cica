@@ -5,6 +5,7 @@
 //! providers behind the same `SandboxProvider` trait.
 
 mod local;
+pub mod state;
 
 pub use local::{LocalProcessProvider, query_result_from_turn};
 

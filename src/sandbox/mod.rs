@@ -15,16 +15,13 @@ use crate::config::{AiBackend, Config};
 
 /// A single agent turn to execute.
 ///
-/// Phase 1 carries the fields needed to reproduce the current subprocess call,
-/// plus cheap identity fields for future phases. State hydration handles are
-/// intentionally absent (added in Phase 2).
-// Several fields (session_id, channel, user_id, backend, model) are populated by
-// callers but not yet read by LocalProcessProvider; they are part of the turn
-// contract for later phases (remote workers / per-job backend routing).
+/// Some fields (`session_id`, `channel`, `user_id`, `backend`, `model`) are set
+/// by callers but not yet read by `LocalProcessProvider`; they're part of the
+/// turn contract for later phases (remote workers, per-job backend routing).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TurnJob {
-    /// Logical cica session key (e.g. "telegram:123"). Identity only in Phase 1.
+    /// Logical cica session key (e.g. "telegram:123").
     pub session_id: String,
     pub channel: String,
     pub user_id: String,
@@ -34,12 +31,9 @@ pub struct TurnJob {
     pub system_prompt: Option<String>,
     /// Backend session id to resume, if any.
     pub resume_session: Option<String>,
-    /// Working directory override.
     pub cwd: Option<String>,
     pub skip_permissions: bool,
-    /// Which backend runs this turn.
     pub backend: AiBackend,
-    /// Model override.
     pub model: Option<String>,
 }
 
@@ -69,9 +63,6 @@ pub fn default_provider(_config: &Config) -> Box<dyn SandboxProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Compile-time guarantee that the trait stays object-safe (Box<dyn _>).
-    fn _assert_object_safe(_p: &dyn SandboxProvider) {}
 
     #[test]
     fn default_provider_is_constructible() {

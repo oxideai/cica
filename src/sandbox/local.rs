@@ -7,6 +7,7 @@ use crate::backends::{self, QueryResult};
 use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
 
 /// Runs an agent turn in a local subprocess (today's behavior).
+#[derive(Default)]
 pub struct LocalProcessProvider;
 
 impl LocalProcessProvider {
@@ -17,8 +18,10 @@ impl LocalProcessProvider {
 
 #[async_trait]
 impl SandboxProvider for LocalProcessProvider {
-    async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
-        todo!("LocalProcessProvider::run_turn implemented in a later phase")
+    async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
+        let options = job_to_query_options(&job);
+        let qr = backends::query_with_options(&job.prompt, options).await?;
+        Ok(turn_result_from_query(qr))
     }
 }
 
@@ -108,5 +111,11 @@ mod tests {
         let qr = query_result_from_turn(tr);
         assert_eq!(qr.response, "yo");
         assert_eq!(qr.session_id, "sess-3");
+    }
+
+    #[test]
+    fn provider_is_constructible_and_object_safe() {
+        let p = LocalProcessProvider::new();
+        let _boxed: Box<dyn crate::sandbox::SandboxProvider> = Box::new(p);
     }
 }

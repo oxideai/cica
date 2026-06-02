@@ -953,17 +953,25 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         Some(&job.prompt),
     )?;
 
-    let qr = backends::query_with_options(
-        &job.prompt,
-        QueryOptions {
-            system_prompt: Some(context_prompt),
-            skip_permissions: true,
-            ..Default::default()
-        },
-    )
-    .await?;
+    let config = crate::config::Config::load()?;
+    let provider = sandbox::default_provider(&config);
 
-    Ok(format!("[Cron: {}]\n\n{}", job.name, qr.response))
+    let turn = TurnJob {
+        session_id: format!("{}:{}", channel, user_id),
+        channel: channel.to_string(),
+        user_id: user_id.to_string(),
+        prompt: job.prompt.clone(),
+        system_prompt: Some(context_prompt),
+        resume_session: None,
+        cwd: None,
+        skip_permissions: true,
+        backend: config.backend,
+        model: None,
+    };
+
+    let tr = provider.run_turn(turn).await?;
+
+    Ok(format!("[Cron: {}]\n\n{}", job.name, tr.response))
 }
 
 /// Find a job ID by full ID or prefix match

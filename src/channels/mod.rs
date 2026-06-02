@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::audit;
-use crate::backends::{self, QueryOptions, QueryResult};
+use crate::backends::{self, QueryResult};
 use crate::cron::{
     self, CronSchedule, CronStore, DeliveryTarget, format_timestamp, parse_add_command,
     truncate_for_name,
@@ -21,6 +21,7 @@ use crate::cron::{
 use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::pairing::PairingStore;
+use crate::sandbox::{self, TurnJob};
 use crate::skills;
 
 // ============================================================================
@@ -952,17 +953,25 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
         Some(&job.prompt),
     )?;
 
-    let qr = backends::query_with_options(
-        &job.prompt,
-        QueryOptions {
-            system_prompt: Some(context_prompt),
-            skip_permissions: true,
-            ..Default::default()
-        },
-    )
-    .await?;
+    let config = crate::config::Config::load()?;
+    let provider = sandbox::default_provider(&config);
 
-    Ok(format!("[Cron: {}]\n\n{}", job.name, qr.response))
+    let turn = TurnJob {
+        session_id: format!("{}:{}", channel, user_id),
+        channel: channel.to_string(),
+        user_id: user_id.to_string(),
+        prompt: job.prompt.clone(),
+        system_prompt: Some(context_prompt),
+        resume_session: None,
+        cwd: None,
+        skip_permissions: true,
+        backend: config.backend,
+        model: None,
+    };
+
+    let tr = provider.run_turn(turn).await?;
+
+    Ok(format!("[Cron: {}]\n\n{}", job.name, tr.response))
 }
 
 /// Find a job ID by full ID or prefix match
@@ -1019,15 +1028,24 @@ pub async fn query_ai_with_session(
     };
     let existing_session = store.sessions.get(&session_key).cloned();
 
-    let options = backends::QueryOptions {
+    let config = crate::config::Config::load()?;
+    let provider = sandbox::default_provider(&config);
+
+    let job = TurnJob {
+        session_id: session_key.clone(),
+        channel: channel.to_string(),
+        user_id: user_id.to_string(),
+        prompt: text.to_string(),
         system_prompt: Some(context_prompt.clone()),
         resume_session: existing_session,
+        cwd: None,
         skip_permissions: true,
-        ..Default::default()
+        backend: config.backend,
+        model: None,
     };
 
-    let qr = match backends::query_with_options(text, options).await {
-        Ok(qr) => qr,
+    let qr = match provider.run_turn(job).await {
+        Ok(tr) => sandbox::query_result_from_turn(tr),
         Err(e) => {
             let error_msg = e.to_string();
             // If session not found, clear it and retry without resuming
@@ -1040,15 +1058,21 @@ pub async fn query_ai_with_session(
 
                 audit::log_event("session_expired", Some(channel), Some(user_id), None);
 
-                let retry_options = backends::QueryOptions {
+                let retry_job = TurnJob {
+                    session_id: session_key.clone(),
+                    channel: channel.to_string(),
+                    user_id: user_id.to_string(),
+                    prompt: text.to_string(),
                     system_prompt: Some(context_prompt),
                     resume_session: None,
+                    cwd: None,
                     skip_permissions: true,
-                    ..Default::default()
+                    backend: config.backend,
+                    model: None,
                 };
 
-                match backends::query_with_options(text, retry_options).await {
-                    Ok(qr) => qr,
+                match provider.run_turn(retry_job).await {
+                    Ok(tr) => sandbox::query_result_from_turn(tr),
                     Err(e) => {
                         warn!("AI backend error on retry: {}", e);
                         QueryResult {

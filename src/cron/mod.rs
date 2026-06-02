@@ -8,10 +8,6 @@ pub use clock::{Clock, SystemClock};
 pub use schedule::CronSchedule;
 pub use store::{CronJob, CronStore, DeliveryTarget, JobId, JobStatus};
 
-// Re-export for tests
-#[cfg(test)]
-pub use clock::FakeClock;
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

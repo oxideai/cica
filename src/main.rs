@@ -7,6 +7,7 @@ mod cron;
 mod memory;
 mod onboarding;
 mod pairing;
+mod sandbox;
 mod setup;
 mod skills;
 

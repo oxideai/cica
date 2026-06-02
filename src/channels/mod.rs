@@ -1037,7 +1037,7 @@ pub async fn query_ai_with_session(
     };
 
     let qr = match provider.run_turn(job).await {
-        Ok(tr) => sandbox::local::query_result_from_turn(tr),
+        Ok(tr) => sandbox::query_result_from_turn(tr),
         Err(e) => {
             let error_msg = e.to_string();
             // If session not found, clear it and retry without resuming
@@ -1064,7 +1064,7 @@ pub async fn query_ai_with_session(
                 };
 
                 match provider.run_turn(retry_job).await {
-                    Ok(tr) => sandbox::local::query_result_from_turn(tr),
+                    Ok(tr) => sandbox::query_result_from_turn(tr),
                     Err(e) => {
                         warn!("AI backend error on retry: {}", e);
                         QueryResult {

@@ -4,9 +4,9 @@
 //! local subprocess (today's behavior). Later phases add container-based
 //! providers behind the same `SandboxProvider` trait.
 
-pub mod local;
+mod local;
 
-pub use local::LocalProcessProvider;
+pub use local::{LocalProcessProvider, query_result_from_turn};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,6 +18,10 @@ use crate::config::{AiBackend, Config};
 /// Phase 1 carries the fields needed to reproduce the current subprocess call,
 /// plus cheap identity fields for future phases. State hydration handles are
 /// intentionally absent (added in Phase 2).
+// Several fields (session_id, channel, user_id, backend, model) are populated by
+// callers but not yet read by LocalProcessProvider; they are part of the turn
+// contract for later phases (remote workers / per-job backend routing).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TurnJob {
     /// Logical cica session key (e.g. "telegram:123"). Identity only in Phase 1.

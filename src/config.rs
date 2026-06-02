@@ -419,6 +419,9 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.deployment.store, Some(StoreKind::Filesystem));
-        assert_eq!(cfg.deployment.state_path.as_deref(), Some("/tmp/cica-state"));
+        assert_eq!(
+            cfg.deployment.state_path.as_deref(),
+            Some("/tmp/cica-state")
+        );
     }
 }

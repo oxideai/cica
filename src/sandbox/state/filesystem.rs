@@ -73,8 +73,14 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         assert!(store.pull("session/x", dest.path()).await.unwrap());
-        assert_eq!(fs::read_to_string(dest.path().join("a.txt")).unwrap(), "alpha");
-        assert_eq!(fs::read_to_string(dest.path().join("sub/b.txt")).unwrap(), "beta");
+        assert_eq!(
+            fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "alpha"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.path().join("sub/b.txt")).unwrap(),
+            "beta"
+        );
     }
 
     #[tokio::test]
@@ -93,6 +99,9 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         store.pull("k", dest.path()).await.unwrap();
         assert!(!dest.path().join("old.txt").exists());
-        assert_eq!(fs::read_to_string(dest.path().join("new.txt")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(dest.path().join("new.txt")).unwrap(),
+            "new"
+        );
     }
 }

@@ -55,11 +55,22 @@ pub(crate) fn safe_join(root: &Path, key: &str) -> Result<PathBuf> {
         }
         let safe: String = segment
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         out.push(safe);
     }
-    debug_assert!(out.components().filter(|c| matches!(c, Component::ParentDir)).count() == 0);
+    debug_assert!(
+        out.components()
+            .filter(|c| matches!(c, Component::ParentDir))
+            .count()
+            == 0
+    );
     Ok(out)
 }
 

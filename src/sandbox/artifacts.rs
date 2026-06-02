@@ -139,9 +139,18 @@ mod tests {
 
         let home_a = tempfile::tempdir().unwrap();
         let dot_a = home_a.path().join(".claude");
-        write(&dot_a.join("projects").join(&slug).join(format!("{id}.jsonl")), "line1\n");
+        write(
+            &dot_a
+                .join("projects")
+                .join(&slug)
+                .join(format!("{id}.jsonl")),
+            "line1\n",
+        );
         write(&dot_a.join("session-env").join(id), "ENV=1");
-        write(&dot_a.join("todos").join(format!("{id}-agent-{id}.json")), "[]");
+        write(
+            &dot_a.join("todos").join(format!("{id}-agent-{id}.json")),
+            "[]",
+        );
 
         let staging = tempfile::tempdir().unwrap();
         assert!(ClaudeSessionArtifacts::capture(home_a.path(), id, staging.path()).unwrap());
@@ -151,10 +160,19 @@ mod tests {
 
         let dot_b = home_b.path().join(".claude");
         assert_eq!(
-            fs::read_to_string(dot_b.join("projects").join(&slug).join(format!("{id}.jsonl"))).unwrap(),
+            fs::read_to_string(
+                dot_b
+                    .join("projects")
+                    .join(&slug)
+                    .join(format!("{id}.jsonl"))
+            )
+            .unwrap(),
             "line1\n"
         );
-        assert_eq!(fs::read_to_string(dot_b.join("session-env").join(id)).unwrap(), "ENV=1");
+        assert_eq!(
+            fs::read_to_string(dot_b.join("session-env").join(id)).unwrap(),
+            "ENV=1"
+        );
         assert_eq!(
             fs::read_to_string(dot_b.join("todos").join(format!("{id}-agent-{id}.json"))).unwrap(),
             "[]"

@@ -24,7 +24,12 @@ pub struct HydratingProvider<P: SandboxProvider> {
 
 impl<P: SandboxProvider> HydratingProvider<P> {
     pub fn new(inner: P, store: Arc<dyn StateStore>, claude_home: PathBuf, cwd: PathBuf) -> Self {
-        Self { inner, store, claude_home, cwd }
+        Self {
+            inner,
+            store,
+            claude_home,
+            cwd,
+        }
     }
 
     fn memories_dir(&self, channel: &str, user_id: &str) -> PathBuf {
@@ -56,7 +61,9 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
                 let _ = std::fs::remove_dir_all(&staging);
             }
         } else {
-            warn!("HydratingProvider: session hydration unsupported for non-Claude backend; skipping");
+            warn!(
+                "HydratingProvider: session hydration unsupported for non-Claude backend; skipping"
+            );
         }
         // Memories: pull is authoritative when present; absent = keep local.
         let _ = self.store.pull(&mem_key, &mem_dir).await?;
@@ -138,17 +145,38 @@ mod tests {
         let id = "sess-new";
         let slug = crate::sandbox::artifacts::claude_project_slug(base.path());
         write(
-            &claude_home.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl")),
+            &claude_home
+                .path()
+                .join(".claude")
+                .join("projects")
+                .join(&slug)
+                .join(format!("{id}.jsonl")),
             "turn1\n",
         );
 
-        let inner = StubProvider { session_id: id.into(), seen: Mutex::new(None) };
-        let hp = HydratingProvider::new(inner, store.clone(), claude_home.path().to_path_buf(), base.path().to_path_buf());
+        let inner = StubProvider {
+            session_id: id.into(),
+            seen: Mutex::new(None),
+        };
+        let hp = HydratingProvider::new(
+            inner,
+            store.clone(),
+            claude_home.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
         hp.run_turn(job(None)).await.unwrap();
 
         let dest = tempfile::tempdir().unwrap();
-        assert!(store.pull(&format!("session/{id}"), dest.path()).await.unwrap());
-        assert_eq!(std::fs::read_to_string(dest.path().join("transcript.jsonl")).unwrap(), "turn1\n");
+        assert!(
+            store
+                .pull(&format!("session/{id}"), dest.path())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("transcript.jsonl")).unwrap(),
+            "turn1\n"
+        );
     }
 
     #[tokio::test]
@@ -161,14 +189,30 @@ mod tests {
         let id = "sess-old";
         let staged = tempfile::tempdir().unwrap();
         write(&staged.path().join("transcript.jsonl"), "history\n");
-        store.push(staged.path(), &format!("session/{id}")).await.unwrap();
+        store
+            .push(staged.path(), &format!("session/{id}"))
+            .await
+            .unwrap();
 
-        let inner = StubProvider { session_id: id.into(), seen: Mutex::new(None) };
-        let hp = HydratingProvider::new(inner, store, claude_home.path().to_path_buf(), base.path().to_path_buf());
+        let inner = StubProvider {
+            session_id: id.into(),
+            seen: Mutex::new(None),
+        };
+        let hp = HydratingProvider::new(
+            inner,
+            store,
+            claude_home.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
         hp.run_turn(job(Some(id))).await.unwrap();
 
         let slug = crate::sandbox::artifacts::claude_project_slug(base.path());
-        let restored = claude_home.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl"));
+        let restored = claude_home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join(&slug)
+            .join(format!("{id}.jsonl"));
         assert_eq!(std::fs::read_to_string(restored).unwrap(), "history\n");
     }
 
@@ -179,15 +223,30 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
 
-        let mem_dir = base.path().join("users").join("telegram_1").join("memories");
+        let mem_dir = base
+            .path()
+            .join("users")
+            .join("telegram_1")
+            .join("memories");
         write(&mem_dir.join("note.md"), "remember this");
 
-        let inner = StubProvider { session_id: String::new(), seen: Mutex::new(None) };
-        let hp = HydratingProvider::new(inner, store.clone(), claude_home.path().to_path_buf(), base.path().to_path_buf());
+        let inner = StubProvider {
+            session_id: String::new(),
+            seen: Mutex::new(None),
+        };
+        let hp = HydratingProvider::new(
+            inner,
+            store.clone(),
+            claude_home.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
         hp.run_turn(job(None)).await.unwrap();
 
         let dest = tempfile::tempdir().unwrap();
         assert!(store.pull("mem/telegram_1", dest.path()).await.unwrap());
-        assert_eq!(std::fs::read_to_string(dest.path().join("note.md")).unwrap(), "remember this");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("note.md")).unwrap(),
+            "remember this"
+        );
     }
 }

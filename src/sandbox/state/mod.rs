@@ -127,4 +127,18 @@ mod tests {
         let p = safe_join(root, "mem/telegram:42").unwrap();
         assert_eq!(p, Path::new("/tmp/store/mem/telegram_42"));
     }
+
+    #[test]
+    fn default_store_none_when_unconfigured() {
+        let cfg = Config::default();
+        assert!(default_store(&cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn default_store_some_for_filesystem() {
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-state-test".to_string());
+        assert!(default_store(&cfg).unwrap().is_some());
+    }
 }

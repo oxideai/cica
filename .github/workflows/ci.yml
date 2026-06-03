@@ -77,3 +77,17 @@ jobs:
         run: |
           chmod +x install.sh
           sh -n install.sh
+
+  docker-flow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build worker image
+        run: docker build -t cica-worker:latest .
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Docker integration test (fake backend)
+        run: CICA_DOCKER_IT=1 cargo test sandbox::worker::tests::docker_flow_round_trips_with_fake_backend -- --nocapture

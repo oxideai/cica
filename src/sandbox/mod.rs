@@ -91,6 +91,31 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                 Box::new(worker::SubprocessLauncher::new(self_exe)),
             )))
         }
+        ProviderKind::Docker => {
+            let store = store.ok_or_else(|| {
+                anyhow::anyhow!("`provider = docker` requires [deployment].store to be set")
+            })?;
+            let paths = crate::config::paths()?;
+            let image = config
+                .deployment
+                .docker_image
+                .clone()
+                .unwrap_or_else(|| "cica-worker:latest".to_string());
+            let state_store_dir = match &config.deployment.state_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => paths.internal_dir.join("state-store"),
+            };
+            let launcher = worker::DockerLauncher::new(
+                image,
+                paths.config_file,
+                paths.skills_dir,
+                state_store_dir,
+            );
+            Ok(Box::new(worker::LaunchedWorkerProvider::new(
+                store,
+                Box::new(launcher),
+            )))
+        }
     }
 }
 
@@ -135,6 +160,24 @@ mod tests {
         cfg.deployment.provider = Some(ProviderKind::Subprocess);
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-prov-test".into());
+        assert!(try_default_provider(&cfg).is_ok());
+    }
+
+    #[test]
+    fn docker_provider_requires_a_store() {
+        use crate::config::{Config, ProviderKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Docker);
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[test]
+    fn docker_provider_built_when_store_present() {
+        use crate::config::{Config, ProviderKind, StoreKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Docker);
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-docker-test".into());
         assert!(try_default_provider(&cfg).is_ok());
     }
 

@@ -173,11 +173,15 @@ impl SessionArtifacts for CursorSessionArtifacts {
 
     fn restore(&self, home: &Path, _cwd: &Path, session_id: &str, staging: &Path) -> Result<()> {
         // The single subdir in staging is the recorded workspace hash.
-        let Some(hash) = fs::read_dir(staging)?
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().is_dir())
-            .map(|e| e.file_name())
-        else {
+        let mut recorded = None;
+        for entry in fs::read_dir(staging)? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                recorded = Some(entry.file_name());
+                break;
+            }
+        }
+        let Some(hash) = recorded else {
             return Ok(()); // nothing staged
         };
         let staged_dir = staging.join(&hash);

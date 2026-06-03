@@ -30,7 +30,13 @@ impl<P: SandboxProvider> HydratingProvider<P> {
         cursor_home: PathBuf,
         cwd: PathBuf,
     ) -> Self {
-        Self { inner, store, claude_home, cursor_home, cwd }
+        Self {
+            inner,
+            store,
+            claude_home,
+            cursor_home,
+            cwd,
+        }
     }
 
     fn memories_dir(&self, channel: &str, user_id: &str) -> PathBuf {
@@ -268,11 +274,20 @@ mod tests {
         let id = "cursor-sess-1";
         let hash = "deadbeef";
         write(
-            &cursor_home.path().join(".cursor").join("chats").join(hash).join(id).join("store.db"),
+            &cursor_home
+                .path()
+                .join(".cursor")
+                .join("chats")
+                .join(hash)
+                .join(id)
+                .join("store.db"),
             "CURSORDB",
         );
 
-        let inner = StubProvider { session_id: id.into(), seen: Mutex::new(None) };
+        let inner = StubProvider {
+            session_id: id.into(),
+            seen: Mutex::new(None),
+        };
         let hp = HydratingProvider::new(
             inner,
             store.clone(),
@@ -285,7 +300,12 @@ mod tests {
         hp.run_turn(j).await.unwrap();
 
         let dest = tempfile::tempdir().unwrap();
-        assert!(store.pull(&format!("session/{id}"), dest.path()).await.unwrap());
+        assert!(
+            store
+                .pull(&format!("session/{id}"), dest.path())
+                .await
+                .unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(dest.path().join(hash).join("store.db")).unwrap(),
             "CURSORDB"

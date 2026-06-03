@@ -534,3 +534,11 @@ git commit -m "chore(sandbox): fmt + clippy for cursor artifacts; document manua
 ## Next (after this merges)
 
 Run the manual validation to clear the 3a gate for Cursor. Then Phase 3b: containerize the worker (pin canonical cwd = `/data/cica`), `ContainerProvider` + AWS Fargate launcher, feature-gated `S3StateStore`, pass `cursor.api_key` to the worker, network result-return, deployment-contract doc.
+
+## Manual validation — clears the 3a gate for the Cursor backend (run in the configured env)
+
+With `[deployment] provider = "subprocess"` + `store = "filesystem"` and the Cursor backend:
+1. Send a message. Confirm a `session/<id>/` dir now appears in `<base>/internal/state-store/` (it didn't before this phase), containing `<workspace_hash>/store.db`.
+2. **Force the store path:** `rm -rf <base>/internal/cursor-home/.cursor/chats/` (wipe Cursor's local sessions).
+3. Send a follow-up in the same conversation. If it resumes context, the worker restored the session db from the store (the real cross-machine behavior the same-box test masked). If it forgets, Cursor also needs cloud state for `--resume` — capture is still correct, but note the worker must reach Cursor's API (it does).
+4. Confirm a memory written in step 1 persists.

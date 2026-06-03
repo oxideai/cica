@@ -181,7 +181,11 @@ impl SessionArtifacts for CursorSessionArtifacts {
             return Ok(()); // nothing staged
         };
         let staged_dir = staging.join(&hash);
-        let dest = home.join(".cursor").join("chats").join(&hash).join(session_id);
+        let dest = home
+            .join(".cursor")
+            .join("chats")
+            .join(&hash)
+            .join(session_id);
         fs::create_dir_all(&dest)?;
         for f in CURSOR_DB_FILES {
             let src = staged_dir.join(f);
@@ -275,18 +279,35 @@ mod tests {
 
         let home_a = tempfile::tempdir().unwrap();
         write(
-            &home_a.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl")),
+            &home_a
+                .path()
+                .join(".claude")
+                .join("projects")
+                .join(&slug)
+                .join(format!("{id}.jsonl")),
             "line1\n",
         );
         let staging = tempfile::tempdir().unwrap();
-        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+        assert!(
+            artifacts
+                .capture(home_a.path(), id, staging.path())
+                .unwrap()
+        );
 
         let home_b = tempfile::tempdir().unwrap();
-        artifacts.restore(home_b.path(), cwd, id, staging.path()).unwrap();
+        artifacts
+            .restore(home_b.path(), cwd, id, staging.path())
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(
-                home_b.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl"))
-            ).unwrap(),
+                home_b
+                    .path()
+                    .join(".claude")
+                    .join("projects")
+                    .join(&slug)
+                    .join(format!("{id}.jsonl"))
+            )
+            .unwrap(),
             "line1\n"
         );
     }
@@ -297,22 +318,47 @@ mod tests {
         let hash = "5c64d42749f92f28359bff54fe4cb4bc";
 
         let home_a = tempfile::tempdir().unwrap();
-        let session_dir = home_a.path().join(".cursor").join("chats").join(hash).join(id);
+        let session_dir = home_a
+            .path()
+            .join(".cursor")
+            .join("chats")
+            .join(hash)
+            .join(id);
         write(&session_dir.join("store.db"), "DB");
         write(&session_dir.join("store.db-wal"), "WAL");
         write(&session_dir.join("store.db-shm"), "SHM");
 
         let artifacts = CursorSessionArtifacts;
         let staging = tempfile::tempdir().unwrap();
-        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+        assert!(
+            artifacts
+                .capture(home_a.path(), id, staging.path())
+                .unwrap()
+        );
 
         let home_b = tempfile::tempdir().unwrap();
-        artifacts.restore(home_b.path(), Path::new("/whatever"), id, staging.path()).unwrap();
+        artifacts
+            .restore(home_b.path(), Path::new("/whatever"), id, staging.path())
+            .unwrap();
 
-        let dest = home_b.path().join(".cursor").join("chats").join(hash).join(id);
-        assert_eq!(std::fs::read_to_string(dest.join("store.db")).unwrap(), "DB");
-        assert_eq!(std::fs::read_to_string(dest.join("store.db-wal")).unwrap(), "WAL");
-        assert_eq!(std::fs::read_to_string(dest.join("store.db-shm")).unwrap(), "SHM");
+        let dest = home_b
+            .path()
+            .join(".cursor")
+            .join("chats")
+            .join(hash)
+            .join(id);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("store.db")).unwrap(),
+            "DB"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("store.db-wal")).unwrap(),
+            "WAL"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("store.db-shm")).unwrap(),
+            "SHM"
+        );
     }
 
     #[test]
@@ -320,7 +366,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
         let artifacts = CursorSessionArtifacts;
-        assert!(!artifacts.capture(home.path(), "no-such", staging.path()).unwrap());
+        assert!(
+            !artifacts
+                .capture(home.path(), "no-such", staging.path())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -338,16 +388,39 @@ mod tests {
         let id = "sess-1";
         let hash = "abc123";
         let home_a = tempfile::tempdir().unwrap();
-        write(&home_a.path().join(".cursor").join("chats").join(hash).join(id).join("store.db"), "DB");
+        write(
+            &home_a
+                .path()
+                .join(".cursor")
+                .join("chats")
+                .join(hash)
+                .join(id)
+                .join("store.db"),
+            "DB",
+        );
 
         let artifacts = CursorSessionArtifacts;
         let staging = tempfile::tempdir().unwrap();
-        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+        assert!(
+            artifacts
+                .capture(home_a.path(), id, staging.path())
+                .unwrap()
+        );
 
         let home_b = tempfile::tempdir().unwrap();
-        artifacts.restore(home_b.path(), Path::new("/x"), id, staging.path()).unwrap();
-        let dest = home_b.path().join(".cursor").join("chats").join(hash).join(id);
-        assert_eq!(std::fs::read_to_string(dest.join("store.db")).unwrap(), "DB");
+        artifacts
+            .restore(home_b.path(), Path::new("/x"), id, staging.path())
+            .unwrap();
+        let dest = home_b
+            .path()
+            .join(".cursor")
+            .join("chats")
+            .join(hash)
+            .join(id);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("store.db")).unwrap(),
+            "DB"
+        );
         assert!(!dest.join("store.db-wal").exists());
     }
 }

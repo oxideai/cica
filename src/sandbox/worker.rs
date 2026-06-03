@@ -134,10 +134,10 @@ impl SandboxProvider for SubprocessWorkerProvider {
             anyhow::bail!("worker exited with status {status}");
         }
 
-        let result = pull_result(self.store.as_ref(), &turn_id).await?;
+        let result = pull_result(self.store.as_ref(), &turn_id).await;
         cleanup(self.store.as_ref(), &turn_id).await;
 
-        result.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
+        result?.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
     }
 }
 

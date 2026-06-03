@@ -218,9 +218,15 @@ impl DockerLauncher {
             args.push(format!("{k}={v}"));
         }
         args.push("-v".into());
-        args.push(format!("{}:/data/cica/config.toml:ro", self.config_file.display()));
+        args.push(format!(
+            "{}:/data/cica/config.toml:ro",
+            self.config_file.display()
+        ));
         args.push("-v".into());
-        args.push(format!("{}:/data/cica/skills:ro", self.skills_dir.display()));
+        args.push(format!(
+            "{}:/data/cica/skills:ro",
+            self.skills_dir.display()
+        ));
         args.push("-v".into());
         args.push(format!(
             "{}:/data/cica/internal/state-store",

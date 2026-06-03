@@ -202,6 +202,8 @@ impl DockerLauncher {
     }
 
     /// Extra `-e KEY=VALUE` env vars to pass into the container.
+    // Reached only from the Docker integration test today; cloud launchers
+    // (Fargate/Cloud Run, phase 3b-2) will use it to inject creds/config.
     #[allow(dead_code)]
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
@@ -414,8 +416,9 @@ mod tests {
     /// store, asserting the turn round-trips with no real backend.
     #[tokio::test]
     async fn docker_flow_round_trips_with_fake_backend() {
+        // Enabled by any non-empty `CICA_DOCKER_IT` value (the CI job sets `=1`).
         if std::env::var_os("CICA_DOCKER_IT").is_none() {
-            return; // skipped unless explicitly enabled
+            return; // skipped in normal `cargo test`
         }
 
         use crate::config::AiBackend;

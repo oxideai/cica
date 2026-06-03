@@ -136,6 +136,7 @@ pub enum StoreKind {
 pub enum ProviderKind {
     Local,
     Subprocess,
+    Docker,
 }
 
 /// Distributed-deployment configuration. All optional; absent = single-box.
@@ -150,6 +151,9 @@ pub struct DeploymentConfig {
     /// Turn execution mode. `None` (or `Local`) = in-process (default).
     #[serde(default)]
     pub provider: Option<ProviderKind>,
+    /// Worker image for `provider = "docker"` (default `cica-worker:latest`).
+    #[serde(default)]
+    pub docker_image: Option<String>,
 }
 
 /// Root configuration
@@ -451,5 +455,21 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.deployment.provider, Some(ProviderKind::Subprocess));
+    }
+
+    #[test]
+    fn provider_parses_docker_with_image() {
+        let toml = r#"
+            [deployment]
+            provider = "docker"
+            store = "filesystem"
+            docker_image = "cica-worker:dev"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.provider, Some(ProviderKind::Docker));
+        assert_eq!(
+            cfg.deployment.docker_image.as_deref(),
+            Some("cica-worker:dev")
+        );
     }
 }

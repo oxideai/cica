@@ -762,3 +762,19 @@ git commit -m "chore(sandbox): fmt + clippy for worker dispatch; document manual
 ## Next phase (separate plan)
 
 Phase 3b: worker `Dockerfile`; `ContainerProvider` + `Launcher` trait + AWS Fargate; feature-gated `S3StateStore`; network result-return (task-status polling); deployment-contract doc; feature-gated cloud release artifacts + `--all-features` CI.
+
+## Manual integration test (run in a configured environment)
+
+Needs a configured cica with the `claude` CLI + credentials. Not runnable in CI.
+
+1. In `config.toml`:
+   ```toml
+   [deployment]
+   provider = "subprocess"
+   store = "filesystem"
+   ```
+2. Start `cica`; send a message. Confirm a `cica worker --turn <id>` child process runs (e.g. visible in `ps`) and the reply arrives.
+3. Confirm `internal/state-store/turns/<id>/` is created during the turn and cleared afterward, and that `internal/state-store/session/<backend_id>/` + `internal/state-store/mem/<channel>_<user>/` are written.
+4. Send a follow-up in the same conversation; confirm context resumes (the worker restored the session before `--resume`).
+5. Confirm a memory written in step 2 is still searchable after step 4.
+6. Negative check: set `provider = "subprocess"` with NO `store`; confirm `cica` logs the configuration error and runs in-process rather than crashing.

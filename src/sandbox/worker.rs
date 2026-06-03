@@ -29,7 +29,10 @@ fn turn_prefix(turn_id: &str) -> String {
 
 /// A unique temp dir for staging a blob in/out of the store.
 fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("cica-turn-{turn_id}-{kind}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "cica-turn-{turn_id}-{kind}-{}",
+        uuid::Uuid::new_v4()
+    ))
 }
 
 /// Serialize `job` into a fresh dir and push it under `turns/<id>/job`.

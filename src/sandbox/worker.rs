@@ -182,6 +182,7 @@ pub struct DockerLauncher {
     config_file: PathBuf,
     skills_dir: PathBuf,
     state_store_dir: PathBuf,
+    env: Vec<(String, String)>,
 }
 
 impl DockerLauncher {
@@ -196,28 +197,37 @@ impl DockerLauncher {
             config_file,
             skills_dir,
             state_store_dir,
+            env: Vec::new(),
         }
+    }
+
+    /// Extra `-e KEY=VALUE` env vars to pass into the container.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
     }
 
     /// The `docker` argv (without the leading `docker`). Pure, for testing.
     fn run_args(&self, turn_id: &str) -> Vec<String> {
-        vec![
-            "run".into(),
-            "--rm".into(),
-            "-v".into(),
-            format!("{}:/data/cica/config.toml:ro", self.config_file.display()),
-            "-v".into(),
-            format!("{}:/data/cica/skills:ro", self.skills_dir.display()),
-            "-v".into(),
-            format!(
-                "{}:/data/cica/internal/state-store",
-                self.state_store_dir.display()
-            ),
-            self.image.clone(),
-            "worker".into(),
-            "--turn".into(),
-            turn_id.into(),
-        ]
+        let mut args = vec!["run".into(), "--rm".into()];
+        for (k, v) in &self.env {
+            args.push("-e".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push("-v".into());
+        args.push(format!("{}:/data/cica/config.toml:ro", self.config_file.display()));
+        args.push("-v".into());
+        args.push(format!("{}:/data/cica/skills:ro", self.skills_dir.display()));
+        args.push("-v".into());
+        args.push(format!(
+            "{}:/data/cica/internal/state-store",
+            self.state_store_dir.display()
+        ));
+        args.push(self.image.clone());
+        args.push("worker".into());
+        args.push("--turn".into());
+        args.push(turn_id.into());
+        args
     }
 }
 
@@ -354,6 +364,22 @@ mod tests {
         assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
+    }
+
+    #[test]
+    fn docker_launcher_passes_env() {
+        let l = DockerLauncher::new(
+            "cica-worker:latest".into(),
+            std::path::PathBuf::from("/c"),
+            std::path::PathBuf::from("/s"),
+            std::path::PathBuf::from("/st"),
+        )
+        .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
+        let args = l.run_args("t1");
+        let e = args.iter().position(|a| a == "-e").unwrap();
+        assert_eq!(args[e + 1], "CICA_FAKE_BACKEND=echo");
+        let img = args.iter().position(|a| a == "cica-worker:latest").unwrap();
+        assert!(e < img);
     }
 
     #[tokio::test]

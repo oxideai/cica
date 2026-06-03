@@ -202,6 +202,7 @@ impl DockerLauncher {
     }
 
     /// Extra `-e KEY=VALUE` env vars to pass into the container.
+    #[allow(dead_code)]
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self
@@ -405,5 +406,61 @@ mod tests {
         let result = pull_result(&store, "tX").await.unwrap().unwrap();
         assert_eq!(result.response, "from-worker");
         assert_eq!(result.backend_session_id, "sess-w");
+    }
+
+    /// End-to-end Docker flow with the fake backend. Gated: only runs when
+    /// `CICA_DOCKER_IT=1` (the CI docker-flow job, after building the image).
+    /// Drives the real `cica-worker:latest` container + a tempdir filesystem
+    /// store, asserting the turn round-trips with no real backend.
+    #[tokio::test]
+    async fn docker_flow_round_trips_with_fake_backend() {
+        if std::env::var_os("CICA_DOCKER_IT").is_none() {
+            return; // skipped unless explicitly enabled
+        }
+
+        use crate::config::AiBackend;
+
+        let store_root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
+
+        // Minimal config.toml to mount (backend is irrelevant — the fake hook
+        // short-circuits before the real CLI call).
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let config_file = cfg_dir.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            "backend = \"cursor\"\n[deployment]\nstore = \"filesystem\"\n",
+        )
+        .unwrap();
+        let skills_dir = tempfile::tempdir().unwrap();
+
+        let launcher = DockerLauncher::new(
+            "cica-worker:latest".into(),
+            config_file,
+            skills_dir.path().to_path_buf(),
+            store_root.path().to_path_buf(),
+        )
+        .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
+
+        let provider = LaunchedWorkerProvider::new(store.clone(), Box::new(launcher));
+        let job = TurnJob {
+            session_id: "telegram:1".into(),
+            channel: "telegram".into(),
+            user_id: "1".into(),
+            prompt: "ping".into(),
+            system_prompt: None,
+            resume_session: None,
+            cwd: None,
+            skip_permissions: true,
+            backend: AiBackend::Cursor,
+            model: None,
+        };
+
+        let result = provider.run_turn(job).await.expect("docker turn failed");
+        assert!(
+            result.response.contains("fake-response: ping"),
+            "unexpected response: {}",
+            result.response
+        );
     }
 }

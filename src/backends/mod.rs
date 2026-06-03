@@ -25,8 +25,26 @@ pub struct QueryResult {
     pub cost_usd: Option<f64>,
 }
 
+/// Deterministic stand-in for a real backend response. Used by the Docker
+/// integration test (activated via the `CICA_FAKE_BACKEND` env var) to exercise
+/// the worker/dispatch pipeline without calling Cursor/Claude.
+fn fake_result(prompt: &str) -> QueryResult {
+    QueryResult {
+        response: format!("fake-response: {prompt}"),
+        session_id: String::new(),
+        duration_ms: Some(0),
+        cost_usd: None,
+    }
+}
+
 /// Query the configured AI backend.
 pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
+    // Test hook: a deterministic response without invoking the real backend CLI.
+    // Inert unless `CICA_FAKE_BACKEND` is set (used only by the Docker CI test).
+    if std::env::var_os("CICA_FAKE_BACKEND").is_some() {
+        return Ok(fake_result(prompt));
+    }
+
     let config = Config::load()?;
 
     match config.backend {
@@ -66,4 +84,17 @@ pub fn current_backend_name() -> Result<&'static str> {
         AiBackend::Claude => "Claude Code",
         AiBackend::Cursor => "Cursor CLI",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fake_result_echoes_prompt() {
+        let r = fake_result("ping");
+        assert_eq!(r.response, "fake-response: ping");
+        assert_eq!(r.session_id, "");
+        assert_eq!(r.cost_usd, None);
+    }
 }

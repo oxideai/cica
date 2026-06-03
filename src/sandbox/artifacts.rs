@@ -133,6 +133,65 @@ impl SessionArtifacts for ClaudeSessionArtifacts {
     }
 }
 
+/// Capture/restore of Cursor session state.
+///
+/// A Cursor session lives at `cursor_home/.cursor/chats/<workspace_hash>/<id>/`
+/// as SQLite files (`store.db` + `-wal` + `-shm`). The workspace hash is
+/// `md5(realpath(cwd))`; we record the hash dir at capture and replay it at
+/// restore — correct as long as all workers share a resolved cwd (the fleet
+/// requirement), and resilient to Cursor changing its hashing.
+pub struct CursorSessionArtifacts;
+
+const CURSOR_DB_FILES: [&str; 3] = ["store.db", "store.db-wal", "store.db-shm"];
+
+impl SessionArtifacts for CursorSessionArtifacts {
+    fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool> {
+        let chats = home.join(".cursor").join("chats");
+        if !chats.is_dir() {
+            return Ok(false);
+        }
+        // Find <workspace_hash>/<session_id>/ under chats (hash-independent).
+        for entry in fs::read_dir(&chats)? {
+            let ws = entry?;
+            let session_dir = ws.path().join(session_id);
+            if session_dir.is_dir() {
+                // Stage as staging/<workspace_hash>/<files>, recording the hash.
+                let dest = staging.join(ws.file_name());
+                fs::create_dir_all(&dest)?;
+                for f in CURSOR_DB_FILES {
+                    let src = session_dir.join(f);
+                    if src.is_file() {
+                        fs::copy(&src, dest.join(f))?;
+                    }
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn restore(&self, home: &Path, _cwd: &Path, session_id: &str, staging: &Path) -> Result<()> {
+        // The single subdir in staging is the recorded workspace hash.
+        let Some(hash) = fs::read_dir(staging)?
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().is_dir())
+            .map(|e| e.file_name())
+        else {
+            return Ok(()); // nothing staged
+        };
+        let staged_dir = staging.join(&hash);
+        let dest = home.join(".cursor").join("chats").join(&hash).join(session_id);
+        fs::create_dir_all(&dest)?;
+        for f in CURSOR_DB_FILES {
+            let src = staged_dir.join(f);
+            if src.is_file() {
+                fs::copy(&src, dest.join(f))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +288,55 @@ mod tests {
             ).unwrap(),
             "line1\n"
         );
+    }
+
+    #[test]
+    fn cursor_capture_then_restore_reproduces_session_db() {
+        let id = "6cd64aba-d369-4444-b2f9-acda76abdf3f";
+        let hash = "5c64d42749f92f28359bff54fe4cb4bc";
+
+        let home_a = tempfile::tempdir().unwrap();
+        let session_dir = home_a.path().join(".cursor").join("chats").join(hash).join(id);
+        write(&session_dir.join("store.db"), "DB");
+        write(&session_dir.join("store.db-wal"), "WAL");
+        write(&session_dir.join("store.db-shm"), "SHM");
+
+        let artifacts = CursorSessionArtifacts;
+        let staging = tempfile::tempdir().unwrap();
+        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+
+        let home_b = tempfile::tempdir().unwrap();
+        artifacts.restore(home_b.path(), Path::new("/whatever"), id, staging.path()).unwrap();
+
+        let dest = home_b.path().join(".cursor").join("chats").join(hash).join(id);
+        assert_eq!(std::fs::read_to_string(dest.join("store.db")).unwrap(), "DB");
+        assert_eq!(std::fs::read_to_string(dest.join("store.db-wal")).unwrap(), "WAL");
+        assert_eq!(std::fs::read_to_string(dest.join("store.db-shm")).unwrap(), "SHM");
+    }
+
+    #[test]
+    fn cursor_capture_returns_false_when_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let artifacts = CursorSessionArtifacts;
+        assert!(!artifacts.capture(home.path(), "no-such", staging.path()).unwrap());
+    }
+
+    #[test]
+    fn cursor_capture_tolerates_missing_wal_shm() {
+        let id = "sess-1";
+        let hash = "abc123";
+        let home_a = tempfile::tempdir().unwrap();
+        write(&home_a.path().join(".cursor").join("chats").join(hash).join(id).join("store.db"), "DB");
+
+        let artifacts = CursorSessionArtifacts;
+        let staging = tempfile::tempdir().unwrap();
+        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+
+        let home_b = tempfile::tempdir().unwrap();
+        artifacts.restore(home_b.path(), Path::new("/x"), id, staging.path()).unwrap();
+        let dest = home_b.path().join(".cursor").join("chats").join(hash).join(id);
+        assert_eq!(std::fs::read_to_string(dest.join("store.db")).unwrap(), "DB");
+        assert!(!dest.join("store.db-wal").exists());
     }
 }

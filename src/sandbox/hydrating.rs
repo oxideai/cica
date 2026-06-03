@@ -1,15 +1,14 @@
 //! A `SandboxProvider` decorator that hydrates durable state before a turn
 //! and dehydrates it after, via a `StateStore`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::config::AiBackend;
-use crate::sandbox::artifacts::ClaudeSessionArtifacts;
+use crate::sandbox::artifacts::{ClaudeSessionArtifacts, CursorSessionArtifacts, SessionArtifacts};
 use crate::sandbox::state::StateStore;
 use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
 
@@ -18,18 +17,20 @@ pub struct HydratingProvider<P: SandboxProvider> {
     inner: P,
     store: Arc<dyn StateStore>,
     claude_home: PathBuf,
-    /// Effective working directory of the agent subprocess (used for the slug).
+    cursor_home: PathBuf,
+    /// Effective working directory of the agent subprocess (used for the slug/hash).
     cwd: PathBuf,
 }
 
 impl<P: SandboxProvider> HydratingProvider<P> {
-    pub fn new(inner: P, store: Arc<dyn StateStore>, claude_home: PathBuf, cwd: PathBuf) -> Self {
-        Self {
-            inner,
-            store,
-            claude_home,
-            cwd,
-        }
+    pub fn new(
+        inner: P,
+        store: Arc<dyn StateStore>,
+        claude_home: PathBuf,
+        cursor_home: PathBuf,
+        cwd: PathBuf,
+    ) -> Self {
+        Self { inner, store, claude_home, cursor_home, cwd }
     }
 
     fn memories_dir(&self, channel: &str, user_id: &str) -> PathBuf {
@@ -47,23 +48,22 @@ impl<P: SandboxProvider> HydratingProvider<P> {
 #[async_trait]
 impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
-        let is_claude = matches!(job.backend, AiBackend::Claude);
         let mem_key = format!("mem/{}_{}", job.channel, job.user_id);
         let mem_dir = self.memories_dir(&job.channel, &job.user_id);
 
+        // Select the backend's artifact handler and HOME dir.
+        let (artifacts, home): (Box<dyn SessionArtifacts + Send>, &Path) = match job.backend {
+            AiBackend::Claude => (Box::new(ClaudeSessionArtifacts), self.claude_home.as_path()),
+            AiBackend::Cursor => (Box::new(CursorSessionArtifacts), self.cursor_home.as_path()),
+        };
+
         // --- Hydrate ---
-        if is_claude {
-            if let Some(bid) = &job.resume_session {
-                let staging = self.staging();
-                if self.store.pull(&format!("session/{bid}"), &staging).await? {
-                    ClaudeSessionArtifacts::restore(&self.claude_home, &self.cwd, bid, &staging)?;
-                }
-                let _ = std::fs::remove_dir_all(&staging);
+        if let Some(bid) = &job.resume_session {
+            let staging = self.staging();
+            if self.store.pull(&format!("session/{bid}"), &staging).await? {
+                artifacts.restore(home, &self.cwd, bid, &staging)?;
             }
-        } else {
-            warn!(
-                "HydratingProvider: session hydration unsupported for non-Claude backend; skipping"
-            );
+            let _ = std::fs::remove_dir_all(&staging);
         }
         // Memories: pull is authoritative when present; absent = keep local.
         let _ = self.store.pull(&mem_key, &mem_dir).await?;
@@ -72,10 +72,10 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         let result = self.inner.run_turn(job).await?;
 
         // --- Dehydrate ---
-        if is_claude && !result.backend_session_id.is_empty() {
+        if !result.backend_session_id.is_empty() {
             let bid = &result.backend_session_id;
             let staging = self.staging();
-            if ClaudeSessionArtifacts::capture(&self.claude_home, bid, &staging)? {
+            if artifacts.capture(home, bid, &staging)? {
                 self.store.push(&staging, &format!("session/{bid}")).await?;
             }
             let _ = std::fs::remove_dir_all(&staging);
@@ -139,6 +139,7 @@ mod tests {
     async fn dehydrate_captures_and_pushes_result_session() {
         let store_root = tempfile::tempdir().unwrap();
         let claude_home = tempfile::tempdir().unwrap();
+        let cursor_home = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
         let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
 
@@ -162,6 +163,7 @@ mod tests {
             inner,
             store.clone(),
             claude_home.path().to_path_buf(),
+            cursor_home.path().to_path_buf(),
             base.path().to_path_buf(),
         );
         hp.run_turn(job(None)).await.unwrap();
@@ -183,6 +185,7 @@ mod tests {
     async fn hydrate_restores_resumed_session() {
         let store_root = tempfile::tempdir().unwrap();
         let claude_home = tempfile::tempdir().unwrap();
+        let cursor_home = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
         let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
 
@@ -202,6 +205,7 @@ mod tests {
             inner,
             store,
             claude_home.path().to_path_buf(),
+            cursor_home.path().to_path_buf(),
             base.path().to_path_buf(),
         );
         hp.run_turn(job(Some(id))).await.unwrap();
@@ -220,6 +224,7 @@ mod tests {
     async fn memories_round_trip() {
         let store_root = tempfile::tempdir().unwrap();
         let claude_home = tempfile::tempdir().unwrap();
+        let cursor_home = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
         let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
 
@@ -238,6 +243,7 @@ mod tests {
             inner,
             store.clone(),
             claude_home.path().to_path_buf(),
+            cursor_home.path().to_path_buf(),
             base.path().to_path_buf(),
         );
         hp.run_turn(job(None)).await.unwrap();
@@ -247,6 +253,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dest.path().join("note.md")).unwrap(),
             "remember this"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_job_captures_session_to_store() {
+        let store_root = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let cursor_home = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
+
+        // The (stub) cursor turn "produced" a session db on local disk.
+        let id = "cursor-sess-1";
+        let hash = "deadbeef";
+        write(
+            &cursor_home.path().join(".cursor").join("chats").join(hash).join(id).join("store.db"),
+            "CURSORDB",
+        );
+
+        let inner = StubProvider { session_id: id.into(), seen: Mutex::new(None) };
+        let hp = HydratingProvider::new(
+            inner,
+            store.clone(),
+            claude_home.path().to_path_buf(),
+            cursor_home.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
+        let mut j = job(None);
+        j.backend = crate::config::AiBackend::Cursor;
+        hp.run_turn(j).await.unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        assert!(store.pull(&format!("session/{id}"), dest.path()).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(hash).join("store.db")).unwrap(),
+            "CURSORDB"
         );
     }
 }

@@ -23,6 +23,7 @@ pub async fn run(turn_id: &str) -> Result<()> {
         LocalProcessProvider::new(),
         store.clone(),
         paths.claude_home,
+        paths.cursor_home,
         paths.base,
     );
 

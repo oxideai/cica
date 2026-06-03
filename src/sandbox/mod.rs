@@ -74,6 +74,7 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                         local,
                         store,
                         paths.claude_home,
+                        paths.cursor_home,
                         paths.base,
                     )))
                 }

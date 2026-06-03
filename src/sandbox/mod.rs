@@ -57,31 +57,48 @@ pub trait SandboxProvider: Send + Sync {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult>;
 }
 
-/// Build the provider selected by configuration.
-///
-/// Returns a `HydratingProvider` when a state store is configured, otherwise
-/// falls back to `LocalProcessProvider` (same behavior as Phase 1).
-pub fn default_provider(config: &Config) -> Box<dyn SandboxProvider> {
-    let local = LocalProcessProvider::new();
-    match state::default_store(config) {
-        Ok(Some(store)) => match crate::config::paths() {
-            Ok(paths) => Box::new(hydrating::HydratingProvider::new(
-                local,
-                store,
-                paths.claude_home,
-                paths.base,
-            )),
-            Err(e) => {
-                tracing::warn!(
-                    "state store configured but paths unavailable ({e}); running without hydration"
-                );
-                Box::new(LocalProcessProvider::new())
+/// Build the configured provider. Errors when the configuration is invalid
+/// (e.g. `provider = subprocess` without a store).
+pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>> {
+    use crate::config::ProviderKind;
+
+    let store = state::default_store(config)?;
+
+    match config.deployment.provider.unwrap_or(ProviderKind::Local) {
+        ProviderKind::Local => {
+            let local = LocalProcessProvider::new();
+            match store {
+                Some(store) => {
+                    let paths = crate::config::paths()?;
+                    Ok(Box::new(hydrating::HydratingProvider::new(
+                        local,
+                        store,
+                        paths.claude_home,
+                        paths.base,
+                    )))
+                }
+                None => Ok(Box::new(local)),
             }
-        },
-        Ok(None) => Box::new(local),
+        }
+        ProviderKind::Subprocess => {
+            let store = store.ok_or_else(|| {
+                anyhow::anyhow!("`provider = subprocess` requires [deployment].store to be set")
+            })?;
+            let self_exe = std::env::current_exe()?;
+            Ok(Box::new(worker::SubprocessWorkerProvider::new(store, self_exe)))
+        }
+    }
+}
+
+/// Infallible wrapper used by call sites that cannot recover. On a
+/// configuration error it logs and falls back to the in-process provider,
+/// so a misconfigured store never silently routes through a broken worker.
+pub fn default_provider(config: &Config) -> Box<dyn SandboxProvider> {
+    match try_default_provider(config) {
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!("failed to build state store ({e}); running without hydration");
-            Box::new(local)
+            tracing::error!("invalid provider configuration ({e}); using in-process provider");
+            Box::new(LocalProcessProvider::new())
         }
     }
 }
@@ -94,6 +111,25 @@ mod tests {
     fn default_provider_is_constructible() {
         let cfg = Config::default();
         let _p = default_provider(&cfg);
+    }
+
+    #[test]
+    fn subprocess_provider_requires_a_store() {
+        use crate::config::{Config, ProviderKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Subprocess);
+        // No store configured → must be an error, not a silent local fallback.
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[test]
+    fn subprocess_provider_built_when_store_present() {
+        use crate::config::{Config, ProviderKind, StoreKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Subprocess);
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-prov-test".into());
+        assert!(try_default_provider(&cfg).is_ok());
     }
 
     #[test]

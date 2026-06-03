@@ -29,8 +29,11 @@ A worker is **any runtime that can:**
 2. Resolve `paths.base` to **`/data/cica`** — achieved by the image setting **`ENV XDG_CONFIG_HOME=/data`** (so `ProjectDirs` → `/data/cica`). This makes the agent's cwd `/data/cica`, so the Cursor workspace hash is `md5("/data/cica") = 5c64d427…` and Claude's slug is stable — **identical on every worker and matching the existing prod sessions.**
 3. Provide a valid **`config.toml` at `/data/cica/config.toml`** (backend + creds + the `[deployment].store` config). Locally `DockerLauncher` bind-mounts the host's; in cloud, sprout renders it from secrets.
 4. Make the configured **`StateStore` reachable** (filesystem: a volume mounted at the store's `state_path`; S3/GCS: network + creds).
-5. Leave `cursor-home`/`claude-home` **container-local and fresh** (the isolation we're proving).
-6. Have **network egress** (cursor-cli/claude-code call their APIs).
+5. Provide **published skills** (read-only) at **`/data/cica/skills`** — the agent reads `SKILL.md`/impl files from disk at runtime. Locally `DockerLauncher` bind-mounts the host `skills/` dir; in cloud the image bakes (or pulls) them from the `ai-skills` repo at a pinned ref. (Same "sourced read-input" pattern as `config.toml`.)
+6. Leave `cursor-home`/`claude-home` **container-local and fresh** (the isolation we're proving).
+7. Have **network egress** (cursor-cli/claude-code call their APIs).
+
+**Skills are a read-only input in 3b-1.** Worker-*authored* / in-progress (draft) skills are **out of scope here** and are the subject of a dedicated **Skills phase**. Key constraint that phase must solve, surfaced here so it isn't lost: because each turn is a *fresh* worker, a draft skill being iterated across messages **cannot live in worker scratch** — it must persist in **durable state** (leading option: a per-session "draft" area in the `StateStore`, hydrated/dehydrated per turn like the session, with `publish` opening a **PR to `ai-skills`** — source of truth `root-global/ai-skills`, pinned-ref distribution to workers). This is the concretization of the deferred "opt-in durable workspace."
 
 The worker pulls `turns/<id>/job`, runs the turn (hydrating session+memories from the store into the fresh homes), writes `turns/<id>/result`, and exits 0 (non-zero on failure, no result written).
 
@@ -56,18 +59,20 @@ pub trait Launcher: Send + Sync {
 ```rust
 pub struct DockerLauncher {
     image: String,            // e.g. "cica-worker:latest"
-    config_file: PathBuf,     // host config.toml to mount
-    state_store_dir: PathBuf, // host filesystem state-store to mount
+    config_file: PathBuf,     // host config.toml to mount (ro)
+    skills_dir: PathBuf,      // host published-skills dir to mount (ro)
+    state_store_dir: PathBuf, // host filesystem state-store to mount (rw)
 }
 ```
 `launch(turn_id)` shells out to `docker run` (via `tokio::process::Command`):
 ```
 docker run --rm \
   -v <config_file>:/data/cica/config.toml:ro \
+  -v <skills_dir>:/data/cica/skills:ro \
   -v <state_store_dir>:/data/cica/internal/state-store \
   <image> worker --turn <turn_id>
 ```
-Returns `Ok` on exit 0, `Err` otherwise. The host paths are **derived from `config::paths()`** (the router knows where its own `config.toml` and state-store live), so the only required config is the image name. `cursor-home`/`claude-home` are *not* mounted → fresh per container.
+Returns `Ok` on exit 0, `Err` otherwise. The host paths are **derived from `config::paths()`** (the router knows where its own `config.toml`, `skills/`, and state-store live), so the only required config is the image name. `cursor-home`/`claude-home` are *not* mounted → fresh per container.
 
 ### Worker `Dockerfile`
 A `Dockerfile` (+ `.dockerignore`) at the repo root, built locally for 3b-1 (`docker build -t cica-worker .`), published to a registry in 3b-2.

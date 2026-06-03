@@ -227,8 +227,6 @@ mod tests {
 
     #[tokio::test]
     async fn launched_provider_dispatches_via_launcher() {
-        use crate::config::AiBackend;
-
         let root = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
 

@@ -130,6 +130,14 @@ pub enum StoreKind {
     Filesystem,
 }
 
+/// Where a turn executes (none/local = in-process; subprocess = one-shot worker).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Local,
+    Subprocess,
+}
+
 /// Distributed-deployment configuration. All optional; absent = single-box.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeploymentConfig {
@@ -139,6 +147,9 @@ pub struct DeploymentConfig {
     /// Filesystem store root. Defaults to `internal/state-store` when unset.
     #[serde(default)]
     pub state_path: Option<String>,
+    /// Turn execution mode. `None` (or `Local`) = in-process (default).
+    #[serde(default)]
+    pub provider: Option<ProviderKind>,
 }
 
 /// Root configuration
@@ -423,5 +434,22 @@ mod tests {
             cfg.deployment.state_path.as_deref(),
             Some("/tmp/cica-state")
         );
+    }
+
+    #[test]
+    fn provider_defaults_to_none() {
+        let cfg = Config::default();
+        assert!(cfg.deployment.provider.is_none());
+    }
+
+    #[test]
+    fn provider_parses_subprocess() {
+        let toml = r#"
+            [deployment]
+            provider = "subprocess"
+            store = "filesystem"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.provider, Some(ProviderKind::Subprocess));
     }
 }

@@ -37,6 +37,13 @@ enum Commands {
 
     /// Show where Cica stores its data
     Paths,
+
+    /// Run a single turn as a one-shot worker (internal; used by the router)
+    Worker {
+        /// The turn id whose job/result live in the state store
+        #[arg(long)]
+        turn: String,
+    },
 }
 
 #[tokio::main]
@@ -62,6 +69,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => cmd::init::run().await,
         Some(Commands::Approve { code }) => cmd::approve::run(&code),
         Some(Commands::Paths) => cmd::paths::run(),
+        Some(Commands::Worker { turn }) => cmd::worker::run(&turn).await,
         None => cmd::run::run().await,
     }
 }

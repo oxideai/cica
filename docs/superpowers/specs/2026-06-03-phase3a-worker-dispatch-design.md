@@ -36,7 +36,7 @@ One binary, two roles selected by config. Zero distributed config → today's in
 | Where hydration runs | **Inside the worker** (`HydratingProvider` from Phase 2) | The worker owns its state; the router doesn't hydrate when `provider=subprocess`. Matches the parent design's "relocate the seam into the worker." |
 | Job/result storage | Reuse `StateStore` dir-tree `pull`/`push`; job/result are one-file dirs | No `StateStore` trait change. |
 | `provider=subprocess` without a store | Fail fast at startup | The protocol depends on the store. |
-| Worker cwd | **Fresh per-turn scratch dir** (ephemeral workspace) | Phase 2 slug-decoupling handles a varying cwd (capture-by-id, restore-under-`slug(cwd)`). Validated by the worker round-trip; canonicalize only if resume proves cwd-sensitive. |
+| Worker cwd | **`paths.base`** (same as Phase 1/2 today) | A single dir must serve both the transcript slug and the memories dir (`cwd/users/.../memories`), because the router bakes the real `paths.base` memories path into the system prompt. Using `paths.base` keeps them consistent and matches today's behavior. Inside a 3b container `paths.base` is a fixed in-image path, naturally fresh-per-container — a stable canonical cwd for free. (A separate scratch dir would orphan memory writes.) |
 | Worker failure | **Surface a clean error to the channel; no fallback to in-process** | The operator opted into workers; masking failures hides real problems and defeats isolation. |
 
 ## Components
@@ -47,7 +47,7 @@ One binary, two roles selected by config. Zero distributed config → today's in
 - Flow:
   1. `Config::load()`; build the `StateStore` via `sandbox::state::default_store(&config)?` (error if `None` — a worker requires a store).
   2. `pull` `turns/<turn_id>/job` into a temp dir; deserialize `TurnJob` from `job.json`.
-  3. Build the engine: `HydratingProvider::new(LocalProcessProvider::new(), store, claude_home, scratch_cwd)` where `scratch_cwd` is a fresh per-turn dir. Set the job's effective cwd to `scratch_cwd`.
+  3. Build the engine: `HydratingProvider::new(LocalProcessProvider::new(), store, paths.claude_home, paths.base)` — identical to Phase 2's in-process construction. The job's `cwd` stays `None`, so the `claude` subprocess runs in `paths.base` (its default) and the slug + memories dir both derive from `paths.base`.
   4. `run_turn(job)` → `TurnResult`.
   5. Serialize `TurnResult` to a temp dir as `result.json`; `push` to `turns/<turn_id>/result`.
   6. Exit 0. On any error: log and exit non-zero (do NOT write a result).
@@ -81,7 +81,7 @@ channel → query_ai_with_session → SubprocessWorkerProvider.run_turn(job)
   spawn `cica worker --turn <id>`  (child process)
         worker: pull job ← store
                 HydratingProvider: pull session+memories ← store
-                  LocalProcessProvider → claude --resume (scratch cwd)
+                  LocalProcessProvider → claude --resume (cwd = paths.base)
                   capture + push session, push memories ──▶ store
                 push turns/<id>/result ──▶ store ; exit 0
   await child exit (0)
@@ -110,9 +110,8 @@ channel → query_ai_with_session → SubprocessWorkerProvider.run_turn(job)
 With `[deployment] provider = "subprocess"` and `store = "filesystem"`:
 1. Send a message; confirm a `cica worker` child process runs and the reply arrives.
 2. Confirm `turns/<id>/` is created and then cleaned up.
-3. Send a follow-up in the same conversation; confirm context resumes (worker hydrated the session under the scratch cwd's slug).
+3. Send a follow-up in the same conversation; confirm context resumes (worker hydrated the session under `slug(paths.base)`).
 4. Confirm a memory written in step 1 persists.
-If resume fails specifically because the cwd differs per turn, introduce a fixed canonical worker cwd and re-test.
 
 ## Distribution impact
 
@@ -123,4 +122,4 @@ None. No new dependencies; `cica worker` is a subcommand of the same binary. Def
 - Network result-return + task-status polling (Fargate `DescribeTasks`) — 3b.
 - Passing config/creds to a containerized worker via env/secrets — 3b.
 - A GC sweep for orphaned `turns/<id>/` blobs if cleanup ever fails at scale — revisit if needed.
-- Canonical worker cwd, only if the manual resume test shows cwd-sensitivity.
+- Concurrent same-box workers share `paths.base`/`claude-home` (same as today's in-process concurrent turns); 3b containers isolate this. No change needed for 3a.

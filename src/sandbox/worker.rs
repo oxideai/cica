@@ -172,6 +172,62 @@ impl Launcher for SubprocessLauncher {
     }
 }
 
+/// Launcher that runs `cica worker --turn <id>` inside a one-shot container.
+///
+/// Mounts the host config, published skills, and filesystem state-store into a
+/// `/data/cica`-pinned container (the image sets `XDG_CONFIG_HOME=/data`).
+/// `cursor-home`/`claude-home` stay container-local (fresh per turn).
+pub struct DockerLauncher {
+    image: String,
+    config_file: PathBuf,
+    skills_dir: PathBuf,
+    state_store_dir: PathBuf,
+}
+
+impl DockerLauncher {
+    pub fn new(
+        image: String,
+        config_file: PathBuf,
+        skills_dir: PathBuf,
+        state_store_dir: PathBuf,
+    ) -> Self {
+        Self { image, config_file, skills_dir, state_store_dir }
+    }
+
+    /// The `docker` argv (without the leading `docker`). Pure, for testing.
+    fn run_args(&self, turn_id: &str) -> Vec<String> {
+        vec![
+            "run".into(),
+            "--rm".into(),
+            "-v".into(),
+            format!("{}:/data/cica/config.toml:ro", self.config_file.display()),
+            "-v".into(),
+            format!("{}:/data/cica/skills:ro", self.skills_dir.display()),
+            "-v".into(),
+            format!("{}:/data/cica/internal/state-store", self.state_store_dir.display()),
+            self.image.clone(),
+            "worker".into(),
+            "--turn".into(),
+            turn_id.into(),
+        ]
+    }
+}
+
+#[async_trait]
+impl Launcher for DockerLauncher {
+    async fn launch(&self, turn_id: &str) -> Result<()> {
+        let status = Command::new("docker")
+            .args(self.run_args(turn_id))
+            .status()
+            .await
+            .context("running `docker run` for cica worker")?;
+        if !status.success() {
+            anyhow::bail!("worker container exited with status {status}");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +326,24 @@ mod tests {
         };
         let result = provider.run_turn(job).await.unwrap();
         assert_eq!(result.backend_session_id, "sess");
+    }
+
+    #[test]
+    fn docker_launcher_builds_run_args() {
+        let l = DockerLauncher::new(
+            "cica-worker:latest".into(),
+            std::path::PathBuf::from("/host/config.toml"),
+            std::path::PathBuf::from("/host/skills"),
+            std::path::PathBuf::from("/host/state-store"),
+        );
+        let args = l.run_args("turn-123");
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"/host/config.toml:/data/cica/config.toml:ro".to_string()));
+        assert!(args.contains(&"/host/skills:/data/cica/skills:ro".to_string()));
+        assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
+        let tail = &args[args.len() - 4..];
+        assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
     }
 
     #[tokio::test]

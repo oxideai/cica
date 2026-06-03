@@ -11,6 +11,17 @@ use anyhow::Result;
 
 use crate::sandbox::state::{clear_dir, copy_dir_all, copy_path};
 
+/// Backend-specific capture/restore of a session's on-disk state.
+///
+/// `home` is the backend's HOME dir (claude_home or cursor_home). `capture`
+/// copies the files making up `session_id` into `staging` (returns false if the
+/// session isn't found); `restore` reinstates them under `home` so a resume run
+/// with `cwd` finds them.
+pub trait SessionArtifacts {
+    fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool>;
+    fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()>;
+}
+
 /// Slugify a working directory the way Claude Code names its project dir:
 /// every non-alphanumeric character becomes `-`.
 pub fn claude_project_slug(cwd: &Path) -> String {
@@ -113,6 +124,15 @@ impl ClaudeSessionArtifacts {
     }
 }
 
+impl SessionArtifacts for ClaudeSessionArtifacts {
+    fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool> {
+        ClaudeSessionArtifacts::capture(home, session_id, staging)
+    }
+    fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()> {
+        ClaudeSessionArtifacts::restore(home, cwd, session_id, staging)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +204,30 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
         assert!(!ClaudeSessionArtifacts::capture(home.path(), "no-such", staging.path()).unwrap());
+    }
+
+    #[test]
+    fn claude_via_trait_round_trips() {
+        let artifacts: &dyn SessionArtifacts = &ClaudeSessionArtifacts;
+        let id = "abc-123";
+        let cwd = Path::new("/work/cica");
+        let slug = claude_project_slug(cwd);
+
+        let home_a = tempfile::tempdir().unwrap();
+        write(
+            &home_a.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl")),
+            "line1\n",
+        );
+        let staging = tempfile::tempdir().unwrap();
+        assert!(artifacts.capture(home_a.path(), id, staging.path()).unwrap());
+
+        let home_b = tempfile::tempdir().unwrap();
+        artifacts.restore(home_b.path(), cwd, id, staging.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                home_b.path().join(".claude").join("projects").join(&slug).join(format!("{id}.jsonl"))
+            ).unwrap(),
+            "line1\n"
+        );
     }
 }

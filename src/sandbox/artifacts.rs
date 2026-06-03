@@ -146,6 +146,7 @@ const CURSOR_DB_FILES: [&str; 3] = ["store.db", "store.db-wal", "store.db-shm"];
 
 impl SessionArtifacts for CursorSessionArtifacts {
     fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool> {
+        clear_dir(staging)?;
         let chats = home.join(".cursor").join("chats");
         if !chats.is_dir() {
             return Ok(false);
@@ -320,6 +321,16 @@ mod tests {
         let staging = tempfile::tempdir().unwrap();
         let artifacts = CursorSessionArtifacts;
         assert!(!artifacts.capture(home.path(), "no-such", staging.path()).unwrap());
+    }
+
+    #[test]
+    fn cursor_restore_with_empty_staging_is_noop() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        CursorSessionArtifacts
+            .restore(home.path(), Path::new("/x"), "any", staging.path())
+            .unwrap();
+        assert!(!home.path().join(".cursor").exists());
     }
 
     #[test]

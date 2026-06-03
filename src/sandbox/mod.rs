@@ -22,7 +22,7 @@ use crate::config::{AiBackend, Config};
 /// by callers but not yet read by `LocalProcessProvider`; they're part of the
 /// turn contract for later phases (remote workers, per-job backend routing).
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnJob {
     /// Logical cica session key (e.g. "telegram:123").
     pub session_id: String,
@@ -41,7 +41,7 @@ pub struct TurnJob {
 }
 
 /// Result of executing a `TurnJob`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
     pub response: String,
     /// Backend-assigned session id for the resulting conversation.
@@ -93,5 +93,35 @@ mod tests {
     fn default_provider_is_constructible() {
         let cfg = Config::default();
         let _p = default_provider(&cfg);
+    }
+
+    #[test]
+    fn turn_job_and_result_round_trip_json() {
+        let job = TurnJob {
+            session_id: "telegram:1".into(),
+            channel: "telegram".into(),
+            user_id: "1".into(),
+            prompt: "hi".into(),
+            system_prompt: Some("ctx".into()),
+            resume_session: Some("sess-1".into()),
+            cwd: None,
+            skip_permissions: true,
+            backend: crate::config::AiBackend::Claude,
+            model: None,
+        };
+        let json = serde_json::to_string(&job).unwrap();
+        let back: TurnJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.session_id, "telegram:1");
+        assert_eq!(back.resume_session.as_deref(), Some("sess-1"));
+
+        let result = TurnResult {
+            response: "ok".into(),
+            backend_session_id: "sess-2".into(),
+            cost_usd: Some(0.1),
+            duration_ms: Some(5),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: TurnResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.backend_session_id, "sess-2");
     }
 }

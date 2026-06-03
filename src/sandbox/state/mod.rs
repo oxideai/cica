@@ -28,17 +28,23 @@ pub trait StateStore: Send + Sync {
     async fn push(&self, src: &Path, key: &str) -> Result<()>;
 }
 
+/// The filesystem path of the state store: `[deployment].state_path` if set,
+/// else `internal/state-store`. Shared so the `FilesystemStateStore` and the
+/// Docker host-mount always agree on the same directory.
+pub fn resolved_state_path(config: &Config) -> Result<PathBuf> {
+    match &config.deployment.state_path {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => Ok(crate::config::paths()?.internal_dir.join("state-store")),
+    }
+}
+
 /// Build the configured store, or `None` if deployment.store is unset.
 pub fn default_store(config: &Config) -> Result<Option<Arc<dyn StateStore>>> {
     match config.deployment.store {
         None => Ok(None),
-        Some(StoreKind::Filesystem) => {
-            let root = match &config.deployment.state_path {
-                Some(p) => PathBuf::from(p),
-                None => crate::config::paths()?.internal_dir.join("state-store"),
-            };
-            Ok(Some(Arc::new(FilesystemStateStore::new(root))))
-        }
+        Some(StoreKind::Filesystem) => Ok(Some(Arc::new(FilesystemStateStore::new(
+            resolved_state_path(config)?,
+        )))),
     }
 }
 

@@ -101,10 +101,7 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                 .docker_image
                 .clone()
                 .unwrap_or_else(|| "cica-worker:latest".to_string());
-            let state_store_dir = match &config.deployment.state_path {
-                Some(p) => std::path::PathBuf::from(p),
-                None => paths.internal_dir.join("state-store"),
-            };
+            let state_store_dir = state::resolved_state_path(config)?;
             let launcher = worker::DockerLauncher::new(
                 image,
                 paths.config_file,

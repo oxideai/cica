@@ -1,10 +1,16 @@
 //! Worker dispatch: run a turn in a one-shot `cica worker` child process,
 //! exchanging the job and result through the `StateStore` keyed by a turn id.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::sandbox::state::StateStore;
-use crate::sandbox::{TurnJob, TurnResult};
+use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
 
 /// Store key for a turn's job blob.
 fn job_key(turn_id: &str) -> String {
@@ -96,6 +102,45 @@ pub async fn run_worker_turn(
     Ok(())
 }
 
+/// Router-side provider: dispatches each turn to a `cica worker` child process.
+pub struct SubprocessWorkerProvider {
+    store: Arc<dyn StateStore>,
+    self_exe: PathBuf,
+}
+
+impl SubprocessWorkerProvider {
+    pub fn new(store: Arc<dyn StateStore>, self_exe: PathBuf) -> Self {
+        Self { store, self_exe }
+    }
+}
+
+#[async_trait]
+impl SandboxProvider for SubprocessWorkerProvider {
+    async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
+        let turn_id = Uuid::new_v4().to_string();
+
+        push_job(self.store.as_ref(), &turn_id, &job).await?;
+
+        let status = Command::new(&self.self_exe)
+            .arg("worker")
+            .arg("--turn")
+            .arg(&turn_id)
+            .status()
+            .await
+            .context("spawning cica worker")?;
+
+        if !status.success() {
+            cleanup(self.store.as_ref(), &turn_id).await;
+            anyhow::bail!("worker exited with status {status}");
+        }
+
+        let result = pull_result(self.store.as_ref(), &turn_id).await?;
+        cleanup(self.store.as_ref(), &turn_id).await;
+
+        result.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +192,30 @@ mod tests {
         push_result(&store, "t2", &result).await.unwrap();
         let back = pull_result(&store, "t2").await.unwrap().unwrap();
         assert_eq!(back.backend_session_id, "sess");
+    }
+
+    #[tokio::test]
+    async fn run_worker_turn_reads_job_and_writes_result() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        push_job(&store, "tX", &sample_job()).await.unwrap();
+
+        struct StubEngine;
+        #[async_trait::async_trait]
+        impl crate::sandbox::SandboxProvider for StubEngine {
+            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+                Ok(TurnResult {
+                    response: "from-worker".into(),
+                    backend_session_id: "sess-w".into(),
+                    cost_usd: None,
+                    duration_ms: None,
+                })
+            }
+        }
+
+        run_worker_turn(&store, &StubEngine, "tX").await.unwrap();
+        let result = pull_result(&store, "tX").await.unwrap().unwrap();
+        assert_eq!(result.response, "from-worker");
+        assert_eq!(result.backend_session_id, "sess-w");
     }
 }

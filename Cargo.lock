@@ -484,6 +484,7 @@ dependencies = [
  "sqlite-vec",
  "tar",
  "teloxide",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

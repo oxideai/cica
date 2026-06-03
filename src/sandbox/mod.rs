@@ -4,7 +4,10 @@
 //! local subprocess (today's behavior). Later phases add container-based
 //! providers behind the same `SandboxProvider` trait.
 
+pub mod artifacts;
+pub mod hydrating;
 mod local;
+pub mod state;
 
 pub use local::{LocalProcessProvider, query_result_from_turn};
 
@@ -55,9 +58,31 @@ pub trait SandboxProvider: Send + Sync {
 
 /// Build the provider selected by configuration.
 ///
-/// Phase 1 always returns the local provider; later phases branch on config.
-pub fn default_provider(_config: &Config) -> Box<dyn SandboxProvider> {
-    Box::new(LocalProcessProvider::new())
+/// Returns a `HydratingProvider` when a state store is configured, otherwise
+/// falls back to `LocalProcessProvider` (same behavior as Phase 1).
+pub fn default_provider(config: &Config) -> Box<dyn SandboxProvider> {
+    let local = LocalProcessProvider::new();
+    match state::default_store(config) {
+        Ok(Some(store)) => match crate::config::paths() {
+            Ok(paths) => Box::new(hydrating::HydratingProvider::new(
+                local,
+                store,
+                paths.claude_home,
+                paths.base,
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    "state store configured but paths unavailable ({e}); running without hydration"
+                );
+                Box::new(LocalProcessProvider::new())
+            }
+        },
+        Ok(None) => Box::new(local),
+        Err(e) => {
+            tracing::warn!("failed to build state store ({e}); running without hydration");
+            Box::new(local)
+        }
+    }
 }
 
 #[cfg(test)]

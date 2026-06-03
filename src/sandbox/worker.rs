@@ -191,7 +191,12 @@ impl DockerLauncher {
         skills_dir: PathBuf,
         state_store_dir: PathBuf,
     ) -> Self {
-        Self { image, config_file, skills_dir, state_store_dir }
+        Self {
+            image,
+            config_file,
+            skills_dir,
+            state_store_dir,
+        }
     }
 
     /// The `docker` argv (without the leading `docker`). Pure, for testing.
@@ -204,7 +209,10 @@ impl DockerLauncher {
             "-v".into(),
             format!("{}:/data/cica/skills:ro", self.skills_dir.display()),
             "-v".into(),
-            format!("{}:/data/cica/internal/state-store", self.state_store_dir.display()),
+            format!(
+                "{}:/data/cica/internal/state-store",
+                self.state_store_dir.display()
+            ),
             self.image.clone(),
             "worker".into(),
             "--turn".into(),
@@ -310,7 +318,9 @@ mod tests {
 
         let provider = LaunchedWorkerProvider::new(
             store.clone(),
-            Box::new(FakeLauncher { store: store.clone() }),
+            Box::new(FakeLauncher {
+                store: store.clone(),
+            }),
         );
         let job = TurnJob {
             session_id: "telegram:1".into(),

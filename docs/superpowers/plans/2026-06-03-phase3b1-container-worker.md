@@ -584,3 +584,16 @@ git commit -m "chore(sandbox): fmt + clippy for docker launcher; document manual
 ## Next (after this merges)
 
 Phase 3b-2: `FargateLauncher` + feature-gated `S3StateStore` + secrets-to-worker + network result-return (RunTask + DescribeTasks poll) + ECR image publish + the `sprout` CDK + `--all-features` CI. Then 3b-3 (Cloud Run + GCS), and the separate Skills phase (git-backed `ai-skills` + draft persistence + publish-PR).
+
+## Manual validation (local, needs Docker + a configured cica with the Cursor backend)
+
+1. `docker build -t cica-worker:latest .` — verified building on Ubuntu 24.04 (glibc 2.39, required by ort-sys/ONNX). `docker run --rm cica-worker:latest --help` lists the `worker` subcommand.
+2. In `config.toml` (leave `state_path` unset): `[deployment]\nprovider = "docker"\nstore = "filesystem"`.
+3. Send a message. Confirm a `cica-worker` container runs (`docker ps` during the turn), the reply arrives, and `internal/state-store/turns/<id>/` round-trips, with `session/<id>/...` written.
+4. **Fresh-container isolation (the headline):** send a follow-up in the same conversation. Because each turn is a brand-new container with an empty `cursor-home`, a correct resume can ONLY come from the store-restored session db. Confirm it remembers. (This is the real isolation proof the same-box subprocess run couldn't give.)
+5. Confirm a memory written in step 3 persists.
+6. Negative: `provider = "docker"` with no `store` → cica logs the config error and runs in-process (doesn't crash).
+
+### Image maintenance notes (follow-ups, not blockers)
+- The `CURSOR_CLI_VERSION` / `CLAUDE_CODE_VERSION` build ARGs duplicate the version constants in `src/setup.rs` — keep them in sync when those bump (or have the build read them from the source).
+- The cursor-agent download is hardcoded to `linux/x64`; parameterize the arch for arm64 hosts/targets (multi-arch).

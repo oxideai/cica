@@ -467,6 +467,9 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.deployment.provider, Some(ProviderKind::Docker));
-        assert_eq!(cfg.deployment.docker_image.as_deref(), Some("cica-worker:dev"));
+        assert_eq!(
+            cfg.deployment.docker_image.as_deref(),
+            Some("cica-worker:dev")
+        );
     }
 }

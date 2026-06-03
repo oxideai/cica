@@ -91,8 +91,10 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
 }
 
 /// Infallible wrapper used by call sites that cannot recover. On a
-/// configuration error it logs and falls back to the in-process provider,
-/// so a misconfigured store never silently routes through a broken worker.
+/// configuration error it logs and falls back to the in-process provider so
+/// the router still starts (per the spec's "router-still-starts" choice).
+/// Note the trade-off: a misconfigured `provider = subprocess` (e.g. missing
+/// store) silently runs in-process instead of dispatching to a worker.
 pub fn default_provider(config: &Config) -> Box<dyn SandboxProvider> {
     match try_default_provider(config) {
         Ok(p) => p,

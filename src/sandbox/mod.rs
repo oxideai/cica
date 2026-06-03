@@ -86,8 +86,9 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                 anyhow::anyhow!("`provider = subprocess` requires [deployment].store to be set")
             })?;
             let self_exe = std::env::current_exe()?;
-            Ok(Box::new(worker::SubprocessWorkerProvider::new(
-                store, self_exe,
+            Ok(Box::new(worker::LaunchedWorkerProvider::new(
+                store,
+                Box::new(worker::SubprocessLauncher::new(self_exe)),
             )))
         }
     }

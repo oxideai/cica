@@ -105,42 +105,70 @@ pub async fn run_worker_turn(
     Ok(())
 }
 
-/// Router-side provider: dispatches each turn to a `cica worker` child process.
-pub struct SubprocessWorkerProvider {
-    store: Arc<dyn StateStore>,
-    self_exe: PathBuf,
+/// Runs the worker for a `turn_id` to completion. `Ok` = clean exit 0;
+/// `Err` = launch failure or non-zero exit. Job/result travel via the store.
+#[async_trait]
+pub trait Launcher: Send + Sync {
+    async fn launch(&self, turn_id: &str) -> Result<()>;
 }
 
-impl SubprocessWorkerProvider {
-    pub fn new(store: Arc<dyn StateStore>, self_exe: PathBuf) -> Self {
-        Self { store, self_exe }
+/// Router-side provider: store-mediated dispatch, delegating the run-to-exit
+/// step to a `Launcher` (subprocess, docker, …).
+pub struct LaunchedWorkerProvider {
+    store: Arc<dyn StateStore>,
+    launcher: Box<dyn Launcher>,
+}
+
+impl LaunchedWorkerProvider {
+    pub fn new(store: Arc<dyn StateStore>, launcher: Box<dyn Launcher>) -> Self {
+        Self { store, launcher }
     }
 }
 
 #[async_trait]
-impl SandboxProvider for SubprocessWorkerProvider {
+impl SandboxProvider for LaunchedWorkerProvider {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
         let turn_id = Uuid::new_v4().to_string();
 
         push_job(self.store.as_ref(), &turn_id, &job).await?;
 
-        let status = Command::new(&self.self_exe)
-            .arg("worker")
-            .arg("--turn")
-            .arg(&turn_id)
-            .status()
-            .await
-            .context("spawning cica worker")?;
-
-        if !status.success() {
+        if let Err(e) = self.launcher.launch(&turn_id).await {
             cleanup(self.store.as_ref(), &turn_id).await;
-            anyhow::bail!("worker exited with status {status}");
+            return Err(e);
         }
 
         let result = pull_result(self.store.as_ref(), &turn_id).await;
         cleanup(self.store.as_ref(), &turn_id).await;
 
         result?.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
+    }
+}
+
+/// Launcher that spawns `cica worker --turn <id>` as a local child process.
+pub struct SubprocessLauncher {
+    self_exe: PathBuf,
+}
+
+impl SubprocessLauncher {
+    pub fn new(self_exe: PathBuf) -> Self {
+        Self { self_exe }
+    }
+}
+
+#[async_trait]
+impl Launcher for SubprocessLauncher {
+    async fn launch(&self, turn_id: &str) -> Result<()> {
+        let status = Command::new(&self.self_exe)
+            .arg("worker")
+            .arg("--turn")
+            .arg(turn_id)
+            .status()
+            .await
+            .context("spawning cica worker")?;
+        if !status.success() {
+            anyhow::bail!("worker exited with status {status}");
+        }
+        Ok(())
     }
 }
 
@@ -195,6 +223,55 @@ mod tests {
         push_result(&store, "t2", &result).await.unwrap();
         let back = pull_result(&store, "t2").await.unwrap().unwrap();
         assert_eq!(back.backend_session_id, "sess");
+    }
+
+    #[tokio::test]
+    async fn launched_provider_dispatches_via_launcher() {
+        use crate::config::AiBackend;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
+
+        struct FakeLauncher {
+            store: std::sync::Arc<FilesystemStateStore>,
+        }
+        struct DispatchStubEngine;
+        #[async_trait]
+        impl SandboxProvider for DispatchStubEngine {
+            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+                Ok(TurnResult {
+                    response: "ok".into(),
+                    backend_session_id: "sess".into(),
+                    cost_usd: None,
+                    duration_ms: None,
+                })
+            }
+        }
+        #[async_trait]
+        impl Launcher for FakeLauncher {
+            async fn launch(&self, turn_id: &str) -> Result<()> {
+                run_worker_turn(self.store.as_ref(), &DispatchStubEngine, turn_id).await
+            }
+        }
+
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(FakeLauncher { store: store.clone() }),
+        );
+        let job = TurnJob {
+            session_id: "telegram:1".into(),
+            channel: "telegram".into(),
+            user_id: "1".into(),
+            prompt: "hi".into(),
+            system_prompt: None,
+            resume_session: None,
+            cwd: None,
+            skip_permissions: true,
+            backend: AiBackend::Claude,
+            model: None,
+        };
+        let result = provider.run_turn(job).await.unwrap();
+        assert_eq!(result.backend_session_id, "sess");
     }
 
     #[tokio::test]

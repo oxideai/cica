@@ -4,10 +4,198 @@
 //! `<prefix>/<key>/<relative-file-path>`. The AWS client is built lazily on
 //! first use so `default_store` can stay synchronous.
 
+#![allow(dead_code)] // wired up in the next task (default_store S3 arm)
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use tokio::sync::OnceCell;
+
+use crate::config::S3Config;
+use crate::sandbox::state::{StateStore, clear_dir};
+
+/// `StateStore` backed by an S3 bucket. The client is built lazily on first use
+/// so `default_store` can stay synchronous.
+pub struct S3StateStore {
+    config: S3Config,
+    prefix: String, // normalized: no leading/trailing slashes
+    client: OnceCell<aws_sdk_s3::Client>,
+}
+
+impl S3StateStore {
+    pub fn new(config: S3Config) -> Self {
+        let prefix = config
+            .prefix
+            .clone()
+            .unwrap_or_default()
+            .trim_matches('/')
+            .to_string();
+        Self {
+            config,
+            prefix,
+            client: OnceCell::new(),
+        }
+    }
+
+    async fn client(&self) -> Result<&aws_sdk_s3::Client> {
+        self.client
+            .get_or_try_init(|| async { build_client(&self.config).await })
+            .await
+    }
+}
+
+async fn build_client(cfg: &S3Config) -> Result<aws_sdk_s3::Client> {
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Some(region) = &cfg.region {
+        loader = loader.region(aws_config::Region::new(region.clone()));
+    }
+    if let Some(endpoint) = &cfg.endpoint {
+        loader = loader.endpoint_url(endpoint);
+    }
+    let shared = loader.load().await;
+    let mut builder = aws_sdk_s3::config::Builder::from(&shared);
+    // Path-style addressing for LocalStack/MinIO (virtual-host style needs DNS).
+    if cfg.endpoint.is_some() {
+        builder = builder.force_path_style(true);
+    }
+    Ok(aws_sdk_s3::Client::from_conf(builder.build()))
+}
+
+#[async_trait]
+impl StateStore for S3StateStore {
+    async fn pull(&self, key: &str, dest: &Path) -> Result<bool> {
+        let client = self.client().await?;
+        let bucket = &self.config.bucket;
+        let prefix = dir_prefix(&self.prefix, key);
+
+        // List all objects under the prefix (paginated).
+        let mut keys: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = client.list_objects_v2().bucket(bucket).prefix(&prefix);
+            if let Some(t) = &token {
+                req = req.continuation_token(t);
+            }
+            let resp = req.send().await.context("s3 list_objects_v2")?;
+            for obj in resp.contents() {
+                if let Some(k) = obj.key() {
+                    keys.push(k.to_string());
+                }
+            }
+            if resp.is_truncated().unwrap_or(false) {
+                token = resp.next_continuation_token().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        if keys.is_empty() {
+            return Ok(false); // absent — matches FilesystemStateStore
+        }
+
+        clear_dir(dest)?;
+        for obj_key in keys {
+            let rel = obj_key.strip_prefix(&prefix).unwrap_or(&obj_key);
+            if rel.is_empty() {
+                continue;
+            }
+            let out = dest.join(rel);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let resp = client
+                .get_object()
+                .bucket(bucket)
+                .key(&obj_key)
+                .send()
+                .await
+                .with_context(|| format!("s3 get_object {obj_key}"))?;
+            let bytes = resp
+                .body
+                .collect()
+                .await
+                .context("s3 body collect")?
+                .into_bytes();
+            std::fs::write(&out, bytes)?;
+        }
+        Ok(true)
+    }
+
+    async fn push(&self, src: &Path, key: &str) -> Result<()> {
+        let client = self.client().await?;
+        let bucket = &self.config.bucket;
+        let prefix = dir_prefix(&self.prefix, key);
+
+        // Replace semantics: delete everything currently under the prefix.
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = client.list_objects_v2().bucket(bucket).prefix(&prefix);
+            if let Some(t) = &token {
+                req = req.continuation_token(t);
+            }
+            let resp = req.send().await.context("s3 list (pre-delete)")?;
+            for obj in resp.contents() {
+                if let Some(k) = obj.key() {
+                    client
+                        .delete_object()
+                        .bucket(bucket)
+                        .key(k)
+                        .send()
+                        .await
+                        .with_context(|| format!("s3 delete_object {k}"))?;
+                }
+            }
+            if resp.is_truncated().unwrap_or(false) {
+                token = resp.next_continuation_token().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        // Upload every file under `src`, keyed by its path relative to `src`.
+        for entry in walk_files(src)? {
+            let rel = entry
+                .strip_prefix(src)
+                .expect("walk_files yields paths under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let body = aws_sdk_s3::primitives::ByteStream::from_path(&entry)
+                .await
+                .with_context(|| format!("reading {}", entry.display()))?;
+            client
+                .put_object()
+                .bucket(bucket)
+                .key(object_key(&self.prefix, key, &rel))
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("s3 put_object {rel}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Recursively collect all file paths under `dir` (empty if `dir` is absent).
+fn walk_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            out.extend(walk_files(&path)?);
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
 /// Join non-empty path segments with `/` into an S3 object key.
 /// `object_key("cica", "session/abc", "store.db") == "cica/session/abc/store.db"`
 /// `object_key("", "session/abc", "x") == "session/abc/x"`
-#[allow(dead_code)] // used by S3StateStore (next task)
 fn object_key(prefix: &str, key: &str, rel: &str) -> String {
     [prefix, key, rel]
         .iter()
@@ -19,7 +207,6 @@ fn object_key(prefix: &str, key: &str, rel: &str) -> String {
 
 /// The list prefix (with trailing slash) for all objects under `key`.
 /// `dir_prefix("cica", "session/abc") == "cica/session/abc/"`
-#[allow(dead_code)] // used by S3StateStore (next task)
 fn dir_prefix(prefix: &str, key: &str) -> String {
     let base = [prefix, key]
         .iter()

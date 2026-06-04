@@ -4,6 +4,8 @@
 //! feature-gated S3/GCS backends behind the same `StateStore` trait.
 
 pub mod filesystem;
+#[cfg(feature = "s3")]
+pub mod s3;
 
 pub use filesystem::FilesystemStateStore;
 

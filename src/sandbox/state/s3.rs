@@ -6,10 +6,12 @@
 
 #![allow(dead_code)] // wired up in the next task (default_store S3 arm)
 
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use tokio::sync::OnceCell;
 
 use crate::config::S3Config;
@@ -84,7 +86,10 @@ impl StateStore for S3StateStore {
                 }
             }
             if resp.is_truncated().unwrap_or(false) {
-                token = resp.next_continuation_token().map(|s| s.to_string());
+                match resp.next_continuation_token() {
+                    Some(t) => token = Some(t.to_string()),
+                    None => anyhow::bail!("s3 list truncated but returned no continuation token"),
+                }
             } else {
                 break;
             }
@@ -96,13 +101,15 @@ impl StateStore for S3StateStore {
 
         clear_dir(dest)?;
         for obj_key in keys {
-            let rel = obj_key.strip_prefix(&prefix).unwrap_or(&obj_key);
+            let rel = obj_key
+                .strip_prefix(&prefix)
+                .with_context(|| format!("s3 returned key outside prefix: {obj_key}"))?;
             if rel.is_empty() {
                 continue;
             }
             let out = dest.join(rel);
             if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)?;
             }
             let resp = client
                 .get_object()
@@ -117,7 +124,7 @@ impl StateStore for S3StateStore {
                 .await
                 .context("s3 body collect")?
                 .into_bytes();
-            std::fs::write(&out, bytes)?;
+            fs::write(&out, bytes)?;
         }
         Ok(true)
     }
@@ -135,19 +142,31 @@ impl StateStore for S3StateStore {
                 req = req.continuation_token(t);
             }
             let resp = req.send().await.context("s3 list (pre-delete)")?;
-            for obj in resp.contents() {
-                if let Some(k) = obj.key() {
-                    client
-                        .delete_object()
-                        .bucket(bucket)
-                        .key(k)
-                        .send()
-                        .await
-                        .with_context(|| format!("s3 delete_object {k}"))?;
-                }
+            let ids: Vec<ObjectIdentifier> = resp
+                .contents()
+                .iter()
+                .filter_map(|obj| obj.key())
+                .map(|k| ObjectIdentifier::builder().key(k).build())
+                .collect::<Result<Vec<_>, _>>()
+                .context("building delete identifiers")?;
+            if !ids.is_empty() {
+                let delete = Delete::builder()
+                    .set_objects(Some(ids))
+                    .build()
+                    .context("building delete request")?;
+                client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .context("s3 delete_objects")?;
             }
             if resp.is_truncated().unwrap_or(false) {
-                token = resp.next_continuation_token().map(|s| s.to_string());
+                match resp.next_continuation_token() {
+                    Some(t) => token = Some(t.to_string()),
+                    None => anyhow::bail!("s3 list truncated but returned no continuation token"),
+                }
             } else {
                 break;
             }
@@ -182,7 +201,7 @@ fn walk_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     if !dir.is_dir() {
         return Ok(out);
     }
-    for entry in std::fs::read_dir(dir)? {
+    for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
             out.extend(walk_files(&path)?);

@@ -37,6 +37,14 @@ A worker is **any runtime that can:**
 
 The worker pulls `turns/<id>/job`, runs the turn (hydrating session+memories from the store into the fresh homes), writes `turns/<id>/result`, and exits 0 (non-zero on failure, no result written).
 
+### Cloud (Fargate) worker contract delta (3b-2b)
+
+A Fargate task has no bind mounts, so on top of the base contract:
+- **Command override:** the launcher overrides the named container's command to `worker --turn <id>` per turn; the task-def's default command is irrelevant. The task-def must name the worker container per `[deployment.fargate].container_name` (default `cica-worker`).
+- **Non-secret config:** sprout supplies `/data/cica/config.toml` (baked into a derived image or written by an entrypoint) with `backend`, `[deployment] store = "s3"`, and `[deployment.s3]`.
+- **Secrets:** injected as env from Secrets Manager — `CICA_CURSOR_API_KEY` and/or `CICA_CLAUDE_API_KEY`. cica overlays them onto the loaded config in `Config::load`. Never in the image/S3/file.
+- **AWS credentials:** the task IAM role (S3 state-bucket access). The router's role needs `ecs:RunTask`, `ecs:DescribeTasks`, `ecs:StopTask`, and `iam:PassRole` for the task/execution roles.
+
 ## Components
 
 ### `Launcher` trait — the runtime seam

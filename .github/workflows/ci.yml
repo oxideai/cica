@@ -131,5 +131,8 @@ jobs:
       - name: Clippy (s3 feature)
         run: cargo clippy --features s3 --all-targets -- -D warnings
 
+      - name: Clippy (fargate feature)
+        run: cargo clippy --features fargate --all-targets -- -D warnings
+
       - name: S3 integration test (LocalStack)
         run: CICA_S3_IT=1 cargo test --features s3 it_tests -- --nocapture

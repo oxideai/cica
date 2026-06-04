@@ -115,6 +115,28 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                 Box::new(launcher),
             )))
         }
+        ProviderKind::Fargate => {
+            let store = store.ok_or_else(|| {
+                anyhow::anyhow!("`provider = fargate` requires [deployment].store to be set")
+            })?;
+            #[cfg(feature = "fargate")]
+            {
+                let fc = config.deployment.fargate.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`provider = fargate` requires a [deployment.fargate] section")
+                })?;
+                Ok(Box::new(worker::LaunchedWorkerProvider::new(
+                    store,
+                    Box::new(fargate::FargateLauncher::new(fc)),
+                )))
+            }
+            #[cfg(not(feature = "fargate"))]
+            {
+                let _ = store;
+                anyhow::bail!(
+                    "`provider = fargate` requires the binary to be built with `--features fargate`"
+                )
+            }
+        }
     }
 }
 
@@ -177,6 +199,43 @@ mod tests {
         cfg.deployment.provider = Some(ProviderKind::Docker);
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-docker-test".into());
+        assert!(try_default_provider(&cfg).is_ok());
+    }
+
+    #[cfg(not(feature = "fargate"))]
+    #[test]
+    fn fargate_provider_requires_feature() {
+        use crate::config::{Config, ProviderKind, StoreKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Fargate);
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-fargate-test".into());
+        // Feature off → must error even though a store is present.
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[test]
+    fn fargate_provider_requires_a_store() {
+        use crate::config::{Config, ProviderKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Fargate);
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[cfg(feature = "fargate")]
+    #[test]
+    fn fargate_provider_built_when_feature_and_store_and_section() {
+        use crate::config::{Config, FargateConfig, ProviderKind, StoreKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::Fargate);
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-fargate-test2".into());
+        cfg.deployment.fargate = Some(FargateConfig {
+            cluster: "cica".into(),
+            task_definition: "cica-worker".into(),
+            ..Default::default()
+        });
+        // Lazy ECS client: building the provider does not connect.
         assert!(try_default_provider(&cfg).is_ok());
     }
 

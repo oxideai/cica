@@ -16,7 +16,6 @@ use crate::sandbox::worker::Launcher;
 
 /// A request to start one worker task. Pure data, built from config + turn id.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in Task 5
 pub(crate) struct RunTaskRequest {
     pub cluster: String,
     pub task_definition: String,
@@ -29,7 +28,6 @@ pub(crate) struct RunTaskRequest {
 
 /// A task's observed status (subset DescribeTasks gives us).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired in Task 5
 pub(crate) struct TaskStatus {
     pub last_status: String,
     pub exit_code: Option<i32>,
@@ -38,7 +36,6 @@ pub(crate) struct TaskStatus {
 
 /// What `FargateLauncher` needs from ECS — the seam keeping aws-sdk-ecs at the edge.
 #[async_trait]
-#[allow(dead_code)] // wired in Task 5
 pub(crate) trait EcsClient: Send + Sync {
     /// Start a task; returns its ARN. Errors if RunTask reports failures.
     async fn run_task(&self, req: &RunTaskRequest) -> Result<String>;
@@ -55,14 +52,12 @@ pub(crate) trait EcsClient: Send + Sync {
 }
 
 /// Real `EcsClient` over aws-sdk-ecs, with a lazily-built client.
-#[allow(dead_code)] // wired in Task 5
 pub(crate) struct AwsEcsClient {
     region: Option<String>,
     client: OnceCell<aws_sdk_ecs::Client>,
 }
 
 impl AwsEcsClient {
-    #[allow(dead_code)] // wired in Task 5
     pub(crate) fn new(region: Option<String>) -> Self {
         Self {
             region,
@@ -189,7 +184,6 @@ impl EcsClient for AwsEcsClient {
 }
 
 /// Launches a worker turn as a one-shot Fargate task.
-#[allow(dead_code)] // wired in Task 5
 pub struct FargateLauncher {
     ecs: Box<dyn EcsClient>,
     config: FargateConfig,
@@ -197,20 +191,17 @@ pub struct FargateLauncher {
 
 impl FargateLauncher {
     /// Build the AWS-backed launcher (lazy ECS client).
-    #[allow(dead_code)] // wired in Task 5
     pub fn new(config: FargateConfig) -> Self {
         let region = config.region.clone();
         Self::with_client(Box::new(AwsEcsClient::new(region)), config)
     }
 
     /// Construct with an explicit `EcsClient` (used by `new` and by tests).
-    #[allow(dead_code)] // wired in Task 5
     pub(crate) fn with_client(ecs: Box<dyn EcsClient>, config: FargateConfig) -> Self {
         Self { ecs, config }
     }
 
     /// The RunTask request for `turn_id`. Pure, for testing.
-    #[allow(dead_code)] // wired in Task 5
     pub(crate) fn run_task_request(&self, turn_id: &str) -> RunTaskRequest {
         RunTaskRequest {
             cluster: self.config.cluster.clone(),

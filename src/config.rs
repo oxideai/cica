@@ -138,6 +138,7 @@ pub enum ProviderKind {
     Local,
     Subprocess,
     Docker,
+    Fargate,
 }
 
 /// S3 state-store settings (used when `store = "s3"`). Credentials come from the
@@ -604,6 +605,16 @@ mod tests {
         cfg.cursor.api_key = Some("from-file".into());
         cfg.overlay_secrets_from(|_| None);
         assert_eq!(cfg.cursor.api_key.as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn provider_parses_fargate() {
+        let toml = r#"
+            [deployment]
+            provider = "fargate"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.provider, Some(ProviderKind::Fargate));
     }
 
     #[test]

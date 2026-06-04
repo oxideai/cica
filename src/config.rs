@@ -370,10 +370,28 @@ impl Config {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Could not read config file: {:?}", path))?;
 
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("Could not parse config file: {:?}", path))?;
-
+        config.apply_env_overlay();
         Ok(config)
+    }
+
+    /// Overlay credential secrets from the process environment onto the loaded
+    /// config. Lets cloud workers receive secrets via env (Secrets Manager →
+    /// task env) instead of baking them into config.toml or the state store.
+    pub(crate) fn apply_env_overlay(&mut self) {
+        self.overlay_secrets_from(|k| std::env::var(k).ok());
+    }
+
+    /// Env overlay core, parameterized by a lookup so it is testable without
+    /// touching the global process environment.
+    fn overlay_secrets_from(&mut self, get: impl Fn(&str) -> Option<String>) {
+        if let Some(v) = get("CICA_CURSOR_API_KEY") {
+            self.cursor.api_key = Some(v);
+        }
+        if let Some(v) = get("CICA_CLAUDE_API_KEY") {
+            self.claude.api_key = Some(v);
+        }
     }
 
     /// Save config to the standard location
@@ -520,5 +538,27 @@ mod tests {
         assert_eq!(s3.region.as_deref(), Some("eu-west-1"));
         assert_eq!(s3.prefix.as_deref(), Some("cica"));
         assert_eq!(s3.endpoint.as_deref(), Some("http://localhost:4566"));
+    }
+
+    #[test]
+    fn env_overlay_sets_cursor_and_claude_keys() {
+        let mut cfg = Config::default();
+        assert!(cfg.cursor.api_key.is_none());
+        let env = |k: &str| match k {
+            "CICA_CURSOR_API_KEY" => Some("cur-secret".to_string()),
+            "CICA_CLAUDE_API_KEY" => Some("claude-secret".to_string()),
+            _ => None,
+        };
+        cfg.overlay_secrets_from(env);
+        assert_eq!(cfg.cursor.api_key.as_deref(), Some("cur-secret"));
+        assert_eq!(cfg.claude.api_key.as_deref(), Some("claude-secret"));
+    }
+
+    #[test]
+    fn env_overlay_leaves_config_value_when_env_absent() {
+        let mut cfg = Config::default();
+        cfg.cursor.api_key = Some("from-file".into());
+        cfg.overlay_secrets_from(|_| None);
+        assert_eq!(cfg.cursor.api_key.as_deref(), Some("from-file"));
     }
 }

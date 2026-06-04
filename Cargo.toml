@@ -81,9 +81,13 @@ mime_guess = "2"
 aws-config = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 
+# Fargate launcher (feature "fargate")
+aws-sdk-ecs = { version = "1", optional = true }
+
 [features]
 default = []
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+fargate = ["s3", "dep:aws-sdk-ecs"]
 
 [dev-dependencies]
 tempfile = "3"

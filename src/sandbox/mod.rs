@@ -5,6 +5,8 @@
 //! providers behind the same `SandboxProvider` trait.
 
 pub mod artifacts;
+#[cfg(feature = "fargate")]
+mod fargate;
 pub mod hydrating;
 mod local;
 pub mod state;

@@ -105,6 +105,12 @@ impl StateStore for S3StateStore {
             if rel.is_empty() {
                 continue;
             }
+            // Bucket contents are only ever written by `push` (keys derived from
+            // real filesystem paths), but guard the join anyway so a stray `..`
+            // object key can't escape `dest` — parity with the filesystem store.
+            if rel.split('/').any(|seg| seg == "..") {
+                anyhow::bail!("s3 object key escapes dest: {obj_key}");
+            }
             let out = dest.join(rel);
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent)?;
@@ -152,13 +158,20 @@ impl StateStore for S3StateStore {
                     .set_objects(Some(ids))
                     .build()
                     .context("building delete request")?;
-                client
+                let deleted = client
                     .delete_objects()
                     .bucket(bucket)
                     .delete(delete)
                     .send()
                     .await
                     .context("s3 delete_objects")?;
+                // delete_objects returns 200 even on per-key failures; they
+                // surface in `errors()`, so an unchecked call could leave stale
+                // objects under the key and silently break replace semantics.
+                let errs = deleted.errors();
+                if !errs.is_empty() {
+                    anyhow::bail!("s3 delete_objects partial failure: {} error(s)", errs.len());
+                }
             }
             if resp.is_truncated().unwrap_or(false) {
                 match resp.next_continuation_token() {

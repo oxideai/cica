@@ -128,6 +128,7 @@ pub enum AiBackend {
 #[serde(rename_all = "lowercase")]
 pub enum StoreKind {
     Filesystem,
+    S3,
 }
 
 /// Where a turn executes (none/local = in-process; subprocess = one-shot worker).
@@ -137,6 +138,23 @@ pub enum ProviderKind {
     Local,
     Subprocess,
     Docker,
+}
+
+/// S3 state-store settings (used when `store = "s3"`). Credentials come from the
+/// standard AWS provider chain (env / instance role), never config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct S3Config {
+    /// Bucket name (required).
+    pub bucket: String,
+    /// AWS region; falls back to the default chain when unset.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Optional key namespace within the bucket.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Optional endpoint override (LocalStack / MinIO / testing).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// Distributed-deployment configuration. All optional; absent = single-box.
@@ -154,6 +172,9 @@ pub struct DeploymentConfig {
     /// Worker image for `provider = "docker"` (default `cica-worker:latest`).
     #[serde(default)]
     pub docker_image: Option<String>,
+    /// S3 store settings (used when `store = "s3"`).
+    #[serde(default)]
+    pub s3: Option<S3Config>,
 }
 
 /// Root configuration
@@ -471,5 +492,33 @@ mod tests {
             cfg.deployment.docker_image.as_deref(),
             Some("cica-worker:dev")
         );
+    }
+
+    #[test]
+    fn store_parses_s3() {
+        let toml = r#"
+            [deployment]
+            store = "s3"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.store, Some(StoreKind::S3));
+    }
+
+    #[test]
+    fn deployment_s3_section_parses() {
+        let toml = r#"
+            [deployment]
+            [deployment.s3]
+            bucket = "cica-state"
+            region = "eu-west-1"
+            prefix = "cica"
+            endpoint = "http://localhost:4566"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let s3 = cfg.deployment.s3.unwrap();
+        assert_eq!(s3.bucket, "cica-state");
+        assert_eq!(s3.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(s3.prefix.as_deref(), Some("cica"));
+        assert_eq!(s3.endpoint.as_deref(), Some("http://localhost:4566"));
     }
 }

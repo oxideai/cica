@@ -91,3 +91,45 @@ jobs:
 
       - name: Docker integration test (fake backend)
         run: CICA_DOCKER_IT=1 cargo test sandbox::worker::tests::docker_flow_round_trips_with_fake_backend -- --nocapture
+
+  s3-store:
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        # Pin to the community 3.x line: 2026.x images gate even S3 behind a
+        # license token (container exits 55 without LOCALSTACK_AUTH_TOKEN).
+        image: localstack/localstack:3
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      CICA_S3_ENDPOINT: http://localhost:4566
+      CICA_S3_BUCKET: cica-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Wait for LocalStack and create bucket
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4566/_localstack/health >/dev/null; then
+              break
+            fi
+            echo "waiting for localstack ($i)..."
+            sleep 2
+          done
+          aws --endpoint-url http://localhost:4566 s3 mb s3://cica-test
+
+      - name: Clippy (s3 feature)
+        run: cargo clippy --features s3 --all-targets -- -D warnings
+
+      - name: S3 integration test (LocalStack)
+        run: CICA_S3_IT=1 cargo test --features s3 it_tests -- --nocapture

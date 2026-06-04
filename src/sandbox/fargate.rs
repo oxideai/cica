@@ -42,8 +42,14 @@ pub(crate) struct TaskStatus {
 pub(crate) trait EcsClient: Send + Sync {
     /// Start a task; returns its ARN. Errors if RunTask reports failures.
     async fn run_task(&self, req: &RunTaskRequest) -> Result<String>;
-    /// Current status of a task.
-    async fn describe_task(&self, cluster: &str, task_arn: &str) -> Result<TaskStatus>;
+    /// Current status of a task. `container_name` selects the worker container
+    /// so a sidecar can't mask its exit code.
+    async fn describe_task(
+        &self,
+        cluster: &str,
+        task_arn: &str,
+        container_name: &str,
+    ) -> Result<TaskStatus>;
     /// Best-effort stop (on timeout). The caller logs errors; not fatal.
     async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()>;
 }
@@ -137,7 +143,12 @@ impl EcsClient for AwsEcsClient {
             .context("ecs run_task returned no task arn")
     }
 
-    async fn describe_task(&self, cluster: &str, task_arn: &str) -> Result<TaskStatus> {
+    async fn describe_task(
+        &self,
+        cluster: &str,
+        task_arn: &str,
+        container_name: &str,
+    ) -> Result<TaskStatus> {
         let resp = self
             .client()
             .await?
@@ -151,7 +162,11 @@ impl EcsClient for AwsEcsClient {
             .tasks()
             .first()
             .context("ecs describe_tasks returned no task")?;
-        let exit_code = task.containers().first().and_then(|c| c.exit_code());
+        let exit_code = task
+            .containers()
+            .iter()
+            .find(|c| c.name() == Some(container_name))
+            .and_then(|c| c.exit_code());
         Ok(TaskStatus {
             last_status: task.last_status().unwrap_or("UNKNOWN").to_string(),
             exit_code,
@@ -216,7 +231,10 @@ impl Launcher for FargateLauncher {
         let deadline = Instant::now() + Duration::from_secs(self.config.timeout_secs);
         let interval = Duration::from_secs(self.config.poll_interval_secs);
         loop {
-            let st = self.ecs.describe_task(&self.config.cluster, &arn).await?;
+            let st = self
+                .ecs
+                .describe_task(&self.config.cluster, &arn, &self.config.container_name)
+                .await?;
             if st.last_status == "STOPPED" {
                 return match st.exit_code {
                     Some(0) => Ok(()),
@@ -275,6 +293,14 @@ mod tests {
                 stop_called: AtomicBool::new(false),
             }
         }
+
+        fn failing_run() -> Self {
+            Self {
+                statuses: Mutex::new(VecDeque::new()),
+                run_ok: false,
+                stop_called: AtomicBool::new(false),
+            }
+        }
     }
     #[async_trait]
     impl EcsClient for FakeEcs {
@@ -285,7 +311,7 @@ mod tests {
                 bail!("run_task failed")
             }
         }
-        async fn describe_task(&self, _c: &str, _a: &str) -> Result<TaskStatus> {
+        async fn describe_task(&self, _c: &str, _a: &str, _container: &str) -> Result<TaskStatus> {
             let mut q = self.statuses.lock().unwrap();
             // Repeat the last scripted status once the queue drains.
             if q.len() > 1 {
@@ -336,6 +362,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn launch_errors_when_run_task_fails() {
+        let l = FargateLauncher::with_client(Box::new(FakeEcs::failing_run()), cfg());
+        assert!(l.launch("t1").await.is_err());
+    }
+
+    #[tokio::test]
     async fn launch_times_out_and_stops_task() {
         let mut c = cfg();
         c.timeout_secs = 0; // first not-stopped poll is already past deadline
@@ -346,8 +378,8 @@ mod tests {
             async fn run_task(&self, r: &RunTaskRequest) -> Result<String> {
                 self.0.run_task(r).await
             }
-            async fn describe_task(&self, c: &str, a: &str) -> Result<TaskStatus> {
-                self.0.describe_task(c, a).await
+            async fn describe_task(&self, c: &str, a: &str, n: &str) -> Result<TaskStatus> {
+                self.0.describe_task(c, a, n).await
             }
             async fn stop_task(&self, c: &str, a: &str, r: &str) -> Result<()> {
                 self.0.stop_task(c, a, r).await

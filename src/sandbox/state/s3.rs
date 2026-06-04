@@ -4,8 +4,6 @@
 //! `<prefix>/<key>/<relative-file-path>`. The AWS client is built lazily on
 //! first use so `default_store` can stay synchronous.
 
-#![allow(dead_code)] // wired up in the next task (default_store S3 arm)
-
 use std::fs;
 use std::path::Path;
 

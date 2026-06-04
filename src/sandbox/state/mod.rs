@@ -47,6 +47,19 @@ pub fn default_store(config: &Config) -> Result<Option<Arc<dyn StateStore>>> {
         Some(StoreKind::Filesystem) => Ok(Some(Arc::new(FilesystemStateStore::new(
             resolved_state_path(config)?,
         )))),
+        Some(StoreKind::S3) => {
+            #[cfg(feature = "s3")]
+            {
+                let s3 = config.deployment.s3.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`store = s3` requires a [deployment.s3] section")
+                })?;
+                Ok(Some(Arc::new(s3::S3StateStore::new(s3))))
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                anyhow::bail!("`store = s3` requires the binary to be built with `--features s3`")
+            }
+        }
     }
 }
 
@@ -153,5 +166,36 @@ mod tests {
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-state-test".to_string());
         assert!(default_store(&cfg).unwrap().is_some());
+    }
+
+    #[cfg(not(feature = "s3"))]
+    #[test]
+    fn s3_store_requires_feature() {
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::S3);
+        assert!(default_store(&cfg).is_err());
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn s3_store_built_lazily_when_feature_on() {
+        use crate::config::S3Config;
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::S3);
+        cfg.deployment.s3 = Some(S3Config {
+            bucket: "b".into(),
+            ..Default::default()
+        });
+        // Lazy client: constructing the store does not connect, so this is Ok without AWS.
+        assert!(default_store(&cfg).unwrap().is_some());
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn s3_store_without_section_errors() {
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::S3);
+        cfg.deployment.s3 = None;
+        assert!(default_store(&cfg).is_err());
     }
 }

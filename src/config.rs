@@ -128,6 +128,7 @@ pub enum AiBackend {
 #[serde(rename_all = "lowercase")]
 pub enum StoreKind {
     Filesystem,
+    S3,
 }
 
 /// Where a turn executes (none/local = in-process; subprocess = one-shot worker).
@@ -491,6 +492,16 @@ mod tests {
             cfg.deployment.docker_image.as_deref(),
             Some("cica-worker:dev")
         );
+    }
+
+    #[test]
+    fn store_parses_s3() {
+        let toml = r#"
+            [deployment]
+            store = "s3"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.store, Some(StoreKind::S3));
     }
 
     #[test]

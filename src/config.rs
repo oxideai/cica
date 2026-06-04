@@ -157,6 +157,47 @@ pub struct S3Config {
     pub endpoint: Option<String>,
 }
 
+fn default_container_name() -> String {
+    "cica-worker".to_string()
+}
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+fn default_timeout_secs() -> u64 {
+    900
+}
+
+/// Fargate launcher settings (used when `provider = "fargate"`). Credentials
+/// come from the task IAM role (the AWS chain), never config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FargateConfig {
+    /// ECS cluster name or ARN (required).
+    pub cluster: String,
+    /// Task-definition family or `family:revision` (required).
+    pub task_definition: String,
+    /// awsvpc subnets to launch into (required in practice).
+    #[serde(default)]
+    pub subnets: Vec<String>,
+    /// Security groups; default none.
+    #[serde(default)]
+    pub security_groups: Vec<String>,
+    /// Assign a public IP (default false — private subnets + NAT).
+    #[serde(default)]
+    pub assign_public_ip: bool,
+    /// AWS region; falls back to the default chain when unset.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Which container in the task-def to override with `worker --turn <id>`.
+    #[serde(default = "default_container_name")]
+    pub container_name: String,
+    /// DescribeTasks poll interval in seconds.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Max seconds to wait for the task to stop before bailing.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
 /// Distributed-deployment configuration. All optional; absent = single-box.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeploymentConfig {
@@ -175,6 +216,9 @@ pub struct DeploymentConfig {
     /// S3 store settings (used when `store = "s3"`).
     #[serde(default)]
     pub s3: Option<S3Config>,
+    /// Fargate launcher settings (used when `provider = "fargate"`).
+    #[serde(default)]
+    pub fargate: Option<FargateConfig>,
 }
 
 /// Root configuration
@@ -560,5 +604,27 @@ mod tests {
         cfg.cursor.api_key = Some("from-file".into());
         cfg.overlay_secrets_from(|_| None);
         assert_eq!(cfg.cursor.api_key.as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn deployment_fargate_section_parses_with_defaults() {
+        let toml = r#"
+            [deployment]
+            [deployment.fargate]
+            cluster = "cica"
+            task_definition = "cica-worker"
+            subnets = ["subnet-a", "subnet-b"]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let f = cfg.deployment.fargate.unwrap();
+        assert_eq!(f.cluster, "cica");
+        assert_eq!(f.task_definition, "cica-worker");
+        assert_eq!(f.subnets, vec!["subnet-a", "subnet-b"]);
+        assert!(f.security_groups.is_empty());
+        assert!(!f.assign_public_ip);
+        assert_eq!(f.region, None);
+        assert_eq!(f.container_name, "cica-worker");
+        assert_eq!(f.poll_interval_secs, 5);
+        assert_eq!(f.timeout_secs, 900);
     }
 }

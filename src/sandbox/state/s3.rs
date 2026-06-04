@@ -235,6 +235,75 @@ fn dir_prefix(prefix: &str, key: &str) -> String {
 }
 
 #[cfg(test)]
+mod it_tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+    use crate::config::S3Config;
+
+    // Gated: only runs when CICA_S3_IT is set (the CI s3-store job / explicit local run).
+    fn it_config() -> Option<S3Config> {
+        std::env::var_os("CICA_S3_IT")?;
+        Some(S3Config {
+            bucket: std::env::var("CICA_S3_BUCKET").unwrap_or_else(|_| "cica-test".into()),
+            region: Some(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into())),
+            prefix: Some("it".into()),
+            endpoint: Some(
+                std::env::var("CICA_S3_ENDPOINT")
+                    .unwrap_or_else(|_| "http://localhost:4566".into()),
+            ),
+        })
+    }
+
+    fn write(p: &Path, c: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, c).unwrap();
+    }
+
+    #[tokio::test]
+    async fn s3_round_trip_absent_and_replace() {
+        let Some(cfg) = it_config() else {
+            return;
+        };
+        let store = S3StateStore::new(cfg);
+
+        // absent → false
+        let d0 = tempfile::tempdir().unwrap();
+        assert!(!store.pull("session/none", d0.path()).await.unwrap());
+
+        // push a nested tree, pull it back byte-for-byte
+        let src = tempfile::tempdir().unwrap();
+        write(&src.path().join("a.txt"), "alpha");
+        write(&src.path().join("sub/b.txt"), "beta");
+        store.push(src.path(), "session/x").await.unwrap();
+
+        let d1 = tempfile::tempdir().unwrap();
+        assert!(store.pull("session/x", d1.path()).await.unwrap());
+        assert_eq!(
+            fs::read_to_string(d1.path().join("a.txt")).unwrap(),
+            "alpha"
+        );
+        assert_eq!(
+            fs::read_to_string(d1.path().join("sub/b.txt")).unwrap(),
+            "beta"
+        );
+
+        // push replaces prior contents
+        let src2 = tempfile::tempdir().unwrap();
+        write(&src2.path().join("new.txt"), "new");
+        store.push(src2.path(), "session/x").await.unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        store.pull("session/x", d2.path()).await.unwrap();
+        assert!(!d2.path().join("a.txt").exists());
+        assert_eq!(
+            fs::read_to_string(d2.path().join("new.txt")).unwrap(),
+            "new"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

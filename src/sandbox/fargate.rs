@@ -6,8 +6,9 @@
 //! calls sit behind the `EcsClient` trait so the launch/poll/stop state machine
 //! is testable without AWS; `aws-sdk-ecs` lives only in `AwsEcsClient`.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use tokio::sync::OnceCell;
 use tokio::time::{Duration, Instant, sleep};
 
 use crate::config::FargateConfig;
@@ -47,6 +48,131 @@ pub(crate) trait EcsClient: Send + Sync {
     async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()>;
 }
 
+/// Real `EcsClient` over aws-sdk-ecs, with a lazily-built client.
+#[allow(dead_code)] // wired in Task 5
+pub(crate) struct AwsEcsClient {
+    region: Option<String>,
+    client: OnceCell<aws_sdk_ecs::Client>,
+}
+
+impl AwsEcsClient {
+    #[allow(dead_code)] // wired in Task 5
+    pub(crate) fn new(region: Option<String>) -> Self {
+        Self {
+            region,
+            client: OnceCell::new(),
+        }
+    }
+
+    async fn client(&self) -> Result<&aws_sdk_ecs::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+                if let Some(r) = &self.region {
+                    loader = loader.region(aws_config::Region::new(r.clone()));
+                }
+                let shared = loader.load().await;
+                Ok::<_, anyhow::Error>(aws_sdk_ecs::Client::new(&shared))
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl EcsClient for AwsEcsClient {
+    async fn run_task(&self, req: &RunTaskRequest) -> Result<String> {
+        use aws_sdk_ecs::types::{
+            AssignPublicIp, AwsVpcConfiguration, ContainerOverride, LaunchType,
+            NetworkConfiguration, TaskOverride,
+        };
+
+        let assign = if req.assign_public_ip {
+            AssignPublicIp::Enabled
+        } else {
+            AssignPublicIp::Disabled
+        };
+        let vpc = AwsVpcConfiguration::builder()
+            .set_subnets(Some(req.subnets.clone()))
+            .set_security_groups(Some(req.security_groups.clone()))
+            .assign_public_ip(assign)
+            .build()
+            .context("building awsvpc configuration")?;
+        let net = NetworkConfiguration::builder()
+            .awsvpc_configuration(vpc)
+            .build();
+        let overrides = TaskOverride::builder()
+            .container_overrides(
+                ContainerOverride::builder()
+                    .name(req.container_name.clone())
+                    .set_command(Some(req.command.clone()))
+                    .build(),
+            )
+            .build();
+
+        let resp = self
+            .client()
+            .await?
+            .run_task()
+            .cluster(&req.cluster)
+            .task_definition(&req.task_definition)
+            .launch_type(LaunchType::Fargate)
+            .network_configuration(net)
+            .overrides(overrides)
+            .send()
+            .await
+            .context("ecs run_task")?;
+
+        if let Some(f) = resp.failures().first() {
+            bail!(
+                "ecs run_task failure: arn={:?} reason={:?} detail={:?}",
+                f.arn(),
+                f.reason(),
+                f.detail()
+            );
+        }
+        resp.tasks()
+            .first()
+            .and_then(|t| t.task_arn())
+            .map(|s| s.to_string())
+            .context("ecs run_task returned no task arn")
+    }
+
+    async fn describe_task(&self, cluster: &str, task_arn: &str) -> Result<TaskStatus> {
+        let resp = self
+            .client()
+            .await?
+            .describe_tasks()
+            .cluster(cluster)
+            .tasks(task_arn)
+            .send()
+            .await
+            .context("ecs describe_tasks")?;
+        let task = resp
+            .tasks()
+            .first()
+            .context("ecs describe_tasks returned no task")?;
+        let exit_code = task.containers().first().and_then(|c| c.exit_code());
+        Ok(TaskStatus {
+            last_status: task.last_status().unwrap_or("UNKNOWN").to_string(),
+            exit_code,
+            stopped_reason: task.stopped_reason().map(|s| s.to_string()),
+        })
+    }
+
+    async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()> {
+        self.client()
+            .await?
+            .stop_task()
+            .cluster(cluster)
+            .task(task_arn)
+            .reason(reason)
+            .send()
+            .await
+            .context("ecs stop_task")?;
+        Ok(())
+    }
+}
+
 /// Launches a worker turn as a one-shot Fargate task.
 #[allow(dead_code)] // wired in Task 5
 pub struct FargateLauncher {
@@ -55,6 +181,13 @@ pub struct FargateLauncher {
 }
 
 impl FargateLauncher {
+    /// Build the AWS-backed launcher (lazy ECS client).
+    #[allow(dead_code)] // wired in Task 5
+    pub fn new(config: FargateConfig) -> Self {
+        let region = config.region.clone();
+        Self::with_client(Box::new(AwsEcsClient::new(region)), config)
+    }
+
     /// Construct with an explicit `EcsClient` (used by `new` and by tests).
     #[allow(dead_code)] // wired in Task 5
     pub(crate) fn with_client(ecs: Box<dyn EcsClient>, config: FargateConfig) -> Self {

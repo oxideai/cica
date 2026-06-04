@@ -170,6 +170,10 @@ fn default_timeout_secs() -> u64 {
 
 /// Fargate launcher settings (used when `provider = "fargate"`). Credentials
 /// come from the task IAM role (the AWS chain), never config.
+///
+/// Field defaults (`container_name`, `poll_interval_secs`, `timeout_secs`) are
+/// supplied by serde on parse — `Default::default()` leaves them empty/zero, so
+/// always deserialize this from TOML rather than constructing it directly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FargateConfig {
     /// ECS cluster name or ARN (required).

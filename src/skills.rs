@@ -4,7 +4,7 @@
 //! The SKILL.md file contains YAML frontmatter with name and description.
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::setup;
@@ -110,8 +110,11 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
     })
 }
 
-/// Format skills as XML for the system prompt
-pub fn format_skills_xml(skills: &[Skill]) -> String {
+/// Format skills as XML for the system prompt. Locations are emitted relative
+/// to `workspace` (the agent's cwd) so they resolve on whichever host runs the
+/// agent (router or an ephemeral worker), falling back to the absolute path if
+/// a skill lives outside the workspace.
+pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     if skills.is_empty() {
         return String::new();
     }
@@ -125,10 +128,11 @@ pub fn format_skills_xml(skills: &[Skill]) -> String {
             "    <description>{}</description>\n",
             escape_xml(&skill.description)
         ));
-        xml.push_str(&format!(
-            "    <location>{}</location>\n",
-            skill.location.display()
-        ));
+        let location = skill
+            .location
+            .strip_prefix(workspace)
+            .unwrap_or(&skill.location);
+        xml.push_str(&format!("    <location>{}</location>\n", location.display()));
         xml.push_str("  </skill>\n");
     }
 
@@ -154,5 +158,20 @@ mod tests {
         assert_eq!(escape_xml("hello"), "hello");
         assert_eq!(escape_xml("a < b"), "a &lt; b");
         assert_eq!(escape_xml("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn format_skills_xml_emits_workspace_relative_location() {
+        use std::path::PathBuf;
+        let base = PathBuf::from("/data/cica");
+        let skills = vec![Skill {
+            name: "foo".to_string(),
+            description: "does foo".to_string(),
+            location: PathBuf::from("/data/cica/skills/foo/SKILL.md"),
+        }];
+        let xml = format_skills_xml(&skills, &base);
+        assert!(xml.contains("<location>skills/foo/SKILL.md</location>"), "got: {xml}");
+        // The absolute path must NOT appear (would break on workers with a different base).
+        assert!(!xml.contains("/data/cica/skills/foo/SKILL.md"));
     }
 }

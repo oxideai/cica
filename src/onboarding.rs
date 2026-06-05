@@ -350,7 +350,7 @@ pub fn build_context_prompt_for_user(
             lines.push("### Available Skills".to_string());
             lines.push("To use a skill, read its SKILL.md file at the location shown, then follow its instructions.".to_string());
             lines.push(String::new());
-            lines.push(skills::format_skills_xml(&discovered));
+            lines.push(skills::format_skills_xml(&discovered, &paths.base));
             lines.push(String::new());
         }
         Ok(_) => {

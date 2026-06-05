@@ -404,16 +404,21 @@ Append a new job to `release.yml`:
 ```
 The image tag is the no-`v` version (`0.8.0`), matching `install.sh`/sprout's `cicaVersion` convention. The `cica-bin` (cloud binary) sits in the context root; the Dockerfile's `prebuilt` stage `COPY cica-bin /cica`.
 
-- [ ] **Step 3: Add the `CICA_VARIANT` selector to `install.sh`**
+- [ ] **Step 3: Add a `--cloud` flag to `install.sh`**
 
-In `install.sh`, where the download URL is built (the block around `DOWNLOAD_URL=`), append a variant suffix. Add near the `OS`/`ARCH` detection:
+`install.sh` should select the variant via a **flag**, not an env var. Add argument parsing near the top (after `CICA_VERSION` is set, before the download), defaulting to the lean variant:
 ```sh
-CICA_VARIANT="${CICA_VARIANT:-}"
-case "$CICA_VARIANT" in
-    cloud) VARIANT_SUFFIX="-cloud" ;;
-    ""|lean) VARIANT_SUFFIX="" ;;
-    *) echo "Unknown CICA_VARIANT=$CICA_VARIANT (use 'cloud' or unset)"; exit 1 ;;
-esac
+# Variant selection: pass --cloud to install the cloud build (AWS/GCP features);
+# default is the lean single-box build.
+VARIANT_SUFFIX=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --cloud) VARIANT_SUFFIX="-cloud" ;;
+        --lean) VARIANT_SUFFIX="" ;;
+        *) echo "Unknown option: $1 (use --cloud or --lean)" >&2; exit 1 ;;
+    esac
+    shift
+done
 ```
 And change the two `DOWNLOAD_URL` assignments to append `$VARIANT_SUFFIX` to the asset name:
 ```sh
@@ -421,7 +426,9 @@ And change the two `DOWNLOAD_URL` assignments to append `$VARIANT_SUFFIX` to the
         # and:
         DOWNLOAD_URL="$CICA_BASE_URL/download/v$CICA_VERSION/cica-$OS-$ARCH$VARIANT_SUFFIX"
 ```
-(Default/unset = lean, so single-box `curl | sh` users are unaffected.)
+Invoked via a pipe as `curl … | sh -s -- --cloud` (the `-s --` forwards the flag to the script). Default (no flag) = lean, so single-box `curl | sh` users are unaffected.
+
+> Check `install.sh` doesn't already consume positional args for another purpose; if it does, integrate `--cloud` into the existing parser rather than adding a second loop.
 
 - [ ] **Step 4: Verify**
 
@@ -438,7 +445,7 @@ ci: publish ghcr.io/oxiglade/cica-worker on release + lean/cloud variants
 
 release.yml builds lean + cloud binaries per Linux arch and a new job builds
 the amd64 worker image from the prebuilt cloud binary and pushes it to GHCR.
-install.sh gains CICA_VARIANT=cloud to pull the cloud binary (default lean).
+install.sh gains a --cloud flag to pull the cloud binary (default lean).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -541,17 +548,17 @@ EOF
 
 - [ ] **Step 1: Router installs the cloud variant**
 
-In `lib/router-stack.ts`'s user-data, the cica install line must request the **cloud** binary (the router dispatches via Fargate → needs `--features fargate`). Change the install command to set `CICA_VARIANT=cloud`:
+In `lib/router-stack.ts`'s user-data, the cica install line must request the **cloud** binary (the router dispatches via Fargate → needs `--features fargate`). Change the install command to pass the `--cloud` flag:
 ```ts
-      `sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/oxiglade/cica/main/install.sh | CICA_VARIANT=cloud CICA_VERSION=${cicaVersion} sh'`,
+      `sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/oxiglade/cica/main/install.sh | CICA_VERSION=${cicaVersion} sh -s -- --cloud'`,
 ```
-Run `pnpm cdk synth -c efsFileSystemId=fs-0000000000000000000` → confirm the user-data now contains `CICA_VARIANT=cloud`. (`pnpm test` unaffected — no assertion on this string; optionally add one.)
+Run `pnpm cdk synth -c efsFileSystemId=fs-0000000000000000000` → confirm the user-data now contains `sh -s -- --cloud`. (`pnpm test` unaffected — no assertion on this string; optionally add one.)
 
 - [ ] **Step 2: `update-router.sh` uses the cloud variant**
 
-In `scripts/update-router.sh`, change the SSM command's install line to include `CICA_VARIANT=cloud`:
+In `scripts/update-router.sh`, change the SSM command's install line to pass the `--cloud` flag:
 ```bash
-\"sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/oxiglade/cica/main/install.sh | CICA_VARIANT=cloud CICA_VERSION=${CICA_VERSION} sh'\",\
+\"sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/oxiglade/cica/main/install.sh | CICA_VERSION=${CICA_VERSION} sh -s -- --cloud'\",\
 ```
 Run `bash -n scripts/update-router.sh`.
 
@@ -586,7 +593,7 @@ git add -A
 git commit -m "$(cat <<'EOF'
 feat(router): pull cloud install variant; drop image build; update RUNBOOK
 
-Router/update scripts install cica with CICA_VARIANT=cloud. push-image.sh is
+Router/update scripts install cica with the --cloud flag. push-image.sh is
 removed — the worker image is cica's published GHCR artifact. RUNBOOK no
 longer builds an image (Docker not needed for sprout).
 
@@ -611,7 +618,7 @@ EOF
 
 **Placeholder scan:** No "TBD"/"handle appropriately". The CI-specific verify notes (aws-lc-rs build deps on the Linux runner; BuildKit for `FROM ${ARG}`) are explicit "expected to work; flag if not" guidance for genuinely environment-dependent CI behavior — the honest pattern used in prior phases — not placeholders for logic. The GHCR-public step is a real one-time manual action (a GitHub UI setting), flagged as such.
 
-**Type/name consistency:** `overlay_from_env` is renamed consistently (definition + `apply_env_overlay` caller + the two updated existing tests + the three new tests). Env var names match across cica (Task 1), the task-def (Task 5), and the spec: `CICA_BACKEND`/`CICA_STORE`/`CICA_S3_BUCKET`/`CICA_S3_REGION` + `CICA_CURSOR_API_KEY`/`CICA_CLAUDE_API_KEY`. The image ref `ghcr.io/oxiglade/cica-worker:<version>` is identical in the release job (Task 4, no-`v` tag), the install/router variant, and the sprout `fromRegistry` (Task 5). `BIN_SOURCE`/`CICA_FEATURES`/`cica-bin` are consistent between the Dockerfile (Task 3) and the release image job (Task 4). `CICA_VARIANT=cloud` is consistent between `install.sh` (Task 4), the router user-data, and `update-router.sh` (Task 6). The image tag (`${GITHUB_REF_NAME#v}` → `0.8.0`) matches sprout's `cicaVersion` (no-`v`).
+**Type/name consistency:** `overlay_from_env` is renamed consistently (definition + `apply_env_overlay` caller + the two updated existing tests + the three new tests). Env var names match across cica (Task 1), the task-def (Task 5), and the spec: `CICA_BACKEND`/`CICA_STORE`/`CICA_S3_BUCKET`/`CICA_S3_REGION` + `CICA_CURSOR_API_KEY`/`CICA_CLAUDE_API_KEY`. The image ref `ghcr.io/oxiglade/cica-worker:<version>` is identical in the release job (Task 4, no-`v` tag), the install/router variant, and the sprout `fromRegistry` (Task 5). `BIN_SOURCE`/`CICA_FEATURES`/`cica-bin` are consistent between the Dockerfile (Task 3) and the release image job (Task 4). the `--cloud` flag is consistent between `install.sh` (Task 4), the router user-data, and `update-router.sh` (Task 6). The image tag (`${GITHUB_REF_NAME#v}` → `0.8.0`) matches sprout's `cicaVersion` (no-`v`).
 
 ## Next (after this merges)
 

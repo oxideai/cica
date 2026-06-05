@@ -58,7 +58,7 @@ Add a `cloud` **umbrella feature** to `Cargo.toml`: `cloud = ["fargate"]` (and `
 
 Both are uploaded to the GitHub release. The macOS dev binary stays lean.
 
-`install.sh` gains a **variant selector**: `CICA_VARIANT=cloud` (default `lean`/unset) appends the `-cloud` suffix to the downloaded asset name. The router's user-data sets `CICA_VARIANT=cloud`; single-box users are unaffected (default lean).
+`install.sh` gains a **`--cloud` flag** (passed via `curl … | sh -s -- --cloud`; default lean) that appends the `-cloud` suffix to the downloaded asset name. The router's user-data passes `--cloud`; single-box users are unaffected (default lean).
 
 ### 2b. Publish the worker image
 Add a job to `release.yml` (same `v*` tag), `needs:` the cloud build. For `linux/amd64`:

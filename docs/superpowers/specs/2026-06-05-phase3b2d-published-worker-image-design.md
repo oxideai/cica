@@ -20,10 +20,11 @@ cica ships release **binaries** (`release.yml`) but **no worker image** — the 
 | --- | --- | --- |
 | Registry | **GHCR, public** (`ghcr.io/oxiglade/cica-worker`) | Free for public images; natural for the GitHub project; no secrets in the image. |
 | Architecture | **`linux/amd64` now**; `arm64` deferred | The Fargate task-def is x86_64, and `cursor-cli`'s arm64-Linux support is unconfirmed. The CI is structured so adding `linux/arm64` is a one-line buildx change once deps are verified. |
-| Image contents | Consume the **per-arch release binary** (no in-image `cargo build`); bake bun + cursor-cli + claude-code (as today) | Fast, reproducible builds; the worker runs the exact published binary; same glibc (ubuntu-latest 24.04 ↔ `ubuntu:24.04` base). |
-| Image publish | A **release-workflow job** that runs after the binary build, builds the image from the just-built binary artifact, pushes `:<version>` + `:latest` | Self-contained in the release; no dependency on the release being public first. |
+| Feature builds | `release.yml` builds **two variants per arch**: **lean** (default features) and **cloud** (`--features fargate`, which enables `s3`) | Preserves the lean default for `curl \| sh` single-box users **and** ships a cloud-capable binary for the fleet/router. Without this the published binary lacks `s3`/`fargate` and the deploy fails `store = s3 requires --features s3`. |
+| Image contents | Consume the **cloud per-arch release binary** (no in-image `cargo build`); bake bun + cursor-cli + claude-code (as today) | Fast, reproducible builds; the worker runs the exact published cloud binary; same glibc (ubuntu-latest 24.04 ↔ `ubuntu:24.04` base). |
+| Image publish | A **release-workflow job** that runs after the binary build, builds the image from the just-built **cloud** binary artifact, pushes `:<version>` + `:latest` | Self-contained in the release; no dependency on the release being public first. |
 | Worker config | **Env-driven**: extend cica's env overlay to `CICA_BACKEND`, `CICA_STORE`, `CICA_S3_BUCKET`, `CICA_S3_REGION` (plus the existing `CICA_*_API_KEY`); `Config::load` falls back to `Config::default()` + overlay when no `config.toml` exists (with a warning) | One immutable generic image; config via the task-def, no per-deployment image, no rebuild on config change. The router (single-box, always has a `config.toml`) is unaffected. |
-| sprout image | **Mirror** the published image into ECR (pull GHCR → push ECR:`<version>`); task-def references the ECR image + sets the worker config env | In-region, AWS-native pulls; reuses the existing exec-role ECR perms; `push-image.sh` shrinks to a mirror (no build). (ECR pull-through cache is a cleaner future option.) |
+| sprout image | **Reference the public GHCR image directly** in the task-def (`ghcr.io/oxiglade/cica-worker:<version>`); **no ECR repo, no mirror** | A public image needs no auth and the Fargate task pulls it over NAT. Simplest path to testing; in-region speed via ECR **pull-through cache** is folded into the later cold-start work. |
 
 ## Part 1 (cica) — env-driven worker config
 
@@ -46,36 +47,45 @@ Extend the env overlay added in 3b-2b. Today `overlay_secrets_from` maps the two
 
 **Result:** a worker started with `CICA_BACKEND=cursor CICA_STORE=s3 CICA_S3_BUCKET=… CICA_S3_REGION=… CICA_CURSOR_API_KEY=…` and **no `config.toml`** runs correctly.
 
-## Part 2 (cica) — publish the worker image on release
+## Part 2 (cica) — release feature variants + publish the worker image
 
-Add a job to `.github/workflows/release.yml` (runs on the same `v*` tag). For `linux/amd64`:
-1. Download the `cica-linux-x86_64` binary artifact produced by the existing build job (`actions/download-artifact`).
-2. Build the worker image from a Dockerfile path that **consumes the prebuilt binary** (places it at `/usr/local/bin/cica`) instead of the `cargo build` stage, keeping the bun/cursor-cli/claude-code layers and `ENV XDG_CONFIG_HOME=/data`.
-3. Log in to GHCR (`docker/login-action` with the `GITHUB_TOKEN`, `packages: write` permission) and push `ghcr.io/oxiglade/cica-worker:<version>` and `:latest`.
-4. Ensure the package is **public** (org/repo package visibility set to public — a one-time setting, noted in the release docs).
+### 2a. Two binary variants per arch
+`release.yml` currently builds one binary per arch with plain `cargo build --release` (no features) — which would leave the deployment without `s3`/`fargate`. Change the matrix to build **two variants** per Linux arch:
+- **lean** — `cargo build --release` (default features) → `cica-linux-x86_64` (unchanged name; what `install.sh` pulls by default for single-box `curl | sh`).
+- **cloud** — `cargo build --release --features fargate` (enables `s3` transitively) → `cica-linux-x86_64-cloud`. Used by the router (install) and the worker image.
 
-**Dockerfile:** introduce a way to build from the prebuilt binary (e.g. a build stage selected by a build-arg, or a dedicated `Dockerfile.release` that `COPY`s the binary from the build context). The existing source-build path stays usable for local `docker build`. The exact mechanic is settled in the plan; the contract is "the published image contains the release binary + the three runtimes, no compile."
+Both are uploaded to the GitHub release. The macOS dev binary stays lean.
+
+`install.sh` gains a **variant selector**: `CICA_VARIANT=cloud` (default `lean`/unset) appends the `-cloud` suffix to the downloaded asset name. The router's user-data sets `CICA_VARIANT=cloud`; single-box users are unaffected (default lean).
+
+### 2b. Publish the worker image
+Add a job to `release.yml` (same `v*` tag), `needs:` the cloud build. For `linux/amd64`:
+1. Download the `cica-linux-x86_64-cloud` binary artifact (`actions/download-artifact`).
+2. Build the worker image from a Dockerfile path that **consumes the prebuilt cloud binary** (places it at `/usr/local/bin/cica`) instead of the `cargo build` stage, keeping the bun/cursor-cli/claude-code layers and `ENV XDG_CONFIG_HOME=/data`.
+3. Log in to GHCR (`docker/login-action` with `GITHUB_TOKEN`, `packages: write`) and push `ghcr.io/oxiglade/cica-worker:<version>` and `:latest`.
+4. Ensure the package is **public** (org package visibility — a one-time setting, noted in the release docs; first push may create it private).
+
+**Dockerfile:** introduce a way to build from the prebuilt binary (e.g. a build stage selected by a build-arg, or a dedicated `Dockerfile.release` that `COPY`s the binary from the build context). The existing source-build path stays usable for local `docker build`. The exact mechanic is settled in the plan; the contract is "the published image contains the **cloud** release binary + the three runtimes, no compile."
 
 **Multi-arch note:** the job builds/pushes `linux/amd64` only for now. Adding `linux/arm64` later is a `buildx --platform linux/amd64,linux/arm64` change plus verifying cursor-cli/bun arm64-Linux builds — out of scope here.
 
 ## Part 3 (sprout) — consume the published image, configure via env
 
-1. **Image:** replace `scripts/push-image.sh` (build-from-source) with `scripts/mirror-image.sh` — pull `ghcr.io/oxiglade/cica-worker:<version>`, retag to the ECR repo, push `cica-worker:<version>`. No build, correct arch (amd64 manifest). `--platform linux/amd64` is implicit (the published image is amd64).
+1. **Image:** **delete** `scripts/push-image.sh` and the **ECR repository** from `SproutFleetStack`. The task-def references the public GHCR image directly via `ecs.ContainerImage.fromRegistry("ghcr.io/oxiglade/cica-worker:<cicaVersion>")`. A public image needs no auth; the Fargate task pulls it over NAT. (The exec role keeps `AmazonECSTaskExecutionRolePolicy` for CloudWatch Logs; the ECR portions are simply unused.)
 2. **Task-def env:** add the non-secret worker config as plain `environment` (alongside the existing `CICA_*_API_KEY` `secrets`):
    - `CICA_BACKEND=cursor`
    - `CICA_STORE=s3`
    - `CICA_S3_BUCKET=cica-state-974767452524-eu-central-1`
    - `CICA_S3_REGION=eu-central-1`
    The worker image carries **no `config.toml`**; the env supplies everything.
-3. **Remove** the baked-config concept from the worker image path (the old `push-image.sh` layered a `config.toml`).
-4. **RUNBOOK:** update step 1/3 — "mirror the published image" instead of "build + push"; note the GHCR image + version.
+3. **RUNBOOK:** drop the "build + push image" step; the worker image is `ghcr.io/oxiglade/cica-worker:<version>` (published by cica's release). The remaining steps (deploy, secret, validate, cutover) are unchanged.
 
-The CDK `FargateTaskDefinition` container gains the four `environment` entries; everything else (cluster, IAM, networking, the router) is unchanged from 3b-2c.
+The CDK `FargateTaskDefinition` container gains the four `environment` entries and a `fromRegistry` image; the ECR repo + its output are removed; everything else (cluster, IAM, networking, the router) is unchanged from 3b-2c.
 
 ## Data flow (worker startup, after this phase)
 
 ```
-ECS RunTask → pull ECR image (mirror of ghcr.io/oxiglade/cica-worker:<version>)
+ECS RunTask → pull ghcr.io/oxiglade/cica-worker:<version> (public, over NAT)
   container: cica worker --turn <id>
     Config::load: no /data/cica/config.toml → defaults + env overlay
       backend=cursor, store=s3, s3.bucket/region from env, cursor.api_key from secret env
@@ -86,25 +96,25 @@ ECS RunTask → pull ECR image (mirror of ghcr.io/oxiglade/cica-worker:<version>
 
 - **Unknown `CICA_BACKEND`/`CICA_STORE` value** → log a warning and keep the default/loaded value (don't crash the turn on a typo).
 - **No `config.toml` and no env** → defaults (backend `Claude`, no store) + the warning; the turn fails clearly if a required setting (e.g. store) is absent, rather than silently mis-running.
-- **GHCR image missing for a version** → the mirror script fails fast (operator pushed no release image for that version); the release docs note that publishing a release publishes the image.
+- **GHCR image missing for a version** → `RunTask` fails to pull (no release image for that `cicaVersion`); the turn errors via the `FargateLauncher`. The release docs note that publishing a release publishes the image.
 - **Image publish job failure** → the release still publishes binaries; the image job is independent and can be re-run.
 
 ## Testing strategy
 
 - **cica unit (Rust, TDD):** extend the existing `overlay_secrets_from`-style tests — a lookup-closure test asserting `CICA_BACKEND`/`CICA_STORE`/`CICA_S3_BUCKET`/`CICA_S3_REGION` map to the right fields (and unknown enum values are ignored with the prior value retained). A test that `Config::load`-style assembly from `Config::default()` + the overlay yields a valid worker config. (Keep the closure form so tests don't touch the global env.)
 - **cica image (CI):** the release image job is exercised on a tag; for PR-time confidence, a `docker build` of the release Dockerfile path in CI (no push) confirms it assembles. The existing `docker-flow` fake-backend test continues to validate the image runs a turn.
-- **sprout:** `pnpm test` (Template assertions) gains an assertion that the task-def container has the four `CICA_*` config env entries; `mirror-image.sh` gets a `bash -n` check.
+- **sprout:** `pnpm test` (Template assertions) gains an assertion that the task-def container has the four `CICA_*` config env entries and a `fromRegistry` GHCR image; an assertion that the ECR repo is gone.
 - **End-to-end (operator, live):** the first real `RunTask` (3b-2c RUNBOOK) now pulls the published image and runs config-from-env — the real acceptance test.
 
 ## Distribution impact
 
 - cica gains a published, public worker image as a release artifact (alongside binaries). Default `cargo build`/`install.sh` unchanged. The env-config overlay adds no dependency (plain config logic), benefiting local/Docker/Fargate uniformly.
-- `sprout` no longer compiles cica; it mirrors a prebuilt image and configures via env — smaller, faster, arch-correct.
+- `sprout` no longer compiles cica or maintains an image: it references the published public image and configures via env — smaller, faster, arch-correct. The ECR repo is removed.
 
 ## Out of scope (later)
 
 - `linux/arm64` image (Graviton / Apple-Silicon native) — pending cursor-cli/bun arm64-Linux verification.
-- ECR **pull-through cache** for GHCR (cleaner than the manual mirror) — revisit if the mirror step becomes friction.
+- ECR **pull-through cache** for GHCR (in-region, faster cold-start pulls) — part of the deferred cold-start optimization, not needed for first testing.
 - A fully general `CICA_<PATH>` env-config convention for *every* config field — only the worker-relevant keys are mapped now (YAGNI).
 - Publishing the image to a second registry (Docker Hub) or to the user's own registry.
 - GCP Artifact Registry mirror (3b-3).

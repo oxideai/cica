@@ -74,6 +74,10 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         // Memories: pull is authoritative when present; absent = keep local.
         let _ = self.store.pull(&mem_key, &mem_dir).await?;
 
+        // Skills: published, read-only — pull the current set so the agent can
+        // read/execute them. Absence (router hasn't synced yet) is fine.
+        let _ = self.store.pull("skills", &self.cwd.join("skills")).await;
+
         // --- Run ---
         let result = self.inner.run_turn(job).await?;
 
@@ -260,6 +264,37 @@ mod tests {
             std::fs::read_to_string(dest.path().join("note.md")).unwrap(),
             "remember this"
         );
+    }
+
+    #[tokio::test]
+    async fn hydrate_pulls_published_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Seed the store's "skills" prefix with one skill.
+        let seed = tmp.path().join("seed");
+        write(&seed.join("foo/SKILL.md"), "name: foo");
+        let store = Arc::new(FilesystemStateStore::new(tmp.path().join("store")));
+        store.push(&seed, "skills").await.unwrap();
+
+        // cwd stands in for /data/cica; skills land in cwd/skills.
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let hp = HydratingProvider::new(
+            // Empty session id => no dehydrate/push-back, keeps the test focused.
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            store,
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            cwd.clone(),
+        );
+
+        hp.run_turn(job(None)).await.unwrap();
+
+        assert!(cwd.join("skills/foo/SKILL.md").exists());
     }
 
     #[tokio::test]

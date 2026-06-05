@@ -119,8 +119,6 @@ fn write_askpass() -> Result<PathBuf> {
 }
 
 /// Sync now, then every `refresh_secs`. Logs and keeps last-good on failure.
-// Wired into the router's startup in a later task.
-#[allow(dead_code)]
 pub async fn run_sync_loop(
     cfg: SkillsConfig,
     store: Option<Arc<dyn StateStore>>,
@@ -208,5 +206,29 @@ mod tests {
             std::fs::read_to_string(skills_dir.join("existing/SKILL.md")).unwrap(),
             "old"
         );
+    }
+
+    #[tokio::test]
+    async fn loop_syncs_immediately_then_can_abort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        make_fixture_repo(&repo);
+        let skills_dir = tmp.path().join("data/skills");
+
+        // Long interval — we only want to observe the immediate first tick.
+        let mut c = cfg(&repo);
+        c.refresh_secs = 3600;
+        let handle = tokio::spawn(run_sync_loop(c, None, skills_dir.clone()));
+
+        let mut landed = false;
+        for _ in 0..100 {
+            if skills_dir.join("myskill/SKILL.md").exists() {
+                landed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        handle.abort();
+        assert!(landed, "loop did not sync on the first tick");
     }
 }

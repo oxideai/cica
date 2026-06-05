@@ -226,6 +226,30 @@ pub struct DeploymentConfig {
     pub fargate: Option<FargateConfig>,
 }
 
+fn default_skills_ref() -> String {
+    "main".to_string()
+}
+
+fn default_skills_refresh_secs() -> u64 {
+    600
+}
+
+/// Skills git-sync settings (router-side). When present, the router periodically
+/// pulls `repo` at `ref` into the skills directory and mirrors it to the state
+/// store under "skills" for workers to hydrate. The git credential is read from
+/// the `CICA_SKILLS_GIT_TOKEN` env var, never from config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    /// Git repository URL (required), e.g. https://github.com/root-global/ai-skills.
+    pub repo: String,
+    /// Branch, tag, or sha to check out.
+    #[serde(default = "default_skills_ref", rename = "ref")]
+    pub git_ref: String,
+    /// Seconds between re-pulls.
+    #[serde(default = "default_skills_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -245,6 +269,10 @@ pub struct Config {
     /// Distributed-deployment settings (state store, etc.)
     #[serde(default)]
     pub deployment: DeploymentConfig,
+
+    /// Skills git-sync settings (router-side). Absent = no skills sync.
+    #[serde(default)]
+    pub skills: Option<SkillsConfig>,
 
     /// Enable audit logging of conversations and system events (default: true)
     #[serde(default = "default_true")]
@@ -715,5 +743,34 @@ mod tests {
         assert_eq!(f.container_name, "cica-worker");
         assert_eq!(f.poll_interval_secs, 5);
         assert_eq!(f.timeout_secs, 900);
+    }
+
+    #[test]
+    fn parses_skills_section() {
+        let toml = r#"
+backend = "claude"
+[skills]
+repo = "https://github.com/root-global/ai-skills"
+ref = "v2.0"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let s = cfg.skills.expect("skills present");
+        assert_eq!(s.repo, "https://github.com/root-global/ai-skills");
+        assert_eq!(s.git_ref, "v2.0");
+        assert_eq!(s.refresh_secs, 600);
+    }
+
+    #[test]
+    fn skills_absent_is_none() {
+        let cfg: Config = toml::from_str(r#"backend = "claude""#).unwrap();
+        assert!(cfg.skills.is_none());
+    }
+
+    #[test]
+    fn skills_defaults_applied() {
+        let cfg: Config = toml::from_str("[skills]\nrepo = \"x\"\n").unwrap();
+        let s = cfg.skills.unwrap();
+        assert_eq!(s.git_ref, "main");
+        assert_eq!(s.refresh_secs, 600);
     }
 }

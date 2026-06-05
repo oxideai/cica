@@ -64,4 +64,12 @@ RUN cd /data/cica/internal/deps/claude-code \
 
 COPY --from=binsrc /cica /usr/local/bin/cica
 
+# A non-root user (uid 10001) owning /data/cica. The image default stays root
+# (so the local DockerLauncher's bind-mounted state-store stays writable); the
+# runtime opts into this user where it matters — e.g. the Fargate task-def sets
+# `user: cica`, because claude-code refuses --dangerously-skip-permissions under
+# root and the cloud worker's state is in S3 (no host mount to worry about).
+RUN useradd --create-home --uid 10001 cica \
+ && chown -R cica:cica /data/cica
+
 ENTRYPOINT ["cica"]

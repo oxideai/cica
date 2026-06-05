@@ -132,6 +132,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           build-args: |
             BIN_SOURCE=prebuilt
           push: true

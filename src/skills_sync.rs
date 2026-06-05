@@ -93,7 +93,13 @@ fn clone_with_askpass(cfg: &SkillsConfig, dest: &Path, askpass: &Path) -> Result
 
     // Shallow clone of a branch or tag (the common case).
     if run(&[
-        "clone", "--depth", "1", "--branch", &cfg.git_ref, &cfg.repo, &dest_s,
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        &cfg.git_ref,
+        &cfg.repo,
+        &dest_s,
     ])? {
         return Ok(());
     }
@@ -153,7 +159,15 @@ mod tests {
         };
         git(&["init", "-b", "main"]);
         git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
-        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "init",
+        ]);
     }
 
     fn cfg(repo: &Path) -> SkillsConfig {

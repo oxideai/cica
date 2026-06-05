@@ -53,7 +53,9 @@ pub async fn run() -> Result<()> {
                 let store = match crate::sandbox::state::default_store(&config) {
                     Ok(s) => s,
                     Err(e) => {
-                        warn!("Failed to build state store for skills sync (continuing local-only): {e}");
+                        warn!(
+                            "Failed to build state store for skills sync (continuing local-only): {e}"
+                        );
                         None
                     }
                 };

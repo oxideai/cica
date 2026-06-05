@@ -132,7 +132,10 @@ pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
             .location
             .strip_prefix(workspace)
             .unwrap_or(&skill.location);
-        xml.push_str(&format!("    <location>{}</location>\n", location.display()));
+        xml.push_str(&format!(
+            "    <location>{}</location>\n",
+            location.display()
+        ));
         xml.push_str("  </skill>\n");
     }
 
@@ -170,7 +173,10 @@ mod tests {
             location: PathBuf::from("/data/cica/skills/foo/SKILL.md"),
         }];
         let xml = format_skills_xml(&skills, &base);
-        assert!(xml.contains("<location>skills/foo/SKILL.md</location>"), "got: {xml}");
+        assert!(
+            xml.contains("<location>skills/foo/SKILL.md</location>"),
+            "got: {xml}"
+        );
         // The absolute path must NOT appear (would break on workers with a different base).
         assert!(!xml.contains("/data/cica/skills/foo/SKILL.md"));
     }

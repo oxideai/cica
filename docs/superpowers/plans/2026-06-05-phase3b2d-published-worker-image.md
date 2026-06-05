@@ -4,7 +4,7 @@
 
 **Goal:** Make cica publish a generic public worker image to GHCR on release and make the worker fully configurable from environment variables, then simplify `sprout` to reference that image with config via the task-def env.
 
-**Architecture:** cica's config loader gains env mappings for the deployment settings (+ a no-`config.toml` fallback); `release.yml` builds **lean + cloud** binary variants (via a `cloud` umbrella feature) and a new job publishes `ghcr.io/oxiglade/cica-worker:<version>` (amd64, built from the prebuilt cloud binary via a `BIN_SOURCE` Dockerfile arg); `install.sh` gains a `CICA_VARIANT=cloud` selector. `sprout` then drops its ECR repo + build script and points the task-def at the public GHCR image with the four `CICA_*` config env vars.
+**Architecture:** cica's config loader gains env mappings for the deployment settings (+ a no-`config.toml` fallback); `release.yml` builds **lean + cloud** binary variants (via a `cloud` umbrella feature) and a new job publishes `ghcr.io/oxiglade/cica-worker:<version>` (amd64, built from the prebuilt cloud binary via a `BIN_SOURCE` Dockerfile arg); `install.sh` gains a `--cloud` flag. `sprout` then drops its ECR repo + build script and points the task-def at the public GHCR image with the four `CICA_*` config env vars.
 
 **Tech Stack:** Rust 2024 (`cica`), GitHub Actions + Docker buildx, CDK TypeScript (`sprout`, aws-cdk-lib 2.189.1). Two repos: `cica` (Tasks 1–4) then `sprout` (Tasks 5–6).
 
@@ -610,7 +610,7 @@ EOF
 - Env-driven worker config (`CICA_BACKEND`/`CICA_STORE`/`CICA_S3_BUCKET`/`CICA_S3_REGION`) + no-`config.toml` fallback → Task 1.
 - `cloud` umbrella feature (`cloud = ["fargate"]`, grows later) → Task 2.
 - Dockerfile consumes the prebuilt cloud binary (no compile in the release path) → Task 3.
-- `release.yml` lean + cloud variants + the GHCR image-publish job; `install.sh` `CICA_VARIANT` selector → Task 4.
+- `release.yml` lean + cloud variants + the GHCR image-publish job; `install.sh` `--cloud` flag → Task 4.
 - sprout: reference GHCR directly, drop ECR + build script, config via task-def env → Tasks 5, 6.
 - Router uses the cloud variant (it dispatches via Fargate) → Task 6.
 - amd64-only (cursor-cli is `linux/x64`) → Tasks 3, 4 (single amd64 image; arm64 deferred per spec).

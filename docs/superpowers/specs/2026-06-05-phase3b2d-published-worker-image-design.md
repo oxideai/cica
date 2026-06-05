@@ -20,7 +20,7 @@ cica ships release **binaries** (`release.yml`) but **no worker image** — the 
 | --- | --- | --- |
 | Registry | **GHCR, public** (`ghcr.io/oxiglade/cica-worker`) | Free for public images; natural for the GitHub project; no secrets in the image. |
 | Architecture | **`linux/amd64` now**; `arm64` deferred | The Fargate task-def is x86_64, and `cursor-cli`'s arm64-Linux support is unconfirmed. The CI is structured so adding `linux/arm64` is a one-line buildx change once deps are verified. |
-| Feature builds | `release.yml` builds **two variants per arch**: **lean** (default features) and **cloud** (`--features fargate`, which enables `s3`) | Preserves the lean default for `curl \| sh` single-box users **and** ships a cloud-capable binary for the fleet/router. Without this the published binary lacks `s3`/`fargate` and the deploy fails `store = s3 requires --features s3`. |
+| Feature builds | `release.yml` builds **two variants per arch**: **lean** (default features) and **cloud** (`--features cloud`, an umbrella). Define `cloud = ["fargate"]` now (pulls `s3`); it grows to `["fargate", "cloudrun"]` when GCP lands | Preserves the lean default for `curl \| sh` single-box users **and** ships a cloud-capable binary. The umbrella keeps it at **two variants forever** (no per-provider/combinatorial explosion); granular features (`fargate`/`cloudrun`/`s3`/`gcs`) stay for custom minimal builds. Without a cloud build the published binary lacks `s3`/`fargate` and the deploy fails `store = s3 requires --features s3`. |
 | Image contents | Consume the **cloud per-arch release binary** (no in-image `cargo build`); bake bun + cursor-cli + claude-code (as today) | Fast, reproducible builds; the worker runs the exact published cloud binary; same glibc (ubuntu-latest 24.04 ↔ `ubuntu:24.04` base). |
 | Image publish | A **release-workflow job** that runs after the binary build, builds the image from the just-built **cloud** binary artifact, pushes `:<version>` + `:latest` | Self-contained in the release; no dependency on the release being public first. |
 | Worker config | **Env-driven**: extend cica's env overlay to `CICA_BACKEND`, `CICA_STORE`, `CICA_S3_BUCKET`, `CICA_S3_REGION` (plus the existing `CICA_*_API_KEY`); `Config::load` falls back to `Config::default()` + overlay when no `config.toml` exists (with a warning) | One immutable generic image; config via the task-def, no per-deployment image, no rebuild on config change. The router (single-box, always has a `config.toml`) is unaffected. |
@@ -52,7 +52,9 @@ Extend the env overlay added in 3b-2b. Today `overlay_secrets_from` maps the two
 ### 2a. Two binary variants per arch
 `release.yml` currently builds one binary per arch with plain `cargo build --release` (no features) — which would leave the deployment without `s3`/`fargate`. Change the matrix to build **two variants** per Linux arch:
 - **lean** — `cargo build --release` (default features) → `cica-linux-x86_64` (unchanged name; what `install.sh` pulls by default for single-box `curl | sh`).
-- **cloud** — `cargo build --release --features fargate` (enables `s3` transitively) → `cica-linux-x86_64-cloud`. Used by the router (install) and the worker image.
+- **cloud** — `cargo build --release --features cloud` → `cica-linux-x86_64-cloud`. Used by the router (install) and the worker image.
+
+Add a `cloud` **umbrella feature** to `Cargo.toml`: `cloud = ["fargate"]` (and `fargate` already pulls `s3`). This is the single knob the release builds against, so adding a provider later (GCP: `cloud = ["fargate", "cloudrun"]`) keeps the release/image pipeline **and the published-artifact count unchanged** — still just lean + cloud. The granular features remain for anyone building a provider-specific minimal binary.
 
 Both are uploaded to the GitHub release. The macOS dev binary stays lean.
 
@@ -111,9 +113,15 @@ ECS RunTask → pull ghcr.io/oxiglade/cica-worker:<version> (public, over NAT)
 - cica gains a published, public worker image as a release artifact (alongside binaries). Default `cargo build`/`install.sh` unchanged. The env-config overlay adds no dependency (plain config logic), benefiting local/Docker/Fargate uniformly.
 - `sprout` no longer compiles cica or maintains an image: it references the published public image and configures via env — smaller, faster, arch-correct. The ECR repo is removed.
 
+## Scaling to more clouds + local Docker
+
+- **One image, all clouds.** The `cloud` umbrella feature means a single `ghcr.io/oxiglade/cica-worker` (cloud binary) runs on AWS, GCP (once `cloudrun`/`gcs` land), and local Docker — selected by env (`CICA_STORE`/the router's `provider`). No per-provider images: the cloud-SDK delta is negligible against the runtime-heavy base, so a split barely shrinks the image and isn't meaningfully faster to pull; the real cold-start levers are the backend runtime and SOCI (deferred), not the cloud dimension.
+- **Local Docker** uses the same published image with the `DockerLauncher` (3b-1): `docker run ghcr.io/oxiglade/cica-worker worker --turn <id>`, config via env (`CICA_STORE=filesystem` or s3/MinIO). The cloud variant always includes the filesystem store, so it runs locally unchanged — no separate artifact.
+
 ## Out of scope (later)
 
 - `linux/arm64` image (Graviton / Apple-Silicon native) — pending cursor-cli/bun arm64-Linux verification.
+- **Per-provider** or **per-backend** images (e.g. cursor-only) — only worth it if cold-start slimming demands it; tackled with the deferred cold-start work, not now.
 - ECR **pull-through cache** for GHCR (in-region, faster cold-start pulls) — part of the deferred cold-start optimization, not needed for first testing.
 - A fully general `CICA_<PATH>` env-config convention for *every* config field — only the worker-relevant keys are mapped now (YAGNI).
 - Publishing the image to a second registry (Docker Hub) or to the user's own registry.

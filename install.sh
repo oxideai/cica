@@ -6,6 +6,18 @@ set -e
 CICA_VERSION="${CICA_VERSION:-latest}"
 CICA_BASE_URL="https://github.com/oxiglade/cica/releases"
 
+# Variant selection: pass --cloud to install the cloud build (AWS/GCP features);
+# default is the lean single-box build.
+VARIANT_SUFFIX=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --cloud) VARIANT_SUFFIX="-cloud" ;;
+        --lean) VARIANT_SUFFIX="" ;;
+        *) echo "Unknown option: $1 (use --cloud or --lean)" >&2; exit 1 ;;
+    esac
+    shift
+done
+
 # Colors for output
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -109,9 +121,9 @@ get_install_dir() {
 # Download cica binary
 download_binary() {
     if [ "$CICA_VERSION" = "latest" ]; then
-        DOWNLOAD_URL="$CICA_BASE_URL/latest/download/cica-$OS-$ARCH"
+        DOWNLOAD_URL="$CICA_BASE_URL/latest/download/cica-$OS-$ARCH$VARIANT_SUFFIX"
     else
-        DOWNLOAD_URL="$CICA_BASE_URL/download/v$CICA_VERSION/cica-$OS-$ARCH"
+        DOWNLOAD_URL="$CICA_BASE_URL/download/v$CICA_VERSION/cica-$OS-$ARCH$VARIANT_SUFFIX"
     fi
 
     BINARY_NAME="cica"

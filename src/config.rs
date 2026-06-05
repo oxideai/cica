@@ -415,31 +415,62 @@ impl Config {
     /// Load config from the standard location
     pub fn load() -> Result<Self> {
         let path = paths()?.config_file;
-
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Could not read config file: {:?}", path))?;
-
-        let mut config: Config = toml::from_str(&content)
-            .with_context(|| format!("Could not parse config file: {:?}", path))?;
+        let mut config: Config = match std::fs::read_to_string(&path) {
+            Ok(content) => toml::from_str(&content)
+                .with_context(|| format!("Could not parse config file: {path:?}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("no config.toml at {path:?}; using defaults + environment");
+                Config::default()
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Could not read config file: {path:?}"));
+            }
+        };
         config.apply_env_overlay();
         Ok(config)
     }
 
-    /// Overlay credential secrets from the process environment onto the loaded
-    /// config. Lets cloud workers receive secrets via env (Secrets Manager →
-    /// task env) instead of baking them into config.toml or the state store.
+    /// Overlay deployment-relevant config and credential secrets from the
+    /// process environment. Lets a cloud worker run with NO `config.toml` —
+    /// everything (backend, store, S3 coords, AI keys) comes from the task env.
     pub(crate) fn apply_env_overlay(&mut self) {
-        self.overlay_secrets_from(|k| std::env::var(k).ok());
+        self.overlay_from_env(|k| std::env::var(k).ok());
     }
 
     /// Env overlay core, parameterized by a lookup so it is testable without
     /// touching the global process environment.
-    fn overlay_secrets_from(&mut self, get: impl Fn(&str) -> Option<String>) {
+    fn overlay_from_env(&mut self, get: impl Fn(&str) -> Option<String>) {
         if let Some(v) = get("CICA_CURSOR_API_KEY") {
             self.cursor.api_key = Some(v);
         }
         if let Some(v) = get("CICA_CLAUDE_API_KEY") {
             self.claude.api_key = Some(v);
+        }
+        if let Some(v) = get("CICA_BACKEND") {
+            match v.as_str() {
+                "cursor" => self.backend = AiBackend::Cursor,
+                "claude" => self.backend = AiBackend::Claude,
+                other => tracing::warn!("ignoring unknown CICA_BACKEND={other}"),
+            }
+        }
+        if let Some(v) = get("CICA_STORE") {
+            match v.as_str() {
+                "s3" => self.deployment.store = Some(StoreKind::S3),
+                "filesystem" => self.deployment.store = Some(StoreKind::Filesystem),
+                other => tracing::warn!("ignoring unknown CICA_STORE={other}"),
+            }
+        }
+        if let Some(v) = get("CICA_S3_BUCKET") {
+            self.deployment
+                .s3
+                .get_or_insert_with(Default::default)
+                .bucket = v;
+        }
+        if let Some(v) = get("CICA_S3_REGION") {
+            self.deployment
+                .s3
+                .get_or_insert_with(Default::default)
+                .region = Some(v);
         }
     }
 
@@ -598,7 +629,7 @@ mod tests {
             "CICA_CLAUDE_API_KEY" => Some("claude-secret".to_string()),
             _ => None,
         };
-        cfg.overlay_secrets_from(env);
+        cfg.overlay_from_env(env);
         assert_eq!(cfg.cursor.api_key.as_deref(), Some("cur-secret"));
         assert_eq!(cfg.claude.api_key.as_deref(), Some("claude-secret"));
     }
@@ -607,8 +638,51 @@ mod tests {
     fn env_overlay_leaves_config_value_when_env_absent() {
         let mut cfg = Config::default();
         cfg.cursor.api_key = Some("from-file".into());
-        cfg.overlay_secrets_from(|_| None);
+        cfg.overlay_from_env(|_| None);
         assert_eq!(cfg.cursor.api_key.as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn env_overlay_sets_backend_store_and_s3() {
+        let mut cfg = Config::default();
+        let env = |k: &str| match k {
+            "CICA_BACKEND" => Some("cursor".to_string()),
+            "CICA_STORE" => Some("s3".to_string()),
+            "CICA_S3_BUCKET" => Some("cica-state".to_string()),
+            "CICA_S3_REGION" => Some("eu-central-1".to_string()),
+            _ => None,
+        };
+        cfg.overlay_from_env(env);
+        assert_eq!(cfg.backend, AiBackend::Cursor);
+        assert_eq!(cfg.deployment.store, Some(StoreKind::S3));
+        let s3 = cfg.deployment.s3.unwrap();
+        assert_eq!(s3.bucket, "cica-state");
+        assert_eq!(s3.region.as_deref(), Some("eu-central-1"));
+    }
+
+    #[test]
+    fn env_overlay_ignores_unknown_backend() {
+        let mut cfg = Config::default();
+        let before = cfg.backend;
+        cfg.overlay_from_env(|k| (k == "CICA_BACKEND").then(|| "bogus".to_string()));
+        assert_eq!(cfg.backend, before);
+    }
+
+    #[test]
+    fn worker_config_assembles_from_defaults_plus_env() {
+        let mut cfg = Config::default();
+        let env = |k: &str| match k {
+            "CICA_BACKEND" => Some("cursor".to_string()),
+            "CICA_STORE" => Some("s3".to_string()),
+            "CICA_S3_BUCKET" => Some("b".to_string()),
+            "CICA_S3_REGION" => Some("r".to_string()),
+            "CICA_CURSOR_API_KEY" => Some("sekret".to_string()),
+            _ => None,
+        };
+        cfg.overlay_from_env(env);
+        assert_eq!(cfg.backend, AiBackend::Cursor);
+        assert_eq!(cfg.deployment.store, Some(StoreKind::S3));
+        assert_eq!(cfg.cursor.api_key.as_deref(), Some("sekret"));
     }
 
     #[test]

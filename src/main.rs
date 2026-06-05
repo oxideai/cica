@@ -10,6 +10,7 @@ mod pairing;
 mod sandbox;
 mod setup;
 mod skills;
+mod skills_sync;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

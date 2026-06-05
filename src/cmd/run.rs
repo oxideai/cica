@@ -45,6 +45,29 @@ pub async fn run() -> Result<()> {
     // Start cron scheduler service
     let cron_service = start_cron_service(&config)?;
 
+    // Skills git-sync (router-side): keep skills_dir + the state store's "skills"
+    // prefix fresh from the configured repo. No-op when [skills] is unset.
+    if let Some(skills_cfg) = config.skills.clone() {
+        match crate::config::paths() {
+            Ok(paths) => {
+                let store = match crate::sandbox::state::default_store(&config) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Failed to build state store for skills sync (continuing local-only): {e}");
+                        None
+                    }
+                };
+                tokio::spawn(crate::skills_sync::run_sync_loop(
+                    skills_cfg,
+                    store,
+                    paths.skills_dir,
+                ));
+                info!("Skills sync started");
+            }
+            Err(e) => warn!("Failed to resolve paths for skills sync: {}", e),
+        }
+    }
+
     // Spawn tasks for each configured channel
     let mut handles = Vec::new();
 

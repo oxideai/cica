@@ -9,7 +9,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 
 use crate::config::S3Config;
@@ -53,6 +55,12 @@ async fn build_client(cfg: &S3Config) -> Result<aws_sdk_s3::Client> {
     }
     let shared = loader.load().await;
     let mut builder = aws_sdk_s3::config::Builder::from(&shared);
+    // Don't auto-attach CRC32 checksums. The SDK default ("when_supported") adds one
+    // to upload_part but not to create_multipart_upload, so the parts' checksum type
+    // never matches the upload's — real S3 tolerates it, S3-compatible servers reject
+    // it ("Checksum Type mismatch"). We don't rely on checksums, so opt out entirely.
+    builder = builder
+        .request_checksum_calculation(aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired);
     // Path-style addressing for LocalStack/MinIO (virtual-host style needs DNS).
     if cfg.endpoint.is_some() {
         builder = builder.force_path_style(true);
@@ -187,20 +195,131 @@ impl StateStore for S3StateStore {
                 .expect("walk_files yields paths under src")
                 .to_string_lossy()
                 .replace('\\', "/");
-            let body = aws_sdk_s3::primitives::ByteStream::from_path(&entry)
+            let obj = object_key(&self.prefix, key, &rel);
+            upload_file(client, bucket, &obj, &entry)
                 .await
-                .with_context(|| format!("reading {}", entry.display()))?;
-            client
-                .put_object()
-                .bucket(bucket)
-                .key(object_key(&self.prefix, key, &rel))
-                .body(body)
-                .send()
-                .await
-                .with_context(|| format!("s3 put_object {rel}"))?;
+                .with_context(|| format!("s3 upload {rel}"))?;
         }
         Ok(())
     }
+}
+
+/// Threshold/part size for switching to multipart, mirroring the AWS CLI default.
+const MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024;
+const MULTIPART_PART_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Upload one file: a single PUT for small files, multipart for large ones.
+///
+/// A single large `put_object` is fragile — a mid-upload stall makes S3 idle-close
+/// the socket (`RequestTimeout`), losing the whole upload (this is what killed large
+/// session-transcript pushes). Multipart sends small, independently-retried parts,
+/// so big files go up reliably.
+async fn upload_file(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+) -> Result<()> {
+    let len = fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+
+    if len <= MULTIPART_THRESHOLD {
+        let body = ByteStream::from_path(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await
+            .context("s3 put_object")?;
+        return Ok(());
+    }
+
+    let created = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .context("s3 create_multipart_upload")?;
+    let upload_id = created
+        .upload_id()
+        .context("create_multipart_upload returned no upload_id")?
+        .to_string();
+
+    match upload_parts(client, bucket, key, &upload_id, path, len).await {
+        Ok(completed) => client
+            .complete_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+            .context("s3 complete_multipart_upload")
+            .map(|_| ()),
+        Err(e) => {
+            // Best-effort: don't leave billable orphaned parts behind on failure.
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            Err(e)
+        }
+    }
+}
+
+async fn upload_parts(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    path: &Path,
+    len: u64,
+) -> Result<CompletedMultipartUpload> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("open {}", path.display()))?;
+    let mut parts = Vec::new();
+    let mut part_number: i32 = 1;
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk = std::cmp::min(MULTIPART_PART_SIZE, remaining) as usize;
+        // Buffer each part: a plain Content-Length body, not a streamed/chunked
+        // one (which S3-compatible servers can reject mid-send). 8 MiB peak.
+        let mut buf = vec![0u8; chunk];
+        file.read_exact(&mut buf)
+            .await
+            .with_context(|| format!("reading part {part_number} of {}", path.display()))?;
+        let resp = client
+            .upload_part()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .body(ByteStream::from(buf))
+            .send()
+            .await
+            .with_context(|| format!("s3 upload_part {part_number}"))?;
+        parts.push(
+            CompletedPart::builder()
+                .set_e_tag(resp.e_tag().map(String::from))
+                .part_number(part_number)
+                .build(),
+        );
+        remaining -= chunk as u64;
+        part_number += 1;
+    }
+    Ok(CompletedMultipartUpload::builder()
+        .set_parts(Some(parts))
+        .build())
 }
 
 /// Recursively collect all file paths under `dir` (empty if `dir` is absent).
@@ -310,6 +429,24 @@ mod it_tests {
             fs::read_to_string(d2.path().join("new.txt")).unwrap(),
             "new"
         );
+    }
+
+    #[tokio::test]
+    async fn s3_multipart_round_trip_large_file() {
+        let Some(cfg) = it_config() else {
+            return;
+        };
+        let store = S3StateStore::new(cfg);
+
+        // > the 8 MiB multipart threshold, so push() takes the multipart path.
+        let big = vec![7u8; 20 * 1024 * 1024];
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("big.bin"), &big).unwrap();
+        store.push(src.path(), "session/big").await.unwrap();
+
+        let d = tempfile::tempdir().unwrap();
+        assert!(store.pull("session/big", d.path()).await.unwrap());
+        assert_eq!(fs::read(d.path().join("big.bin")).unwrap(), big);
     }
 }
 

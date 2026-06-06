@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::config::AiBackend;
 use crate::sandbox::artifacts::{ClaudeSessionArtifacts, CursorSessionArtifacts, SessionArtifacts};
@@ -81,17 +82,29 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         // --- Run ---
         let result = self.inner.run_turn(job).await?;
 
-        // --- Dehydrate ---
+        // --- Dehydrate (best-effort) ---
+        // Persisting session/memory must NOT drop the turn's reply: the worker
+        // returns `result` to the router *after* this, so a failed push here
+        // (e.g. a slow S3 upload timing out) would otherwise lose the answer
+        // entirely. Log and continue; the worst case is a degraded resume.
         if !result.backend_session_id.is_empty() {
             let bid = &result.backend_session_id;
             let staging = self.staging();
-            if artifacts.capture(home, bid, &staging)? {
-                self.store.push(&staging, &format!("session/{bid}")).await?;
+            match artifacts.capture(home, bid, &staging) {
+                Ok(true) => {
+                    if let Err(e) = self.store.push(&staging, &format!("session/{bid}")).await {
+                        warn!("failed to persist session {bid} (reply still delivered): {e}");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => warn!("failed to capture session {bid} artifacts: {e}"),
             }
             let _ = std::fs::remove_dir_all(&staging);
         }
-        if mem_dir.exists() {
-            self.store.push(&mem_dir, &mem_key).await?;
+        if mem_dir.exists()
+            && let Err(e) = self.store.push(&mem_dir, &mem_key).await
+        {
+            warn!("failed to persist memories (reply still delivered): {e}");
         }
 
         Ok(result)
@@ -143,6 +156,44 @@ mod tests {
     fn write(path: &Path, contents: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
+    }
+
+    /// A store whose `push` always fails (simulates a stalled S3 upload),
+    /// while `pull` is a no-op. Used to prove dehydration is best-effort.
+    struct FailingPushStore;
+
+    #[async_trait]
+    impl StateStore for FailingPushStore {
+        async fn pull(&self, _key: &str, _dest: &Path) -> Result<bool> {
+            Ok(false)
+        }
+        async fn push(&self, _src: &Path, _key: &str) -> Result<()> {
+            anyhow::bail!("simulated S3 put timeout")
+        }
+    }
+
+    #[tokio::test]
+    async fn dehydrate_failure_does_not_drop_the_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        // Seed a memory so the dehydrate path attempts a (failing) push.
+        write(&cwd.join("users/telegram_1/memories/m.md"), "note");
+        let hp = HydratingProvider::new(
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            Arc::new(FailingPushStore),
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            cwd,
+        );
+        // The push fails, but the turn's reply must still be returned.
+        let result = hp
+            .run_turn(job(None))
+            .await
+            .expect("reply delivered despite a dehydration push failure");
+        assert_eq!(result.response, "ok");
     }
 
     #[tokio::test]

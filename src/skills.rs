@@ -40,6 +40,9 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
 
 /// Directory names never descended into during discovery (vendored deps, VCS,
 /// docs, and any hidden dir).
+///
+/// Note: a user skill directory literally named `docs` or `node_modules` would
+/// be skipped.
 fn is_excluded_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "docs")
 }
@@ -58,7 +61,10 @@ fn collect_skills(dir: &Path, prep_deps: bool, out: &mut Vec<Skill>) -> Result<(
         return Ok(());
     }
 
-    for entry in std::fs::read_dir(dir)?.flatten() {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -160,13 +166,15 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
 /// to `workspace` (the agent's cwd) so they resolve on whichever host runs the
 /// agent (router or an ephemeral worker), falling back to the absolute path if
 /// a skill lives outside the workspace. Skills are grouped by category in the
-/// fixed order: tool, workflow, report, then any remaining categories sorted.
+/// fixed order: tool, workflow, report, knowledge, then any remaining categories
+/// sorted.
 pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    // Fixed category order; any unknown categories follow, sorted.
+    // Fixed category order: tool, workflow, report, knowledge, then any
+    // remaining categories sorted.
     let mut categories: Vec<&str> = vec!["tool", "workflow", "report", "knowledge"];
     let mut extras: Vec<&str> = skills
         .iter()
@@ -301,8 +309,9 @@ mod tests {
         };
         write_skill("root-db-query", "root-db-query");
         write_skill("knowledge/data-model", "data-model");
-        write_skill("root-db-query/node_modules/pkg", "pkg");
+        write_skill("node_modules/pkg", "pkg");
         write_skill("docs/superpowers", "superpowers");
+        write_skill("knowledge/.hidden-wip/draft", "draft"); // hidden dir excluded too
 
         let mut out = Vec::new();
         collect_skills(root, false, &mut out).unwrap();
@@ -324,6 +333,13 @@ mod tests {
                 location: PathBuf::from("/ws/root-db-query/SKILL.md"),
             },
             Skill {
+                name: "competitor-brief".into(),
+                description: "brief".into(),
+                category: "workflow".into(),
+                when_to_use: "for competitive analysis".into(),
+                location: PathBuf::from("/ws/competitor-brief/SKILL.md"),
+            },
+            Skill {
                 name: "data-model".into(),
                 description: "schema".into(),
                 category: "knowledge".into(),
@@ -336,6 +352,8 @@ mod tests {
         let tool = xml.find("category=\"tool\"").unwrap();
         let know = xml.find("category=\"knowledge\"").unwrap();
         assert!(tool < know, "knowledge should group after tool: {xml}");
+        let wf = xml.find("category=\"workflow\"").unwrap();
+        assert!(wf < know, "workflow should group before knowledge: {xml}");
         assert!(
             xml.contains("<location>knowledge/data-model/SKILL.md</location>"),
             "got: {xml}"

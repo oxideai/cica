@@ -244,8 +244,7 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
 
     // Fallback: heuristic detection for paths ending in media extensions.
     let media_extensions = [
-        ".png", ".jpg", ".jpeg", ".gif", ".webp",
-        ".mp4", ".mov", ".webm", ".avi",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm", ".avi",
     ];
 
     for line in response.lines() {

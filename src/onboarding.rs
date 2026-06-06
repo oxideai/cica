@@ -591,30 +591,28 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
         // Search for relevant memories if we have a user message
         if let Some(query) = user_message {
             match MemoryIndex::open() {
-                Ok(index) => {
-                    match index.search(ch, uid, query, 3) {
-                        Ok(results) if !results.is_empty() => {
-                            lines.push("### Relevant Memories".to_string());
-                            lines.push(
-                                "The following memories may be relevant to this conversation:"
-                                    .to_string(),
-                            );
-                            lines.push(String::new());
+                Ok(index) => match index.search(ch, uid, query, 3) {
+                    Ok(results) if !results.is_empty() => {
+                        lines.push("### Relevant Memories".to_string());
+                        lines.push(
+                            "The following memories may be relevant to this conversation:"
+                                .to_string(),
+                        );
+                        lines.push(String::new());
 
-                            for result in results {
-                                if result.score > 0.3 {
-                                    lines.push(format!("**From {}:**", result.path));
-                                    lines.push(result.chunk);
-                                    lines.push(String::new());
-                                }
+                        for result in results {
+                            if result.score > 0.3 {
+                                lines.push(format!("**From {}:**", result.path));
+                                lines.push(result.chunk);
+                                lines.push(String::new());
                             }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!("Failed to search memories: {}", e);
-                        }
                     }
-                }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("Failed to search memories: {}", e);
+                    }
+                },
                 Err(e) => {
                     warn!("Failed to open memory index: {}", e);
                 }

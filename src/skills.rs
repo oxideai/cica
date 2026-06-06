@@ -135,7 +135,9 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
     Ok(Skill {
         name: name.unwrap_or_else(|| dir_name.clone()),
         description: description.unwrap_or_else(|| format!("Skill: {}", dir_name)),
-        category: category.unwrap_or_else(|| "tool".to_string()),
+        category: category
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "tool".to_string()),
         when_to_use: when_to_use.unwrap_or_default(),
         location: path.clone(),
     })
@@ -238,6 +240,10 @@ mod tests {
         );
         // The absolute path must NOT appear (would break on workers with a different base).
         assert!(!xml.contains("/data/cica/skills/foo/SKILL.md"));
+        assert!(
+            !xml.contains("<when_to_use>"),
+            "empty when_to_use must not be emitted; got: {xml}"
+        );
     }
 
     #[test]
@@ -297,5 +303,13 @@ mod tests {
         let t = xml.find("category=\"tool\"").unwrap();
         let w = xml.find("category=\"workflow\"").unwrap();
         assert!(t < w, "tool group should precede workflow group: {xml}");
+        assert!(
+            xml.contains("<when_to_use>use beta for Y</when_to_use>"),
+            "got: {xml}"
+        );
+        assert!(
+            !xml.contains("category=\"report\""),
+            "no report skills -> no report group; got: {xml}"
+        );
     }
 }

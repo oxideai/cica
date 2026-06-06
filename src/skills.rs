@@ -14,6 +14,8 @@ use crate::setup;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    pub category: String,
+    pub when_to_use: String,
     pub location: PathBuf,
 }
 
@@ -61,25 +63,19 @@ fn parse_frontmatter(
     frontmatter: &str,
     name: &mut Option<String>,
     description: &mut Option<String>,
+    category: &mut Option<String>,
+    when_to_use: &mut Option<String>,
 ) {
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("name:") {
-            *name = Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+            *name = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
         } else if let Some(value) = line.strip_prefix("description:") {
-            *description = Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+            *description = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+        } else if let Some(value) = line.strip_prefix("category:") {
+            *category = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+        } else if let Some(value) = line.strip_prefix("when_to_use:") {
+            *when_to_use = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
         }
     }
 }
@@ -89,12 +85,14 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
 
     let mut name = None;
     let mut description = None;
+    let mut category = None;
+    let mut when_to_use = None;
 
     if let Some(stripped) = content.strip_prefix("---")
         && let Some(end) = stripped.find("---")
     {
         let frontmatter = &stripped[..end];
-        parse_frontmatter(frontmatter, &mut name, &mut description);
+        parse_frontmatter(frontmatter, &mut name, &mut description, &mut category, &mut when_to_use);
     }
 
     let dir_name = path
@@ -107,6 +105,8 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
     Ok(Skill {
         name: name.unwrap_or_else(|| dir_name.clone()),
         description: description.unwrap_or_else(|| format!("Skill: {}", dir_name)),
+        category: category.unwrap_or_else(|| "tool".to_string()),
+        when_to_use: when_to_use.unwrap_or_default(),
         location: path.clone(),
     })
 }
@@ -170,6 +170,8 @@ mod tests {
         let skills = vec![Skill {
             name: "foo".to_string(),
             description: "does foo".to_string(),
+            category: "tool".to_string(),
+            when_to_use: String::new(),
             location: PathBuf::from("/data/cica/skills/foo/SKILL.md"),
         }];
         let xml = format_skills_xml(&skills, &base);
@@ -179,5 +181,32 @@ mod tests {
         );
         // The absolute path must NOT appear (would break on workers with a different base).
         assert!(!xml.contains("/data/cica/skills/foo/SKILL.md"));
+    }
+
+    #[test]
+    fn parse_skill_reads_category_and_when_to_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let md = "---\nname: demo\ncategory: workflow\ndescription: does demo\nwhen_to_use: when you demo\n---\n# Demo\n";
+        std::fs::write(skill_dir.join("SKILL.md"), md).unwrap();
+        let skill = parse_skill(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.category, "workflow");
+        assert_eq!(skill.when_to_use, "when you demo");
+    }
+
+    #[test]
+    fn parse_skill_defaults_category_to_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("legacy");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: legacy\ndescription: old\n---\n",
+        )
+        .unwrap();
+        let skill = parse_skill(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.category, "tool");
+        assert_eq!(skill.when_to_use, "");
     }
 }

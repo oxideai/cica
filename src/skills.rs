@@ -167,7 +167,7 @@ pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     }
 
     // Fixed category order; any unknown categories follow, sorted.
-    let mut categories: Vec<&str> = vec!["tool", "workflow", "report"];
+    let mut categories: Vec<&str> = vec!["tool", "workflow", "report", "knowledge"];
     let mut extras: Vec<&str> = skills
         .iter()
         .map(|s| s.category.as_str())
@@ -309,6 +309,37 @@ mod tests {
         let mut names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["data-model", "root-db-query"]);
+    }
+
+    #[test]
+    fn format_skills_xml_groups_knowledge_after_skills() {
+        use std::path::PathBuf;
+        let base = PathBuf::from("/ws");
+        let skills = vec![
+            Skill {
+                name: "root-db-query".into(),
+                description: "db".into(),
+                category: "tool".into(),
+                when_to_use: "data".into(),
+                location: PathBuf::from("/ws/root-db-query/SKILL.md"),
+            },
+            Skill {
+                name: "data-model".into(),
+                description: "schema".into(),
+                category: "knowledge".into(),
+                when_to_use: "before SQL".into(),
+                location: PathBuf::from("/ws/knowledge/data-model/SKILL.md"),
+            },
+        ];
+        let xml = format_skills_xml(&skills, &base);
+        assert!(xml.contains("category=\"knowledge\""), "got: {xml}");
+        let tool = xml.find("category=\"tool\"").unwrap();
+        let know = xml.find("category=\"knowledge\"").unwrap();
+        assert!(tool < know, "knowledge should group after tool: {xml}");
+        assert!(
+            xml.contains("<location>knowledge/data-model/SKILL.md</location>"),
+            "got: {xml}"
+        );
     }
 
     #[test]

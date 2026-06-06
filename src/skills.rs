@@ -26,6 +26,12 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
 
     let mut skills = Vec::new();
 
+    let prep_deps = config::prep_skill_deps_locally(
+        config::Config::load()
+            .map(|c| c.deployment.provider)
+            .unwrap_or(None),
+    );
+
     let entries = std::fs::read_dir(&skills_dir)?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -39,7 +45,9 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
         }
 
         if let Ok(skill) = parse_skill(&skill_file) {
-            setup::ensure_skill_deps(&path);
+            if prep_deps {
+                setup::ensure_skill_deps(&path);
+            }
             skills.push(skill);
         }
     }

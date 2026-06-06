@@ -132,6 +132,13 @@ pub enum ProviderKind {
     Fargate,
 }
 
+/// Whether to `bun install` skill deps on this host at discovery time. Only
+/// `false` for Fargate, where turns run on a remote worker that hydrates its own
+/// skills copy and installs deps on demand — so installing here is wasted work.
+pub fn prep_skill_deps_locally(provider: Option<ProviderKind>) -> bool {
+    !matches!(provider, Some(ProviderKind::Fargate))
+}
+
 /// S3 state-store settings (used when `store = "s3"`). Credentials come from the
 /// standard AWS provider chain (env / instance role), never config.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -748,5 +755,16 @@ ref = "v2.0"
         let s = cfg.skills.unwrap();
         assert_eq!(s.git_ref, "main");
         assert_eq!(s.refresh_secs, 600);
+    }
+
+    #[test]
+    fn skill_deps_prepped_locally_except_fargate() {
+        // Single-box / local execution → prep deps on this host.
+        assert!(prep_skill_deps_locally(None));
+        assert!(prep_skill_deps_locally(Some(ProviderKind::Local)));
+        assert!(prep_skill_deps_locally(Some(ProviderKind::Subprocess)));
+        assert!(prep_skill_deps_locally(Some(ProviderKind::Docker)));
+        // Remote worker hydrates its own skills + installs on demand → skip.
+        assert!(!prep_skill_deps_locally(Some(ProviderKind::Fargate)));
     }
 }

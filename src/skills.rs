@@ -69,13 +69,37 @@ fn parse_frontmatter(
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("name:") {
-            *name = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+            *name = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
         } else if let Some(value) = line.strip_prefix("description:") {
-            *description = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+            *description = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
         } else if let Some(value) = line.strip_prefix("category:") {
-            *category = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+            *category = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
         } else if let Some(value) = line.strip_prefix("when_to_use:") {
-            *when_to_use = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+            *when_to_use = Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
         }
     }
 }
@@ -92,7 +116,13 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
         && let Some(end) = stripped.find("---")
     {
         let frontmatter = &stripped[..end];
-        parse_frontmatter(frontmatter, &mut name, &mut description, &mut category, &mut when_to_use);
+        parse_frontmatter(
+            frontmatter,
+            &mut name,
+            &mut description,
+            &mut category,
+            &mut when_to_use,
+        );
     }
 
     let dir_name = path
@@ -114,32 +144,59 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
 /// Format skills as XML for the system prompt. Locations are emitted relative
 /// to `workspace` (the agent's cwd) so they resolve on whichever host runs the
 /// agent (router or an ephemeral worker), falling back to the absolute path if
-/// a skill lives outside the workspace.
+/// a skill lives outside the workspace. Skills are grouped by category in the
+/// fixed order: tool, workflow, report, then any remaining categories sorted.
 pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
+    // Fixed category order; any unknown categories follow, sorted.
+    let mut categories: Vec<&str> = vec!["tool", "workflow", "report"];
+    let mut extras: Vec<&str> = skills
+        .iter()
+        .map(|s| s.category.as_str())
+        .filter(|c| !categories.contains(c))
+        .collect();
+    extras.sort_unstable();
+    extras.dedup();
+    categories.extend(extras);
+
     let mut xml = String::from("<available_skills>\n");
-
-    for skill in skills {
-        xml.push_str("  <skill>\n");
-        xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
+    for cat in categories {
+        let in_cat: Vec<&Skill> = skills.iter().filter(|s| s.category == cat).collect();
+        if in_cat.is_empty() {
+            continue;
+        }
         xml.push_str(&format!(
-            "    <description>{}</description>\n",
-            escape_xml(&skill.description)
+            "  <skill_group category=\"{}\">\n",
+            escape_xml(cat)
         ));
-        let location = skill
-            .location
-            .strip_prefix(workspace)
-            .unwrap_or(&skill.location);
-        xml.push_str(&format!(
-            "    <location>{}</location>\n",
-            location.display()
-        ));
-        xml.push_str("  </skill>\n");
+        for skill in in_cat {
+            xml.push_str("    <skill>\n");
+            xml.push_str(&format!("      <name>{}</name>\n", escape_xml(&skill.name)));
+            xml.push_str(&format!(
+                "      <description>{}</description>\n",
+                escape_xml(&skill.description)
+            ));
+            if !skill.when_to_use.is_empty() {
+                xml.push_str(&format!(
+                    "      <when_to_use>{}</when_to_use>\n",
+                    escape_xml(&skill.when_to_use)
+                ));
+            }
+            let location = skill
+                .location
+                .strip_prefix(workspace)
+                .unwrap_or(&skill.location);
+            xml.push_str(&format!(
+                "      <location>{}</location>\n",
+                location.display()
+            ));
+            xml.push_str("    </skill>\n");
+        }
+        xml.push_str("  </skill_group>\n");
     }
-
     xml.push_str("</available_skills>");
     xml
 }
@@ -208,5 +265,37 @@ mod tests {
         let skill = parse_skill(&skill_dir.join("SKILL.md")).unwrap();
         assert_eq!(skill.category, "tool");
         assert_eq!(skill.when_to_use, "");
+    }
+
+    #[test]
+    fn format_skills_xml_groups_by_category_and_emits_when_to_use() {
+        use std::path::PathBuf;
+        let base = PathBuf::from("/ws");
+        let skills = vec![
+            Skill {
+                name: "alpha".into(),
+                description: "a tool".into(),
+                category: "tool".into(),
+                when_to_use: "use alpha for X".into(),
+                location: PathBuf::from("/ws/alpha/SKILL.md"),
+            },
+            Skill {
+                name: "beta".into(),
+                description: "a workflow".into(),
+                category: "workflow".into(),
+                when_to_use: "use beta for Y".into(),
+                location: PathBuf::from("/ws/beta/SKILL.md"),
+            },
+        ];
+        let xml = format_skills_xml(&skills, &base);
+        assert!(xml.contains("category=\"tool\""), "got: {xml}");
+        assert!(xml.contains("category=\"workflow\""), "got: {xml}");
+        assert!(
+            xml.contains("<when_to_use>use alpha for X</when_to_use>"),
+            "got: {xml}"
+        );
+        let t = xml.find("category=\"tool\"").unwrap();
+        let w = xml.find("category=\"workflow\"").unwrap();
+        assert!(t < w, "tool group should precede workflow group: {xml}");
     }
 }

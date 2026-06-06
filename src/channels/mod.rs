@@ -24,14 +24,7 @@ use crate::pairing::PairingStore;
 use crate::sandbox::{self, TurnJob};
 use crate::skills;
 
-// ============================================================================
-// Channel Abstraction
-// ============================================================================
-
 /// Abstraction over channel-specific transport operations.
-///
-/// Each channel (Telegram, Signal, etc.) implements this trait to provide
-/// a unified interface for sending messages and showing typing indicators.
 #[async_trait]
 pub trait Channel: Send + Sync + 'static {
     /// Channel identifier (e.g., "telegram", "signal")
@@ -49,8 +42,6 @@ pub trait Channel: Send + Sync + 'static {
         message: &str,
         _attachment_paths: &[PathBuf],
     ) -> Result<()> {
-        // Default implementation: just send the text message (ignore attachments)
-        // Channels that support attachments should override this
         self.send_message(message).await
     }
 
@@ -58,22 +49,18 @@ pub trait Channel: Send + Sync + 'static {
     fn start_typing(&self) -> TypingGuard;
 }
 
-/// RAII guard for typing indicators.
-///
-/// The typing indicator runs until this guard is dropped.
+/// RAII guard for typing indicators; dropped when the response is ready.
 pub struct TypingGuard {
     cancel: Option<oneshot::Sender<()>>,
 }
 
 impl TypingGuard {
-    /// Create a new typing guard with a cancel channel
     pub fn new(cancel: oneshot::Sender<()>) -> Self {
         Self {
             cancel: Some(cancel),
         }
     }
 
-    /// Create a no-op guard (for testing or when typing indicators aren't supported)
     #[allow(dead_code)]
     pub fn noop() -> Self {
         Self { cancel: None }
@@ -88,14 +75,7 @@ impl Drop for TypingGuard {
     }
 }
 
-// ============================================================================
-// Message Actions
-// ============================================================================
-
 /// Actions that can result from processing an incoming message.
-///
-/// This enum represents "what to do" without "how to do it", enabling
-/// pure logic in `determine_action()` that's easy to test.
 pub enum MessageAction {
     /// Send a simple response (command output, error message, etc.)
     SendResponse(String),
@@ -117,9 +97,6 @@ pub enum MessageAction {
 }
 
 /// Determine what action to take for an incoming message.
-///
-/// This is a pure function with no side effects - it only reads state and
-/// returns what should happen. This makes it easy to test.
 pub fn determine_action(
     channel: &str,
     user_id: &str,
@@ -131,7 +108,6 @@ pub fn determine_action(
 ) -> Result<MessageAction> {
     let text = text.trim();
 
-    // Check if user is approved
     if !store.is_approved(channel, user_id) {
         let settings = crate::config::Config::load()
             .map(|c: crate::config::Config| c.channel_settings(channel))
@@ -146,10 +122,9 @@ pub fn determine_action(
         }
     }
 
-    // Check if onboarding is complete
     let onboarding_complete = onboarding::is_complete_for_user(channel, user_id)?;
 
-    // Process commands (work even during onboarding)
+    // Commands work even during onboarding.
     match process_command(store, channel, user_id, text, onboarding_complete)? {
         CommandResult::Response(response) => {
             return Ok(MessageAction::SendResponse(response));
@@ -160,34 +135,27 @@ pub fn determine_action(
         CommandResult::NotACommand => {}
     }
 
-    // Handle onboarding if not complete
     if !onboarding_complete {
-        // Treat /start as "hi" for onboarding
         let message = if text == "/start" { "hi" } else { text };
         return Ok(MessageAction::Onboarding {
             message: message.to_string(),
         });
     }
 
-    // Ignore /start after onboarding
     if text == "/start" {
         return Ok(MessageAction::Ignore);
     }
 
-    // Empty message with no images - ignore
     if text.is_empty() {
         return Ok(MessageAction::Ignore);
     }
 
-    // Normal message - query Claude
     Ok(MessageAction::QueryClaude {
         text: text.to_string(),
     })
 }
 
-/// Build a message combining text and image paths.
-///
-/// Images are referenced using @path syntax which Claude Code understands.
+/// Build a message combining text and image paths (@path syntax for Claude Code).
 pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> String {
     let mut result = text.to_string();
 
@@ -206,10 +174,7 @@ pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> String {
     result
 }
 
-/// Execute an action that doesn't require the task manager.
-///
-/// Returns `Some(text)` if the action is QueryClaude (needs task_manager handling),
-/// otherwise executes the action and returns `None`.
+/// Execute an action. Returns `Some(text)` for `QueryClaude` (caller handles with task manager).
 pub async fn execute_action(
     channel: &dyn Channel,
     user_id: &str,
@@ -249,10 +214,7 @@ pub async fn execute_action(
             Ok(None)
         }
 
-        MessageAction::QueryClaude { text } => {
-            // Return the text so caller can handle with task_manager
-            Ok(Some(text))
-        }
+        MessageAction::QueryClaude { text } => Ok(Some(text)),
 
         MessageAction::Ignore => Ok(None),
     }
@@ -260,12 +222,11 @@ pub async fn execute_action(
 
 /// Extract media file paths from Claude's response text.
 ///
-/// First looks for explicit `[attachment:/path/to/file]` markers (reliable),
-/// then falls back to heuristic path detection for backwards compatibility.
+/// Prefers explicit `[attachment:/path/to/file]` markers; falls back to heuristic
+/// path detection for backwards compatibility.
 fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     let mut attachments = Vec::new();
 
-    // First pass: explicit [attachment:path] markers
     for cap in response.match_indices("[attachment:") {
         let start = cap.0 + "[attachment:".len();
         if let Some(end) = response[start..].find(']') {
@@ -277,15 +238,13 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
         }
     }
 
-    // If we found explicit markers, use only those
     if !attachments.is_empty() {
         return attachments;
     }
 
-    // Fallback: heuristic detection for paths ending in media extensions
+    // Fallback: heuristic detection for paths ending in media extensions.
     let media_extensions = [
-        // Images
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", // Videos
+        ".png", ".jpg", ".jpeg", ".gif", ".webp",
         ".mp4", ".mov", ".webm", ".avi",
     ];
 
@@ -310,17 +269,13 @@ fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     attachments
 }
 
-/// Remove lines from the response that contain file paths or attachment markers.
-///
-/// This cleans up responses to avoid showing technical file paths to the user
-/// when media files are being sent as attachments.
+/// Remove lines with file paths or attachment markers before sending to the user.
 fn remove_file_path_lines(response: &str) -> String {
     let lines: Vec<&str> = response
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
             let lower = trimmed.to_lowercase();
-            // Skip lines with attachment markers or file paths
             !trimmed.contains("[attachment:")
                 && !trimmed.contains("/Users/")
                 && !lower.contains("saved to")
@@ -334,10 +289,7 @@ fn remove_file_path_lines(response: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-/// Execute a Claude query for the user.
-///
-/// This is called from within the task_manager callback after messages
-/// have been debounced and batched.
+/// Execute a Claude query for the user (called from the task_manager callback).
 pub async fn execute_claude_query(
     channel: Arc<dyn Channel>,
     user_id: &str,
@@ -347,7 +299,6 @@ pub async fn execute_claude_query(
     let combined_text = messages.join("\n\n");
     let _typing = channel.start_typing();
 
-    // Build context prompt
     let context_prompt = match onboarding::build_context_prompt_for_user(
         Some(channel.display_name()),
         Some(channel.name()),
@@ -364,7 +315,6 @@ pub async fn execute_claude_query(
         }
     };
 
-    // Load pairing store for session management
     let mut store = match PairingStore::load() {
         Ok(s) => s,
         Err(e) => {
@@ -376,7 +326,6 @@ pub async fn execute_claude_query(
         }
     };
 
-    // Query AI backend with session
     let qr = match query_ai_with_session(
         &mut store,
         channel.name(),
@@ -408,7 +357,6 @@ pub async fn execute_claude_query(
 
     let response = &qr.response;
 
-    // Audit log the exchange
     audit::log_message(
         channel.name(),
         user_id,
@@ -424,41 +372,26 @@ pub async fn execute_claude_query(
         false,
     );
 
-    // Extract any media attachments (images, videos) from the response
     let attachments = extract_media_attachments(response);
 
-    // Send response with attachments if any
     if !attachments.is_empty() {
         debug!("Sending response with {} attachment(s)", attachments.len());
-
-        // Clean up the response text - remove lines that mention the file paths
         let cleaned_response = remove_file_path_lines(response);
-
         if let Err(e) = channel
             .send_message_with_attachments(&cleaned_response, &attachments)
             .await
         {
             warn!("Failed to send message with attachments: {}", e);
         }
-    } else {
-        // Send regular text message
-        if let Err(e) = channel.send_message(response).await {
-            warn!("Failed to send message: {}", e);
-        }
+    } else if let Err(e) = channel.send_message(response).await {
+        warn!("Failed to send message: {}", e);
     }
 
-    // Re-index memories in case Claude saved new ones
     reindex_user_memories(channel.name(), user_id);
 }
 
-// ============================================================================
-// Task Manager
-// ============================================================================
-
-/// Debounce duration for batching rapid messages
 const DEBOUNCE_MS: u64 = 200;
 
-/// Active task for a user
 struct ActiveTask {
     handle: JoinHandle<()>,
 }
@@ -477,9 +410,7 @@ impl UserTaskManager {
         })
     }
 
-    /// Process a message for a user.
-    /// If there's already a task running for this user, it will be aborted.
-    /// Messages are debounced - if more arrive within DEBOUNCE_MS, they're batched.
+    /// Queue a message for processing; aborts any in-flight task and batches within DEBOUNCE_MS.
     pub async fn process_message<F, Fut>(
         self: &Arc<Self>,
         user_key: String,
@@ -491,7 +422,6 @@ impl UserTaskManager {
     {
         debug!("Queueing message for {}: {}", user_key, message);
 
-        // Add message to pending queue
         {
             let mut pending = self.pending.lock().await;
             pending
@@ -502,21 +432,17 @@ impl UserTaskManager {
 
         let mut tasks = self.tasks.lock().await;
 
-        // If there's an existing task, abort it - we'll start fresh with all pending messages
         if let Some(existing) = tasks.remove(&user_key) {
             debug!("Aborting existing task for {}", user_key);
             existing.handle.abort();
         }
 
-        // Spawn new task with debounce
         let manager = Arc::clone(self);
         let user_key_clone = user_key.clone();
 
         let handle = tokio::spawn(async move {
-            // Debounce: wait a bit for more messages
             tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
 
-            // Collect all pending messages for this user
             let messages = {
                 let mut pending = manager.pending.lock().await;
                 pending.remove(&user_key_clone).unwrap_or_default()
@@ -532,10 +458,8 @@ impl UserTaskManager {
                 user_key_clone
             );
 
-            // Run the handler
             handler(messages).await;
 
-            // Clean up task entry
             manager.tasks.lock().await.remove(&user_key_clone);
         });
 
@@ -562,7 +486,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/usage", "Show your usage stats"),
 ];
 
-/// Process a command if the message is one.
 pub fn process_command(
     store: &mut PairingStore,
     channel: &str,
@@ -649,7 +572,6 @@ pub fn process_command(
         return Ok(CommandResult::Response(response));
     }
 
-    // Handle /cron commands
     if text.starts_with("/cron") {
         audit::log_event(
             "command_used",
@@ -677,7 +599,6 @@ fn extract_target_flag(input: &str) -> (Option<DeliveryTarget>, String) {
         let value_end = after_flag.find(' ').unwrap_or(after_flag.len());
         let target_value = &after_flag[..value_end];
 
-        // Build remaining text without the flag
         let before = input[..idx].trim();
         let after = if value_end < after_flag.len() {
             after_flag[value_end..].trim()
@@ -693,7 +614,6 @@ fn extract_target_flag(input: &str) -> (Option<DeliveryTarget>, String) {
     }
 }
 
-/// Process /cron subcommands
 fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<CommandResult> {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     let subcommand = parts.first().copied().unwrap_or("help");
@@ -836,8 +756,6 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
 
             let store = CronStore::load()?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
-
-            // Return special variant for async execution by the channel handler
             Ok(CommandResult::CronRun(job_id))
         }
 
@@ -937,14 +855,12 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
 }
 
 /// Execute a cron job manually and return the output.
-/// Shared by all channel handlers.
 pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Result<String> {
     let store = CronStore::load()?;
     let job = store
         .get(job_id, channel, user_id)
         .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
 
-    // Build context prompt so the job has access to skills, configs, etc.
     let channel_display = get_channel_info(channel).map(|c| c.display_name);
     let context_prompt = onboarding::build_context_prompt_for_user(
         channel_display,
@@ -974,7 +890,6 @@ pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Res
     Ok(format!("[Cron: {}]\n\n{}", job.name, tr.response))
 }
 
-/// Find a job ID by full ID or prefix match
 fn find_job_id(
     store: &CronStore,
     channel: &str,
@@ -983,12 +898,10 @@ fn find_job_id(
 ) -> Result<String> {
     let id = id_or_prefix.trim();
 
-    // First try exact match
     if store.get(id, channel, user_id).is_some() {
         return Ok(id.to_string());
     }
 
-    // Try prefix match
     let matches: Vec<_> = store
         .list_for_user(channel, user_id)
         .into_iter()
@@ -1010,10 +923,7 @@ fn find_job_id(
     }
 }
 
-/// Query AI backend with automatic session recovery.
-///
-/// If the session has expired, clears it and retries with a fresh conversation.
-/// Returns the response text and the new session ID.
+/// Query the AI backend; on session expiry, clears it and retries fresh.
 pub async fn query_ai_with_session(
     store: &mut PairingStore,
     channel: &str,
@@ -1095,7 +1005,6 @@ pub async fn query_ai_with_session(
         }
     };
 
-    // Save session ID for future messages
     if !qr.session_id.is_empty()
         && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&qr.session_id)
     {
@@ -1120,7 +1029,6 @@ pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> R
     Ok(qr.response)
 }
 
-/// Re-index memories for a user (called after Claude responds)
 pub fn reindex_user_memories(channel: &str, user_id: &str) {
     match MemoryIndex::open() {
         Ok(mut index) => {

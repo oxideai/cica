@@ -13,7 +13,6 @@ use tracing::{debug, info, warn};
 use crate::config;
 use crate::onboarding::user_dir;
 
-// Initialize sqlite-vec extension once
 static SQLITE_VEC_INIT: Once = Once::new();
 
 fn ensure_sqlite_vec_init() {
@@ -29,15 +28,12 @@ fn ensure_sqlite_vec_init() {
     });
 }
 
-// Embedding model - loaded lazily on first use
 static EMBEDDING_MODEL: Mutex<Option<fastembed::TextEmbedding>> = Mutex::new(None);
 
-/// Get the cache directory for embedding models
 fn embedding_cache_dir() -> Result<PathBuf> {
     Ok(config::paths()?.internal_dir.join("models"))
 }
 
-/// Get or initialize the embedding model
 fn with_embedding_model<F, R>(f: F) -> Result<R>
 where
     F: FnOnce(&mut fastembed::TextEmbedding) -> Result<R>,
@@ -72,7 +68,6 @@ pub fn ensure_model_downloaded() -> Result<()> {
     with_embedding_model(|_| Ok(()))
 }
 
-/// Get the path to the memory database
 fn memory_db_path() -> Result<PathBuf> {
     Ok(config::paths()?.base.join("memory.db"))
 }
@@ -93,19 +88,16 @@ pub struct MemoryIndex {
 impl MemoryIndex {
     /// Open or create the memory index database
     pub fn open() -> Result<Self> {
-        // Ensure sqlite-vec is registered
         ensure_sqlite_vec_init();
 
         let db_path = memory_db_path()?;
 
-        // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let db = Connection::open(&db_path)?;
 
-        // Create tables
         db.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS memory_files (
@@ -130,7 +122,6 @@ impl MemoryIndex {
             "#,
         )?;
 
-        // Check if vector table exists, create if not
         let has_vec_table: bool = db.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='memory_vectors'",
             [],
@@ -161,7 +152,6 @@ impl MemoryIndex {
             return Ok(());
         }
 
-        // List all .md files in memories directory
         let entries: Vec<_> = std::fs::read_dir(&memories_path)?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
@@ -175,7 +165,6 @@ impl MemoryIndex {
                 .to_string_lossy()
                 .to_string();
 
-            // Read file content
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -184,10 +173,8 @@ impl MemoryIndex {
                 }
             };
 
-            // Compute hash to check if file changed
             let hash = format!("{:x}", md5_hash(&content));
 
-            // Check if already indexed with same hash
             let existing_hash: Option<String> = self
                 .db
                 .query_row(
@@ -204,7 +191,6 @@ impl MemoryIndex {
 
             info!("Indexing memory file: {}", rel_path);
 
-            // Delete old entries if they exist
             self.db.execute(
                 r#"
                 DELETE FROM memory_vectors WHERE chunk_id IN (
@@ -231,7 +217,6 @@ impl MemoryIndex {
                 [channel, user_id, &rel_path],
             )?;
 
-            // Insert file record
             self.db.execute(
                 "INSERT INTO memory_files (channel, user_id, path, hash, updated_at) VALUES (?, ?, ?, ?, ?)",
                 rusqlite::params![
@@ -248,10 +233,7 @@ impl MemoryIndex {
 
             let file_id = self.db.last_insert_rowid();
 
-            // Chunk the content
             let chunks = chunk_text(&content);
-
-            // Generate embeddings for all chunks
             let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
             let embeddings = with_embedding_model(|model| {
                 model
@@ -259,7 +241,6 @@ impl MemoryIndex {
                     .context("Failed to generate embeddings")
             })?;
 
-            // Insert chunks and vectors
             for (i, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
                 self.db.execute(
                     "INSERT INTO memory_chunks (file_id, chunk_index, content, start_line, end_line) VALUES (?, ?, ?, ?, ?)",
@@ -267,8 +248,6 @@ impl MemoryIndex {
                 )?;
 
                 let chunk_id = self.db.last_insert_rowid();
-
-                // Convert embedding to bytes for sqlite-vec
                 let embedding_bytes = embedding_to_bytes(embedding);
 
                 self.db.execute(
@@ -291,7 +270,6 @@ impl MemoryIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        // Generate query embedding
         let query_bytes = with_embedding_model(|model| {
             let embeddings = model
                 .embed(vec![query.to_string()], None)
@@ -299,7 +277,6 @@ impl MemoryIndex {
             Ok(embedding_to_bytes(&embeddings[0]))
         })?;
 
-        // Search using sqlite-vec
         let mut stmt = self.db.prepare(
             r#"
             SELECT
@@ -370,7 +347,6 @@ fn chunk_text(content: &str) -> Vec<TextChunk> {
     let mut in_code_block = false;
 
     for (i, line) in lines.iter().enumerate() {
-        // Track code blocks
         if line.starts_with("```") {
             in_code_block = !in_code_block;
         }
@@ -418,7 +394,6 @@ fn chunk_text(content: &str) -> Vec<TextChunk> {
     chunks
 }
 
-/// Simple MD5 hash for content comparison
 fn md5_hash(content: &str) -> u128 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

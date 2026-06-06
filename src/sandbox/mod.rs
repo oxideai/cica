@@ -43,7 +43,6 @@ pub struct TurnJob {
     pub model: Option<String>,
 }
 
-/// Result of executing a `TurnJob`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
     pub response: String,
@@ -53,7 +52,6 @@ pub struct TurnResult {
     pub duration_ms: Option<u64>,
 }
 
-/// Where an agent turn executes.
 #[async_trait]
 pub trait SandboxProvider: Send + Sync {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult>;

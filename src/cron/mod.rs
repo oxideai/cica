@@ -38,7 +38,6 @@ impl Default for CronConfig {
     }
 }
 
-/// Type alias for the result sender callback.
 /// (channel, user_id, target, message) -> Result<()>
 pub type ResultSender = Arc<
     dyn Fn(
@@ -114,7 +113,6 @@ impl<C: Clock> CronService<C> {
                             }
                         }
 
-                        // Check for due jobs
                         let now = clock.now_millis();
                         let due_jobs = {
                             let store = store.lock().await;
@@ -273,7 +271,6 @@ async fn execute_job<C: Clock>(
         Some(&job.prompt),
     );
 
-    // Execute the AI backend prompt
     let result = match context_prompt {
         Ok(ctx) => {
             backends::query_with_options(
@@ -292,7 +289,6 @@ async fn execute_job<C: Clock>(
     let end_time = clock.now_millis();
     let duration_ms = end_time - start_time;
 
-    // Audit log
     let status_str = if result.is_ok() { "success" } else { "failed" };
     audit::log_event(
         "cron_executed",
@@ -304,7 +300,6 @@ async fn execute_job<C: Clock>(
         )),
     );
 
-    // Update job state
     {
         let mut store = store.lock().await;
         if let Some(stored_job) = store.get_mut(&job_id) {
@@ -322,7 +317,6 @@ async fn execute_job<C: Clock>(
                 }
             }
 
-            // Calculate next run time (for recurring jobs)
             stored_job.update_next_run(end_time);
 
             // For one-shot At jobs that have completed, disable them
@@ -334,7 +328,6 @@ async fn execute_job<C: Clock>(
         let _ = store.save();
     }
 
-    // Send result to user if notify is enabled
     if job.notify {
         let message = match result {
             Ok(QueryResult { response, .. }) => {

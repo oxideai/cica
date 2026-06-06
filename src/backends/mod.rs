@@ -37,7 +37,6 @@ fn fake_result(prompt: &str) -> QueryResult {
     }
 }
 
-/// Query the configured AI backend.
 pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
     // Test hook: a deterministic response without invoking the real backend CLI.
     // Inert unless `CICA_FAKE_BACKEND` is set (used only by the Docker CI test).

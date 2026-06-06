@@ -234,7 +234,6 @@ async fn ensure_keychain(cursor_home: &Path) -> Result<()> {
 
     std::fs::create_dir_all(&keychain_dir)?;
 
-    // Create keychain if it doesn't exist
     if !keychain_path.exists() {
         debug!("Creating sandboxed keychain at {:?}", keychain_path);
         let output = std::process::Command::new("security")
@@ -255,7 +254,6 @@ async fn ensure_keychain(cursor_home: &Path) -> Result<()> {
         }
     }
 
-    // Unlock the keychain
     debug!("Unlocking sandboxed keychain");
     let output = std::process::Command::new("security")
         .args([
@@ -271,7 +269,6 @@ async fn ensure_keychain(cursor_home: &Path) -> Result<()> {
         warn!("Failed to unlock keychain: {}", stderr);
     }
 
-    // Set keychain settings to not auto-lock
     let _ = std::process::Command::new("security")
         .args(["set-keychain-settings", keychain_path.to_str().unwrap()])
         .output();

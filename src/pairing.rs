@@ -68,7 +68,6 @@ impl PairingStore {
     pub fn save(&self) -> Result<()> {
         let paths = config::paths()?;
 
-        // Ensure directory exists
         if let Some(parent) = paths.pairing_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -107,7 +106,6 @@ impl PairingStore {
     ) -> Result<(String, bool)> {
         self.prune_expired();
 
-        // Check if already has pending request
         if let Some(existing) = self
             .pending
             .iter()
@@ -116,7 +114,6 @@ impl PairingStore {
             return Ok((existing.code.clone(), false));
         }
 
-        // Generate new code
         let code = generate_unique_code(&self.pending)?;
 
         let request = PendingRequest {
@@ -148,7 +145,6 @@ impl PairingStore {
 
         let code_upper = code.to_uppercase();
 
-        // Find the pending request
         let idx = self
             .pending
             .iter()
@@ -157,7 +153,6 @@ impl PairingStore {
 
         let request = self.pending.remove(idx);
 
-        // Add to approved list
         self.approved
             .entry(request.channel.clone())
             .or_default()
@@ -228,7 +223,6 @@ impl PairingStore {
             return Ok(session_id.clone());
         }
 
-        // Generate a new UUID for the session
         let session_id = generate_uuid();
         self.sessions.insert(key, session_id.clone());
         self.save()?;
@@ -334,7 +328,6 @@ impl SimpleRng {
     }
 }
 
-/// Get current unix timestamp
 fn now_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

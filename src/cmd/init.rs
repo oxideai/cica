@@ -15,7 +15,6 @@ pub async fn run() -> Result<()> {
     println!("Welcome to Cica!");
     println!();
 
-    // Check if already configured
     if paths.config_file.exists() {
         let config = Config::load()?;
         let configured = config.configured_channels();
@@ -66,7 +65,6 @@ pub async fn run() -> Result<()> {
             } else if selected == "Switch active AI backend" {
                 return switch_ai_backend(config).await;
             } else if selected == "Reconfigure from scratch" {
-                // fall through to fresh setup
             } else {
                 println!("Cancelled.");
                 return Ok(());
@@ -74,23 +72,17 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Fresh setup
     paths.ensure_dirs()?;
     full_setup().await
 }
 
-/// Full setup wizard for first-time users
 async fn full_setup() -> Result<()> {
-    // Step 1: Channel
     let config = add_channel(None).await?;
-
-    // Step 2: AI Backend
     setup_ai_backend(Some(config)).await?;
 
     Ok(())
 }
 
-/// Set up AI backend (Claude Code or Cursor CLI)
 async fn setup_ai_backend(existing_config: Option<Config>) -> Result<()> {
     println!();
     println!("AI Backend Setup");
@@ -165,7 +157,6 @@ async fn pick_backend(existing_config: Option<Config>) -> Result<()> {
     }
 }
 
-/// Change the model for the active backend
 async fn change_model(mut config: Config) -> Result<()> {
     let (backend_name, current_model) = match config.backend {
         AiBackend::Claude => ("Claude Code", config.claude.model.as_deref()),
@@ -217,7 +208,6 @@ async fn change_model(mut config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Switch between configured AI backends
 async fn switch_ai_backend(mut config: Config) -> Result<()> {
     println!();
     println!("Switch AI Backend");
@@ -264,9 +254,7 @@ async fn switch_ai_backend(mut config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Add a channel to the configuration
 async fn add_channel(existing_config: Option<Config>) -> Result<Config> {
-    // For now, only Telegram is supported
     let channel_choices: Vec<&str> = channels::SUPPORTED_CHANNELS
         .iter()
         .map(|c| c.display_name)
@@ -288,7 +276,6 @@ async fn add_channel(existing_config: Option<Config>) -> Result<Config> {
     }
 }
 
-/// Set up Telegram
 async fn setup_telegram(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Telegram Setup");
@@ -316,7 +303,6 @@ async fn setup_telegram(existing_config: Option<Config>) -> Result<Config> {
         }
     }
 
-    // Build config
     let mut config = existing_config.unwrap_or_default();
     config.channels.telegram = Some(TelegramConfig::new(token));
     config.save()?;
@@ -325,14 +311,12 @@ async fn setup_telegram(existing_config: Option<Config>) -> Result<Config> {
     Ok(config)
 }
 
-/// Set up Signal
 async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Signal Setup");
     println!("────────────");
     println!();
 
-    // Download dependencies if needed
     if setup::find_java().is_none() || setup::find_signal_cli().is_none() {
         print!("Setting up Signal runtime... ");
         std::io::Write::flush(&mut std::io::stdout())?;
@@ -342,7 +326,6 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
         println!();
     }
 
-    // Offer choice between linking and registering
     let choices = vec![
         "Link to existing Signal account (if you have Signal on your phone)",
         "Register a new phone number",
@@ -358,18 +341,15 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
         return link_signal_device(existing_config).await;
     }
 
-    // Registration flow
     println!();
     println!("Signal requires a phone number that can receive SMS.");
     println!("You'll need to verify it with a code sent via text message.");
     println!();
 
-    // Get phone number
     let phone_number: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Phone number (with country code, e.g., +1234567890)")
         .interact_text()?;
 
-    // Validate format
     if !phone_number.starts_with('+') {
         bail!("Phone number must start with + and country code (e.g., +1 for US)");
     }
@@ -377,7 +357,6 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Registering with Signal...");
 
-    // Try registration, handle CAPTCHA if needed
     let mut captcha: Option<String> = None;
     let mut use_voice = false;
     loop {
@@ -431,11 +410,9 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
             signal::RegistrationResult::AuthorizationFailed => {
                 println!();
                 if use_voice {
-                    // Already tried voice, show other options
                     println!("Authorization failed with voice verification too.");
                     println!("This number may be blocked or unsupported by Signal.");
                 } else {
-                    // Offer voice verification as an option
                     println!("SMS verification failed (common with some carriers).");
                 }
                 println!();
@@ -468,7 +445,6 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
                     }
                     println!("\rRequesting voice call...               ");
                     use_voice = true;
-                    // Keep the captcha - voice verification still needs it
                     continue;
                 } else if choice.starts_with("Link as") {
                     return link_signal_device(existing_config).await;
@@ -506,7 +482,6 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
                     continue;
                 }
 
-                // Debug: show what we're using
                 println!("Token starts with: {}...", &token[..token.len().min(60)]);
 
                 captcha = Some(token);
@@ -518,12 +493,10 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
 
     println!();
 
-    // Get verification code
     let code: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Enter the verification code from SMS")
         .interact_text()?;
 
-    // Remove any spaces/dashes from the code
     let code = code.replace([' ', '-'], "");
 
     print!("Verifying... ");
@@ -537,7 +510,6 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
         }
     }
 
-    // Build config
     let mut config = existing_config.unwrap_or_default();
     config.channels.signal = Some(SignalConfig::new(phone_number.clone()));
     config.save()?;
@@ -549,12 +521,10 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
     Ok(config)
 }
 
-/// Helper to retry Signal setup with a specific phone number
 async fn setup_signal_with_number(
     existing_config: Option<Config>,
     phone_number: &str,
 ) -> Result<Config> {
-    // Validate format
     if !phone_number.starts_with('+') {
         bail!("Phone number must start with + and country code (e.g., +1 for US)");
     }
@@ -647,7 +617,6 @@ async fn setup_signal_with_number(
     Ok(config)
 }
 
-/// Link signal-cli as a secondary device to an existing Signal account
 async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Link as Secondary Device");
@@ -671,7 +640,6 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
 
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    // Run signal-cli link command and capture output line by line
     let mut child = tokio::process::Command::new(&signal_cli)
         .args([
             "--config",
@@ -701,7 +669,6 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
 
     let mut link_url = None;
 
-    // Read output looking for the link URL
     loop {
         tokio::select! {
             line = stdout_reader.next_line() => {
@@ -736,11 +703,11 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
                             println!("In Signal app: Settings → Linked Devices → Link New Device");
                             println!();
                             println!("Waiting for you to scan...");
-                        } else if text.contains("error") || text.contains("Error") {
-                            // Only print actual errors, not debug output
-                            if !text.contains("DEBUG") && !text.contains("INFO") {
-                                println!("{}", text);
-                            }
+                        } else if (text.contains("error") || text.contains("Error"))
+                            && !text.contains("DEBUG")
+                            && !text.contains("INFO")
+                        {
+                            println!("{}", text);
                         }
                     }
                     Ok(None) => break,
@@ -764,8 +731,6 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Link successful!");
 
-    // After linking, we need to find the account number
-    // List accounts to get the linked number
     let output = tokio::process::Command::new(&signal_cli)
         .args([
             "--config",
@@ -786,7 +751,6 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Find phone number in output (format: +1234567890)
     let phone_number = stdout
         .lines()
         .find_map(|line| {
@@ -797,12 +761,9 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
 
     let phone_number = match phone_number {
         Some(num) => num,
-        None => {
-            // Ask user to provide the number
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Enter the phone number of the linked account")
-                .interact_text()?
-        }
+        None => Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter the phone number of the linked account")
+            .interact_text()?,
     };
 
     let mut config = existing_config.unwrap_or_default();
@@ -815,7 +776,6 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
     Ok(config)
 }
 
-/// Set up Slack
 async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
     println!();
     println!("Slack Setup");
@@ -854,12 +814,10 @@ async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
     println!("5. Install the app to your workspace");
     println!();
 
-    // Get Bot Token
     let bot_token: String = Password::with_theme(&ColorfulTheme::default())
         .with_prompt("Paste your Bot Token (xoxb-...)")
         .interact()?;
 
-    // Get App Token
     let app_token: String = Password::with_theme(&ColorfulTheme::default())
         .with_prompt("Paste your App Token (xapp-...)")
         .interact()?;
@@ -878,7 +836,6 @@ async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
         }
     }
 
-    // Build config
     let mut config = existing_config.unwrap_or_default();
     config.channels.slack = Some(SlackConfig::new(bot_token, app_token));
     config.save()?;
@@ -887,13 +844,11 @@ async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
     Ok(config)
 }
 
-/// Set up Claude (Bun + Claude Code + API key)
 async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
     println!();
     println!("Claude Setup");
     println!("────────────");
 
-    // Ensure runtime dependencies are available
     if setup::find_bun().is_none() || setup::find_claude_code().is_none() {
         println!();
         print!("Setting up runtime... ");
@@ -906,7 +861,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         println!("done");
     }
 
-    // Check for existing env token first
     if let Some(env_token) = setup::get_env_oauth_token() {
         println!();
         print!("Found OAuth token in environment, validating... ");
@@ -916,7 +870,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
             Ok(()) => {
                 println!("OK");
 
-                // Save config
                 let mut config = existing_config.unwrap_or_default();
                 config.claude.api_key = Some(env_token);
                 config.save()?;
@@ -939,7 +892,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         }
     }
 
-    // Choose provider: Anthropic vs Google Vertex AI
     println!();
     println!("Claude Code can use Anthropic directly or Google Vertex AI (GCP).");
     println!();
@@ -959,7 +911,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
     let was_using_cursor = config.backend == AiBackend::Cursor && config.is_cursor_configured();
 
     if provider_selection == 1 {
-        // Vertex AI setup
         let paths = config::paths()?;
         println!();
         println!("Vertex AI Setup");
@@ -1048,7 +999,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         };
         config.claude.vertex_credentials_path = vertex_credentials_path;
     } else {
-        // Anthropic setup
         println!();
         println!("Cica uses Claude Code, which can be billed through your Claude");
         println!("subscription or based on API usage through your Console account.");
@@ -1113,7 +1063,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         config.claude.vertex_credentials_path = None;
     }
 
-    // Model selection
     println!();
     config.claude.model = select_model(
         "Claude Code",
@@ -1121,7 +1070,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
         config.claude.model.as_deref(),
     )?;
 
-    // Ask whether to switch if another backend was active
     if was_using_cursor {
         println!();
         let switch = Select::with_theme(&ColorfulTheme::default())
@@ -1160,7 +1108,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
     Ok(())
 }
 
-/// Interactive model picker shared across backends.
 fn select_model<S: AsRef<str>>(
     backend_name: &str,
     models: &[(S, S)],
@@ -1229,13 +1176,11 @@ fn select_model<S: AsRef<str>>(
     }
 }
 
-/// Set up Cursor CLI
 async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
     println!();
     println!("Cursor CLI Setup");
     println!("────────────────");
 
-    // Ensure runtime dependencies are available
     if setup::find_cursor_cli().is_none() || setup::find_bun().is_none() {
         println!();
         print!("Setting up runtime... ");
@@ -1248,7 +1193,6 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
         println!("done");
     }
 
-    // Get API key
     println!();
     println!("Cursor CLI requires an API key for authentication.");
     println!();
@@ -1275,7 +1219,6 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
         }
     }
 
-    // Model selection
     println!();
     print!("Fetching available models... ");
     std::io::Write::flush(&mut std::io::stdout())?;
@@ -1284,13 +1227,11 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
     println!();
     let model = select_model("Cursor CLI", &cursor_models, None)?;
 
-    // Save config
     let mut config = existing_config.unwrap_or_default();
     let was_using_claude = config.backend == AiBackend::Claude && config.is_claude_configured();
     config.cursor.api_key = Some(api_key);
     config.cursor.model = model;
 
-    // Ask whether to switch if another backend was active
     if was_using_claude {
         println!();
         let switch = Select::with_theme(&ColorfulTheme::default())

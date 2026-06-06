@@ -17,7 +17,6 @@ const CLAUDE_CODE_VERSION: &str = "2.1.32";
 
 const VERSION_FILE: &str = ".version";
 
-/// Read the installed version from a dependency directory
 fn read_installed_version(dep_dir: &Path) -> Option<String> {
     std::fs::read_to_string(dep_dir.join(VERSION_FILE))
         .ok()
@@ -25,13 +24,11 @@ fn read_installed_version(dep_dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Write the installed version marker to a dependency directory
 fn write_installed_version(dep_dir: &Path, version: &str) -> Result<()> {
     std::fs::write(dep_dir.join(VERSION_FILE), version)?;
     Ok(())
 }
 
-/// Check if the installed version matches the expected version
 fn needs_update(dep_dir: &Path, expected: &str) -> bool {
     read_installed_version(dep_dir).as_deref() != Some(expected)
 }
@@ -64,12 +61,10 @@ fn bun_download_url() -> Result<String> {
 
 /// Check if Bun is available (either system or bundled)
 pub fn find_bun() -> Option<PathBuf> {
-    // Check system bun first
     if let Ok(path) = which::which("bun") {
         return Some(path);
     }
 
-    // Check our bundled bun
     if let Ok(paths) = config::paths() {
         let bundled = paths.bun_dir.join("bun");
         if bundled.exists() {
@@ -80,7 +75,6 @@ pub fn find_bun() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Bun is available and at the expected version
 pub async fn ensure_bun() -> Result<PathBuf> {
     let paths = config::paths()?;
 
@@ -110,9 +104,7 @@ pub async fn ensure_bun() -> Result<PathBuf> {
     Ok(bun_path)
 }
 
-/// Download and extract Bun from a zip file (async)
 async fn download_and_extract_bun(url: &str, dest_dir: &Path) -> Result<()> {
-    // Download to memory
     let response = reqwest::get(url)
         .await
         .with_context(|| format!("Failed to download Bun from {}", url))?;
@@ -123,11 +115,9 @@ async fn download_and_extract_bun(url: &str, dest_dir: &Path) -> Result<()> {
 
     let bytes = response.bytes().await?;
 
-    // Extract zip (sync, but on the downloaded bytes)
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)?;
 
-    // Find the bun binary in the archive (it's usually in a subdirectory)
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let name = file.name();
@@ -143,7 +133,6 @@ async fn download_and_extract_bun(url: &str, dest_dir: &Path) -> Result<()> {
     bail!("Could not find bun binary in archive")
 }
 
-/// Check if Claude Code is installed
 pub fn find_claude_code() -> Option<PathBuf> {
     if let Ok(paths) = config::paths() {
         let entry = paths
@@ -157,7 +146,6 @@ pub fn find_claude_code() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Claude Code is available and at the expected version
 pub async fn ensure_claude_code() -> Result<PathBuf> {
     if find_claude_code().is_some()
         && !needs_update(&config::paths()?.claude_code_dir, CLAUDE_CODE_VERSION)
@@ -192,14 +180,12 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
     find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))
 }
 
-/// The type of credential
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialType {
     ApiKey,
     OAuthToken,
 }
 
-/// Detect the type of credential from its prefix
 pub fn detect_credential_type(credential: &str) -> CredentialType {
     if credential.starts_with("sk-ant-oat") {
         CredentialType::OAuthToken
@@ -208,17 +194,14 @@ pub fn detect_credential_type(credential: &str) -> CredentialType {
     }
 }
 
-/// Check if an OAuth token is set in environment
 pub fn get_env_oauth_token() -> Option<String> {
     std::env::var("ANTHROPIC_OAUTH_TOKEN")
         .or_else(|_| std::env::var("CLAUDE_CODE_OAUTH_TOKEN"))
         .ok()
 }
 
-/// Minimum length for a valid setup token
 const SETUP_TOKEN_MIN_LENGTH: usize = 80;
 
-/// Validate a credential (API key or OAuth token)
 pub async fn validate_credential(credential: &str) -> Result<()> {
     match detect_credential_type(credential) {
         CredentialType::ApiKey => validate_api_key(credential).await,
@@ -226,7 +209,6 @@ pub async fn validate_credential(credential: &str) -> Result<()> {
     }
 }
 
-/// Validate an Anthropic API key
 async fn validate_api_key(api_key: &str) -> Result<()> {
     let client = reqwest::Client::new();
 
@@ -275,7 +257,6 @@ const JAVA_VERSION: &str = "21";
 const SIGNAL_CLI_VERSION: &str = "0.13.22";
 
 fn java_download_url() -> Result<&'static str> {
-    // Eclipse Temurin JRE 21 from Adoptium
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok(
             "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jre/hotspot/normal/eclipse",
@@ -300,7 +281,7 @@ fn signal_cli_download_url() -> String {
     )
 }
 
-/// Check if Java is available (bundled only - we don't use system Java)
+/// Bundled only — we don't use system Java.
 pub fn find_java() -> Option<PathBuf> {
     let paths = config::paths().ok()?;
     let entries = std::fs::read_dir(&paths.java_dir).ok()?;
@@ -322,7 +303,6 @@ pub fn find_java() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Java is available and at the expected version
 pub async fn ensure_java() -> Result<PathBuf> {
     let paths = config::paths()?;
 
@@ -345,10 +325,8 @@ pub async fn ensure_java() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("Java installation failed - binary not found after extraction"))
 }
 
-/// Check if signal-cli is available
 pub fn find_signal_cli() -> Option<PathBuf> {
     if let Ok(paths) = config::paths() {
-        // Look for signal-cli script
         let direct = paths.signal_cli_dir.join("bin").join("signal-cli");
         if direct.exists() {
             return Some(direct);
@@ -368,7 +346,6 @@ pub fn find_signal_cli() -> Option<PathBuf> {
     None
 }
 
-/// Ensure signal-cli is available and at the expected version
 pub async fn ensure_signal_cli() -> Result<PathBuf> {
     let paths = config::paths()?;
 
@@ -392,7 +369,6 @@ pub async fn ensure_signal_cli() -> Result<PathBuf> {
     })
 }
 
-/// Download and extract a tarball (.tar.gz)
 async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
     use tar::Archive;
@@ -407,7 +383,6 @@ async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> 
 
     let bytes = response.bytes().await?;
 
-    // Extract tarball
     let cursor = std::io::Cursor::new(bytes);
     let gz = GzDecoder::new(cursor);
     let mut archive = Archive::new(gz);
@@ -420,12 +395,9 @@ async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> 
 // Cursor CLI
 // ============================================================================
 
-/// Cursor CLI version to download
 const CURSOR_CLI_VERSION: &str = "2026.01.28-fd13201";
 
-/// Check if Cursor CLI is available
 pub fn find_cursor_cli() -> Option<PathBuf> {
-    // Check our bundled cursor-cli first
     if let Ok(paths) = config::paths() {
         let bundled = paths.cursor_cli_dir.join("cursor-agent");
         if bundled.exists() {
@@ -433,7 +405,6 @@ pub fn find_cursor_cli() -> Option<PathBuf> {
         }
     }
 
-    // Check system agent (user might have installed it globally)
     // Cursor installs as both "agent" and "cursor-agent"
     if let Ok(path) = which::which("cursor-agent") {
         return Some(path);
@@ -445,7 +416,6 @@ pub fn find_cursor_cli() -> Option<PathBuf> {
     None
 }
 
-/// Ensure Cursor CLI is available and at the expected version
 pub async fn ensure_cursor_cli() -> Result<PathBuf> {
     let paths = config::paths()?;
 
@@ -467,7 +437,6 @@ pub async fn ensure_cursor_cli() -> Result<PathBuf> {
     find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI installation failed"))
 }
 
-/// Download and extract Cursor CLI from tarball
 async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
     use tar::Archive;
@@ -484,18 +453,15 @@ async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
 
     let bytes = response.bytes().await?;
 
-    // Extract tarball with --strip-components=1 equivalent
-    // The tarball contains dist-package/cursor-agent, we want cursor-agent directly
+    // Strip the leading dist-package/ component (--strip-components=1 equivalent).
     let cursor = std::io::Cursor::new(bytes);
     let gz = GzDecoder::new(cursor);
     let mut archive = Archive::new(gz);
 
-    // Extract entries, stripping the first path component (dist-package/)
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
 
-        // Strip first component (dist-package/)
         let stripped: PathBuf = path.components().skip(1).collect();
         if stripped.as_os_str().is_empty() {
             continue;
@@ -503,19 +469,15 @@ async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
 
         let dest_path = dest_dir.join(&stripped);
 
-        // Create parent directories if needed
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Unpack the entry
         entry.unpack(&dest_path)?;
     }
 
-    // The binary should be at dest_dir/cursor-agent after extraction
     let agent_path = dest_dir.join("cursor-agent");
 
-    // Make executable
     #[cfg(unix)]
     if agent_path.exists() {
         use std::os::unix::fs::PermissionsExt;
@@ -529,9 +491,7 @@ async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Get the Cursor CLI download URL for the current platform
 fn cursor_cli_download_url() -> Result<String> {
-    // URL pattern: https://downloads.cursor.com/lab/{VERSION}/{OS}/{ARCH}/agent-cli-package.tar.gz
     let (os, arch) = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => ("darwin", "arm64"),
         ("macos", "x86_64") => ("darwin", "x64"),
@@ -617,20 +577,12 @@ pub async fn validate_vertex_config(
     }
 }
 
-/// Validate a Cursor API key by making a test request
+/// Validates format only — real auth is checked on first use.
 pub async fn validate_cursor_api_key(api_key: &str) -> Result<()> {
-    // Cursor uses their own API - we can try to list models to validate
-    // For now, just do basic format validation
     let trimmed = api_key.trim();
-
     if trimmed.is_empty() {
         bail!("API key cannot be empty");
     }
-
-    // Cursor API keys typically have a specific format
-    // For now, accept any non-empty string since we don't know the exact format
-    // The real validation will happen when we try to use it
-
     Ok(())
 }
 
@@ -638,7 +590,6 @@ pub async fn validate_cursor_api_key(api_key: &str) -> Result<()> {
 // Embedding Model (for memory search)
 // ============================================================================
 
-/// Ensure the embedding model is downloaded
 pub fn ensure_embedding_model() -> Result<()> {
     memory::ensure_model_downloaded()
 }
@@ -648,7 +599,6 @@ pub fn ensure_embedding_model() -> Result<()> {
 // ============================================================================
 
 /// Ensure all dependencies for the active backend are installed and up to date.
-/// Called on `cica run` startup.
 pub async fn ensure_deps(config: &crate::config::Config) -> Result<()> {
     use crate::config::AiBackend;
 
@@ -682,7 +632,6 @@ pub fn ensure_skill_deps(skill_dir: &Path) {
         return;
     }
 
-    // Check if package.json actually has dependencies
     if let Ok(content) = std::fs::read_to_string(&pkg_json) {
         let has_deps =
             content.contains("\"dependencies\"") && !content.contains("\"dependencies\": {}");

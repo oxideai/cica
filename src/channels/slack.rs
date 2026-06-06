@@ -15,11 +15,6 @@ use crate::config::{self, SlackConfig};
 use crate::pairing::PairingStore;
 use crate::skills;
 
-// ============================================================================
-// File/Image Handling
-// ============================================================================
-
-/// Get the directory where Slack attachments are stored
 fn get_slack_attachments_dir() -> Result<PathBuf> {
     let paths = config::paths()?;
     let dir = paths.internal_dir.join("slack_attachments");
@@ -27,8 +22,6 @@ fn get_slack_attachments_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Download a file from Slack and save it locally
-/// Requires the bot token for authentication
 async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBuf> {
     let url = file
         .url_private_download
@@ -42,13 +35,11 @@ async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBu
     let attachments_dir = get_slack_attachments_dir()?;
     let local_path = attachments_dir.join(format!("{}_{}", file_id, file_name));
 
-    // Skip download if file already exists
     if local_path.exists() {
         debug!("File already downloaded: {:?}", local_path);
         return Ok(local_path);
     }
 
-    // Download with authorization header
     let client = reqwest::Client::new();
     let response = client
         .get(url.as_str())
@@ -67,7 +58,6 @@ async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBu
     Ok(local_path)
 }
 
-/// Check if a file is an image based on mimetype
 fn is_image_file(file: &SlackFile) -> bool {
     file.mimetype
         .as_ref()
@@ -75,7 +65,6 @@ fn is_image_file(file: &SlackFile) -> bool {
         .unwrap_or(false)
 }
 
-/// Set suggested prompts for a new thread based on available skills
 async fn set_suggested_prompts(
     client: &Arc<SlackHyperClient>,
     token: &SlackApiToken,
@@ -84,19 +73,16 @@ async fn set_suggested_prompts(
 ) {
     let session = client.open_session(token);
 
-    // Build prompts from available skills (up to 4, Slack's limit)
+    // Build prompts from available skills (up to 4, Slack's limit).
     let mut prompts = Vec::new();
 
-    // Add a default "What can you do?" prompt
     prompts.push(SlackAssistantPrompt::new(
         "What can you help me with?".to_string(),
         "What can you help me with?".to_string(),
     ));
 
-    // Add skills as prompts using their descriptions
     if let Ok(available_skills) = skills::discover_skills() {
         for skill in available_skills.iter().take(3) {
-            // Leave room for default prompt
             prompts.push(SlackAssistantPrompt::new(
                 skill.description.clone(),
                 skill.description.clone(),
@@ -118,39 +104,24 @@ async fn set_suggested_prompts(
     }
 }
 
-// ============================================================================
-// Markdown to Slack mrkdwn conversion
-// ============================================================================
-
-/// Convert standard Markdown to Slack's mrkdwn format
+/// Convert standard Markdown to Slack's mrkdwn format.
 pub fn markdown_to_mrkdwn(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Convert bold: **text** -> *text*
-    // Be careful not to convert already-correct single asterisks
-    // Use a simple approach: replace ** with a placeholder, then convert
+    // Convert bold: **text** -> *text* via placeholder to avoid clobbering single asterisks.
     result = result.replace("**", "\x00BOLD\x00");
     result = result.replace("\x00BOLD\x00", "*");
 
-    // Convert italic: *text* -> _text_ (but only single asterisks not part of bold)
-    // This is tricky because * is used for bold in mrkdwn
-    // Skip this for now as it can conflict with bullet points
+    // Italic (*text* -> _text_) is intentionally skipped: conflicts with bullet points.
 
     // Convert links: [text](url) -> <url|text>
     let link_re = regex_lite::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap();
     result = link_re.replace_all(&result, "<$2|$1>").to_string();
 
-    // Convert inline code: `code` stays the same in Slack
-    // Convert code blocks: ```code``` stays the same in Slack
-
     result
 }
 
-// ============================================================================
-// Channel Implementation
-// ============================================================================
-
-/// Slack channel implementation for AI Assistant threads
+/// Slack channel implementation for AI Assistant threads.
 pub struct SlackChannel {
     client: Arc<SlackHyperClient>,
     token: SlackApiToken,
@@ -200,7 +171,7 @@ impl Channel for SlackChannel {
         // Convert markdown to Slack's mrkdwn format
         let mrkdwn_message = markdown_to_mrkdwn(message);
 
-        // Build request with thread_ts if available (required for AI Assistant apps)
+        // thread_ts is required for AI Assistant apps to reply in the correct thread.
         let mut request = SlackApiChatPostMessageRequest::new(
             self.channel_id.clone(),
             SlackMessageContent::new().with_text(mrkdwn_message),
@@ -208,7 +179,6 @@ impl Channel for SlackChannel {
         .with_unfurl_links(self.unfurl_links)
         .with_unfurl_media(self.unfurl_links);
 
-        // Reply in the thread if we have a thread_ts
         if let Some(ts) = &self.thread_ts {
             request = request.with_thread_ts(ts.clone());
         }
@@ -232,7 +202,6 @@ impl Channel for SlackChannel {
         message: &str,
         attachment_paths: &[PathBuf],
     ) -> Result<()> {
-        // If no attachments, just send the text message
         if attachment_paths.is_empty() {
             return self.send_message(message).await;
         }
@@ -310,15 +279,13 @@ impl Channel for SlackChannel {
     }
 
     fn start_typing(&self) -> TypingGuard {
-        // For Slack AI assistants, we use assistant.threads.setStatus
-        // to show a "thinking" indicator
+        // Uses assistant.threads.setStatus to show a "thinking" indicator.
         if let Some(thread_ts) = &self.thread_ts {
             let client = self.client.clone();
             let token = self.token.clone();
             let channel_id = self.channel_id.clone();
             let thread_ts = thread_ts.clone();
 
-            // Set the status to show we're working
             let client_clone = client.clone();
             let token_clone = token.clone();
             let channel_id_clone = channel_id.clone();
@@ -336,16 +303,10 @@ impl Channel for SlackChannel {
                 }
             });
 
-            // Return a guard that will clear the status when dropped
-            // We use a custom approach since TypingGuard expects a oneshot channel
             let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
-            // Spawn a task that clears status when cancelled
             tokio::spawn(async move {
-                // Wait for the guard to be dropped
                 let _ = cancel_rx.await;
-
-                // Clear the status
                 let session = client.open_session(&token);
                 let request = SlackApiAssistantThreadsSetStatusRequest::new(
                     channel_id,
@@ -362,11 +323,7 @@ impl Channel for SlackChannel {
     }
 }
 
-// ============================================================================
-// User State for Socket Mode
-// ============================================================================
-
-/// State passed to socket mode event handlers
+/// State passed to socket mode event handlers.
 #[derive(Clone)]
 struct SlackUserState {
     bot_token: SlackApiToken,
@@ -381,14 +338,8 @@ struct SlackUserState {
     unfurl_links: bool,
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Validate Slack credentials by calling auth.test
-/// Returns the bot user ID on success
+/// Validate Slack credentials by calling auth.test; returns the bot user ID on success.
 pub async fn validate_credentials(bot_token: &str, app_token: &str) -> Result<String> {
-    // Ensure rustls crypto provider is installed
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Validate bot token
@@ -407,9 +358,8 @@ pub async fn validate_credentials(bot_token: &str, app_token: &str) -> Result<St
     Ok(bot_user_id)
 }
 
-/// Run the Slack bot using Socket Mode
+/// Run the Slack bot using Socket Mode.
 pub async fn run(config: SlackConfig) -> Result<()> {
-    // Ensure rustls crypto provider is installed
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     info!("Starting Slack bot...");
@@ -418,16 +368,13 @@ pub async fn run(config: SlackConfig) -> Result<()> {
     let bot_token = SlackApiToken::new(config.bot_token.clone().into());
     let app_token = SlackApiToken::new(config.app_token.clone().into());
 
-    // Get bot user ID to filter out own messages
     let session = client.open_session(&bot_token);
     let auth_response = session.auth_test().await?;
     let bot_user_id = auth_response.user_id.clone();
     info!("Connected as bot user: {}", bot_user_id);
 
-    // Create shared task manager for per-user message handling
     let task_manager = UserTaskManager::new();
 
-    // Create user state
     let user_state = SlackUserState {
         bot_token: bot_token.clone(),
         bot_token_str: config.bot_token.clone(),
@@ -437,7 +384,6 @@ pub async fn run(config: SlackConfig) -> Result<()> {
         unfurl_links: config.unfurl_links,
     };
 
-    // Set up Socket Mode client with callbacks
     let socket_mode_callbacks = SlackSocketModeListenerCallbacks::new()
         .with_push_events(handle_push_events)
         .with_interaction_events(handle_interaction_events)
@@ -459,10 +405,6 @@ pub async fn run(config: SlackConfig) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Event Handlers
-// ============================================================================
-
 async fn handle_push_events(
     event: SlackPushEventCallback,
     client: Arc<SlackHyperClient>,
@@ -472,14 +414,12 @@ async fn handle_push_events(
 
     match event {
         SlackEventCallbackBody::Message(msg_event) => {
-            // Get user state
             let states = user_state_storage.read().await;
             let user_state = states
                 .get_user_state::<SlackUserState>()
                 .ok_or("Missing user state")?;
 
-            // Spawn message handling in background so we ack the event immediately
-            // This prevents Slack from retrying delivery
+            // Spawn in background so we ack the event immediately and prevent Slack retries.
             let state = user_state.clone();
 
             tokio::spawn(async move {
@@ -489,7 +429,6 @@ async fn handle_push_events(
             });
         }
         SlackEventCallbackBody::AssistantThreadStarted(thread_event) => {
-            // User opened the assistant - send suggested prompts immediately
             let states = user_state_storage.read().await;
             let user_state = states
                 .get_user_state::<SlackUserState>()
@@ -508,7 +447,6 @@ async fn handle_push_events(
             let user_state = states
                 .get_user_state::<SlackUserState>()
                 .ok_or("Missing user state")?;
-
             let state = user_state.clone();
 
             tokio::spawn(async move {
@@ -530,30 +468,25 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     state: SlackUserState,
 ) -> Result<()> {
-    // Skip messages from bots (including ourselves)
     if event.sender.bot_id.is_some() {
         return Ok(());
     }
 
-    // Get user ID - skip if none
     let user_id = match &event.sender.user {
         Some(id) => id.clone(),
         None => return Ok(()),
     };
 
-    // Skip own messages
     if user_id == state.bot_user_id {
         return Ok(());
     }
 
-    // Get channel ID
     let channel_id = match &event.origin.channel {
         Some(id) => id.clone(),
         None => return Ok(()),
     };
 
-    // Only process DMs here. Channel messages (including thread replies)
-    // require an @mention and are handled by handle_app_mention_event.
+    // Only process DMs here; channel messages require an @mention (handle_app_mention_event).
     let channel_str = channel_id.to_string();
     if !channel_str.starts_with('D') {
         return Ok(());
@@ -561,13 +494,11 @@ async fn handle_message_event(
 
     let thread_ts = event.origin.thread_ts.clone();
 
-    // Get message text
     let text = match &event.content {
         Some(content) => content.text.clone().unwrap_or_default(),
         None => String::new(),
     };
 
-    // Download any image files in the message
     let mut image_paths: Vec<PathBuf> = Vec::new();
     if let Some(content) = &event.content
         && let Some(files) = &content.files
@@ -582,7 +513,6 @@ async fn handle_message_event(
         }
     }
 
-    // Skip if no text and no images
     if text.is_empty() && image_paths.is_empty() {
         return Ok(());
     }
@@ -625,10 +555,8 @@ async fn handle_message_event(
         }
     }
 
-    // Get user info for display name
     let (username, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
 
-    // Create channel wrapper with thread_ts for proper threading
     let channel: Arc<dyn Channel> = Arc::new(SlackChannel::new(
         client.clone(),
         state.bot_token.clone(),
@@ -637,18 +565,16 @@ async fn handle_message_event(
         state.unfurl_links,
     ));
 
-    // For DMs, each thread gets its own session keyed by user_id:thread_ts
+    // Each DM thread gets its own Claude session (keyed user_id:thread_ts).
     let user_id_str = user_id.to_string();
     let session_key = thread_ts
         .as_ref()
         .map(|ts| format!("slack:{}:{}", user_id, ts));
-    // Debounce key includes thread to keep per-thread batching
     let debounce_id = match &thread_ts {
         Some(ts) => format!("{}:{}:{}", channel.name(), user_id, ts),
         None => format!("{}:{}", channel.name(), user_id),
     };
 
-    // Determine what action to take
     let mut store = PairingStore::load()?;
 
     let action = determine_action(
@@ -753,7 +679,6 @@ async fn handle_app_mention_event(
     let user_id = event.user.clone();
     let channel_id = event.channel.clone();
 
-    // Get message text and strip the @mention
     let text = event
         .content
         .text
@@ -762,13 +687,11 @@ async fn handle_app_mention_event(
         .trim()
         .to_string();
 
-    // Skip empty messages
     if text.is_empty() {
         return Ok(());
     }
 
-    // Determine thread_ts: if this is a reply in a thread, use that thread
-    // Otherwise, use this message's ts to start a new thread
+    // Use the existing thread_ts if replying in a thread; otherwise start one from this message's ts.
     let thread_ts = event
         .origin
         .thread_ts
@@ -780,7 +703,6 @@ async fn handle_app_mention_event(
         user_id, channel_id, thread_ts, text
     );
 
-    // Check if user is approved before proceeding
     let user_id_str = user_id.to_string();
     let mut store = PairingStore::load()?;
 
@@ -801,7 +723,6 @@ async fn handle_app_mention_event(
             return Ok(());
         }
 
-        // Auto-approve the user
         let (username, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
         store.auto_approve("slack", &user_id_str, username, display_name)?;
     }
@@ -818,7 +739,6 @@ async fn handle_app_mention_event(
         .await;
     }
 
-    // Track thread for session management
     {
         let ts_str = thread_ts.to_string();
         let mut threads = state.user_threads.write().await;
@@ -832,7 +752,6 @@ async fn handle_app_mention_event(
         }
     }
 
-    // Download any image files in the message
     let mut image_paths: Vec<PathBuf> = Vec::new();
     if let Some(files) = &event.content.files {
         for file in files {
@@ -845,11 +764,9 @@ async fn handle_app_mention_event(
         }
     }
 
-    // Get user display name to identify speakers in shared thread context
     let (_, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
     let speaker_name = display_name.unwrap_or_else(|| user_id.to_string());
 
-    // Fetch thread messages the bot hasn't seen yet for context
     let unseen_context = fetch_thread_context(
         &client,
         &state.bot_token,
@@ -860,7 +777,6 @@ async fn handle_app_mention_event(
     )
     .await;
 
-    // Create channel wrapper - always reply in thread
     let channel: Arc<dyn Channel> = Arc::new(SlackChannel::new(
         client.clone(),
         state.bot_token.clone(),
@@ -869,12 +785,11 @@ async fn handle_app_mention_event(
         state.unfurl_links,
     ));
 
-    // In public channels, all users in the same thread share one Claude session.
-    // The session is keyed by thread_ts so context carries across different speakers.
+    // All users in the same public thread share one Claude session so context
+    // carries across speakers.
     let shared_session_key = format!("slack:thread:{}", thread_ts);
     let user_id_str = user_id.to_string();
 
-    // Build message: unseen thread context + current message with speaker prefix
     let current_msg = format!("[{}]: {}", speaker_name, text);
     let full_text = if unseen_context.is_empty() {
         current_msg
@@ -887,7 +802,7 @@ async fn handle_app_mention_event(
     };
     let text_with_images = build_text_with_images(&full_text, &image_paths);
 
-    // Debounce per user (so rapid messages from one user batch), but session is shared
+    // Debounce per user so rapid messages from one person batch, but session is shared.
     let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);
     let channel_clone = channel.clone();
     let user_id_clone = user_id_str.clone();
@@ -903,7 +818,6 @@ async fn handle_app_mention_event(
     Ok(())
 }
 
-/// Send an ephemeral message visible only to a specific user
 async fn send_ephemeral_message(
     client: &Arc<SlackHyperClient>,
     token: &SlackApiToken,
@@ -924,7 +838,6 @@ async fn send_ephemeral_message(
     }
 }
 
-/// Get user info from Slack API
 async fn get_user_info(
     client: &Arc<SlackHyperClient>,
     token: &SlackApiToken,
@@ -964,7 +877,6 @@ async fn handle_interaction_events(
     _client: Arc<SlackHyperClient>,
     _user_state_storage: SlackClientEventsUserState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Handle interactive components (buttons, menus, etc.) if needed
     debug!("Received interaction event");
     Ok(())
 }
@@ -974,7 +886,6 @@ async fn handle_command_events(
     _client: Arc<SlackHyperClient>,
     _user_state_storage: SlackClientEventsUserState,
 ) -> Result<SlackCommandEventResponse, Box<dyn std::error::Error + Send + Sync>> {
-    // Handle slash commands if needed
     debug!("Received command event");
     Ok(SlackCommandEventResponse::new(
         SlackMessageContent::new().with_text("OK".to_string()),

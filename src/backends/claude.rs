@@ -83,10 +83,8 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
 
     if let Some(ref system_prompt) = options.system_prompt {
         if options.resume_session.is_none() {
-            // New session: full system prompt
             cmd.args(["--system-prompt", system_prompt]);
         } else {
-            // Resuming: append as reminder
             cmd.args(["--append-system-prompt", system_prompt]);
         }
     }
@@ -107,7 +105,6 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
 
     cmd.arg(prompt);
 
-    // Set auth env vars: either Vertex AI (GCP) or Anthropic API key / OAuth
     if use_vertex {
         cmd.env("CLAUDE_CODE_USE_VERTEX", "1");
         cmd.env(

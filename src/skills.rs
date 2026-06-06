@@ -17,7 +17,6 @@ pub struct Skill {
     pub location: PathBuf,
 }
 
-/// Discover all available skills from the skills directory
 pub fn discover_skills() -> Result<Vec<Skill>> {
     let skills_dir = config::paths()?.skills_dir;
 
@@ -40,19 +39,16 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
         }
 
         if let Ok(skill) = parse_skill(&skill_file) {
-            // Ensure npm dependencies are installed for this skill
             setup::ensure_skill_deps(&path);
             skills.push(skill);
         }
     }
 
-    // Sort by name for consistent ordering
     skills.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(skills)
 }
 
-/// Parse YAML frontmatter to extract name and description
 fn parse_frontmatter(
     frontmatter: &str,
     name: &mut Option<String>,
@@ -80,11 +76,9 @@ fn parse_frontmatter(
     }
 }
 
-/// Parse a SKILL.md file to extract skill metadata
 fn parse_skill(path: &PathBuf) -> Result<Skill> {
     let content = std::fs::read_to_string(path)?;
 
-    // Extract YAML frontmatter (between --- markers)
     let mut name = None;
     let mut description = None;
 
@@ -95,7 +89,6 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
         parse_frontmatter(frontmatter, &mut name, &mut description);
     }
 
-    // Fall back to directory name if no name in frontmatter
     let dir_name = path
         .parent()
         .and_then(|p| p.file_name())
@@ -143,7 +136,6 @@ pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     xml
 }
 
-/// Escape special XML characters
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

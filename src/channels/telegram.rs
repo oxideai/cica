@@ -16,11 +16,6 @@ use super::{
 use crate::config::{self, TelegramConfig};
 use crate::pairing::PairingStore;
 
-// ============================================================================
-// Channel Implementation
-// ============================================================================
-
-/// Telegram channel implementation
 pub struct TelegramChannel {
     bot: Bot,
     chat_id: ChatId,
@@ -54,7 +49,6 @@ impl Channel for TelegramChannel {
     ) -> Result<()> {
         use teloxide::types::InputFile;
 
-        // If no attachments, just send the text message
         if attachment_paths.is_empty() {
             return self.send_message(message).await;
         }
@@ -63,7 +57,6 @@ impl Channel for TelegramChannel {
             attachment_paths.first().map(|p| p == path).unwrap_or(false)
         };
 
-        // Send each attachment using the appropriate Telegram method
         for path in attachment_paths {
             if !path.exists() {
                 warn!("Attachment path does not exist: {:?}", path);
@@ -92,7 +85,6 @@ impl Channel for TelegramChannel {
             }
         }
 
-        // If message exists but all attachments were missing, send just the text
         if !message.is_empty() && attachment_paths.iter().all(|p| !p.exists()) {
             self.send_message(message).await?;
         }
@@ -107,18 +99,12 @@ impl Channel for TelegramChannel {
 
         tokio::spawn(async move {
             loop {
-                // Send typing indicator
                 let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
 
-                // Wait 4 seconds or until cancelled (typing indicator lasts ~5s)
+                // Typing indicator lasts ~5s; refresh every 4.
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(4)) => {
-                        // Continue loop, send typing again
-                    }
-                    _ = &mut cancel_rx => {
-                        // Cancelled, stop the loop
-                        break;
-                    }
+                    _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                    _ = &mut cancel_rx => break,
                 }
             }
         });
@@ -127,14 +113,8 @@ impl Channel for TelegramChannel {
     }
 }
 
-// ============================================================================
-// Media Handling
-// ============================================================================
-
-/// Video file extensions supported for sending
 const VIDEO_EXTENSIONS: &[&str] = &[".mp4", ".mov", ".webm", ".avi"];
 
-/// Check if a file path points to a video based on its extension
 fn is_video_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -145,7 +125,6 @@ fn is_video_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Get the directory where Telegram attachments are stored
 fn get_telegram_attachments_dir() -> Result<PathBuf> {
     let paths = config::paths()?;
     let dir = paths.internal_dir.join("telegram_attachments");
@@ -153,25 +132,20 @@ fn get_telegram_attachments_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Download a photo from Telegram and save it locally
-/// Returns the local file path on success
 async fn download_photo(bot: &Bot, photo: &PhotoSize) -> Result<PathBuf> {
     let file = bot.get_file(&photo.file.id).await?;
     let file_path = file.path;
 
-    // Determine extension from the file path
     let extension = file_path.rsplit('.').next().unwrap_or("jpg");
 
     let attachments_dir = get_telegram_attachments_dir()?;
     let local_path = attachments_dir.join(format!("{}.{}", photo.file.unique_id, extension));
 
-    // Skip download if file already exists
     if local_path.exists() {
         debug!("Photo already downloaded: {:?}", local_path);
         return Ok(local_path);
     }
 
-    // Download the file
     let mut dst = tokio::fs::File::create(&local_path).await?;
     bot.download_file(&file_path, &mut dst).await?;
 
@@ -179,30 +153,22 @@ async fn download_photo(bot: &Bot, photo: &PhotoSize) -> Result<PathBuf> {
     Ok(local_path)
 }
 
-/// Get the largest photo from a list of photo sizes
 fn get_largest_photo(photos: &[PhotoSize]) -> Option<&PhotoSize> {
     photos.iter().max_by_key(|p| p.width * p.height)
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Validate a Telegram bot token by calling getMe
-/// Returns the bot username on success
+/// Validate a Telegram bot token; returns the bot username on success.
 pub async fn validate_token(token: &str) -> Result<String> {
     let bot = Bot::new(token);
     let me = bot.get_me().await?;
     Ok(me.username().to_string())
 }
 
-/// Run the Telegram bot
 pub async fn run(config: TelegramConfig) -> Result<()> {
     let bot = Bot::new(&config.bot_token);
 
     info!("Starting Telegram bot...");
 
-    // Register bot commands for the UI menu
     let commands = vec![
         BotCommand::new("new", "Start a new conversation"),
         BotCommand::new("skills", "List available skills"),
@@ -212,7 +178,6 @@ pub async fn run(config: TelegramConfig) -> Result<()> {
         warn!("Failed to set bot commands: {}", e);
     }
 
-    // Create shared task manager for per-user message handling
     let task_manager = UserTaskManager::new();
 
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
@@ -229,17 +194,11 @@ pub async fn run(config: TelegramConfig) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Message Handling
-// ============================================================================
-
-/// Handle an incoming message
 async fn handle_message(
     bot: &Bot,
     msg: &Message,
     task_manager: Arc<UserTaskManager>,
 ) -> Result<()> {
-    // Extract user info
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0.to_string()).unwrap_or_default();
     let username = user.and_then(|u| u.username.clone());
@@ -248,10 +207,8 @@ async fn handle_message(
         None => u.first_name.clone(),
     });
 
-    // Get text (either from text message or photo caption)
     let text = msg.text().or(msg.caption()).unwrap_or_default();
 
-    // Download any photos in the message
     let mut image_paths: Vec<PathBuf> = Vec::new();
     if let Some(photos) = msg.photo()
         && let Some(largest) = get_largest_photo(photos)
@@ -262,7 +219,6 @@ async fn handle_message(
         }
     }
 
-    // Skip if no text and no images
     if text.is_empty() && image_paths.is_empty() {
         return Ok(());
     }
@@ -276,10 +232,8 @@ async fn handle_message(
         );
     }
 
-    // Create channel wrapper
     let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(bot.clone(), msg.chat.id));
 
-    // Determine what action to take
     let mut store = PairingStore::load()?;
     let action = determine_action(
         channel.name(),
@@ -291,9 +245,7 @@ async fn handle_message(
         display_name,
     )?;
 
-    // Execute the action
     if let Some(query_text) = execute_action(channel.as_ref(), &user_id, action).await? {
-        // QueryClaude action - queue with task manager for debouncing
         let text_with_images = build_text_with_images(&query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), user_id);
         let channel_clone = channel.clone();

@@ -10,7 +10,6 @@ use crate::config;
 
 use super::schedule::CronSchedule;
 
-/// Unique identifier for a cron job.
 pub type JobId = String;
 
 /// Where to deliver cron job results.
@@ -88,20 +87,11 @@ impl JobStatus {
 /// Runtime state for a job (mutable between runs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CronJobState {
-    /// Next scheduled run time (Unix millis).
     pub next_run_at: Option<u64>,
-
-    /// Last run timestamp (Unix millis).
     pub last_run_at: Option<u64>,
-
-    /// Status of last execution.
     #[serde(default)]
     pub last_status: JobStatus,
-
-    /// Last execution duration in milliseconds.
     pub last_duration_ms: Option<u64>,
-
-    /// Count of consecutive failures.
     #[serde(default)]
     pub failure_count: u32,
 }
@@ -109,40 +99,24 @@ pub struct CronJobState {
 /// A scheduled cron job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
-    /// Unique job ID.
     pub id: JobId,
-
-    /// Human-readable name.
     pub name: String,
-
-    /// The Claude Code prompt to execute.
     pub prompt: String,
-
-    /// Schedule configuration.
     pub schedule: CronSchedule,
-
     /// Owner: channel name (e.g., "telegram", "signal").
     pub channel: String,
-
     /// Owner: user ID within the channel.
     pub user_id: String,
-
     /// Where to deliver results. Defaults to owner's DM when absent.
     #[serde(default)]
     pub target: DeliveryTarget,
-
     /// Whether to send results back to the user's chat.
     #[serde(default = "default_true")]
     pub notify: bool,
-
     /// Job is enabled (can be paused).
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Creation timestamp (Unix millis).
     pub created_at: u64,
-
-    /// Runtime state.
     #[serde(default)]
     pub state: CronJobState,
 }

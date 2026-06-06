@@ -22,7 +22,6 @@ use crate::memory::{MemoryIndex, memories_dir};
 use crate::setup;
 use crate::skills;
 
-/// Onboarding phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Need to configure agent identity (first user only)
@@ -33,7 +32,6 @@ pub enum Phase {
     Complete,
 }
 
-/// Get the user directory path for a specific user
 pub fn user_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
     let dir = config::paths()?
         .base
@@ -42,29 +40,24 @@ pub fn user_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Get the path to a user's IDENTITY.md
 pub fn identity_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
     Ok(user_dir(channel, user_id)?.join("IDENTITY.md"))
 }
 
-/// Get the path to a user's USER.md
 pub fn user_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
     Ok(user_dir(channel, user_id)?.join("USER.md"))
 }
 
-/// Check if a user's identity is configured
 #[allow(dead_code)]
 pub fn is_identity_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
     Ok(identity_path_for_user(channel, user_id)?.exists())
 }
 
-/// Check if a user's profile is configured
 #[allow(dead_code)]
 pub fn is_user_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
     Ok(user_path_for_user(channel, user_id)?.exists())
 }
 
-/// Get current onboarding phase for a specific user
 pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
     let settings = crate::config::Config::load()
         .map(|c: crate::config::Config| c.channel_settings(channel))
@@ -75,7 +68,6 @@ pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
         return Ok(Phase::Identity);
     }
 
-    // Check if this user's profile is complete
     if !user_path_for_user(channel, user_id)?.exists() {
         return Ok(Phase::User);
     }
@@ -83,12 +75,10 @@ pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
     Ok(Phase::Complete)
 }
 
-/// Check if onboarding is complete for a user
 pub fn is_complete_for_user(channel: &str, user_id: &str) -> Result<bool> {
     Ok(current_phase_for_user(channel, user_id)? == Phase::Complete)
 }
 
-/// Get the system prompt for a specific user's onboarding phase
 pub fn system_prompt_for_user(channel: &str, user_id: &str) -> Result<String> {
     match current_phase_for_user(channel, user_id)? {
         Phase::Identity => identity_system_prompt(channel, user_id),
@@ -97,11 +87,9 @@ pub fn system_prompt_for_user(channel: &str, user_id: &str) -> Result<String> {
     }
 }
 
-/// System prompt for identity phase (per-user)
 fn identity_system_prompt(channel: &str, user_id: &str) -> Result<String> {
     let path = identity_path_for_user(channel, user_id)?;
 
-    // Ensure user directory exists
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -142,7 +130,6 @@ IMPORTANT: Do NOT write the file until you have all three answers."#,
 
 const DEFAULT_ONBOARDING_PROMPT: &str = "Tell me about yourself - the more I know about you the better I'll be able to help, so don't be shy!";
 
-/// System prompt for user profile phase (per-user)
 fn user_system_prompt(channel: &str, user_id: &str) -> Result<String> {
     let identity_path = identity_path_for_user(channel, user_id)?;
     let user_path = user_path_for_user(channel, user_id)?;
@@ -188,7 +175,6 @@ IMPORTANT:
     ))
 }
 
-/// Load identity content for a specific user
 pub fn load_identity_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
     let path = identity_path_for_user(channel, user_id)?;
     if !path.exists() {
@@ -197,7 +183,6 @@ pub fn load_identity_for_user(channel: &str, user_id: &str) -> Result<Option<Str
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-/// Load user profile content for a specific user
 pub fn load_user_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
     let path = user_path_for_user(channel, user_id)?;
     if !path.exists() {
@@ -206,7 +191,6 @@ pub fn load_user_for_user(channel: &str, user_id: &str) -> Result<Option<String>
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-/// Load persona content
 pub fn load_persona() -> Result<Option<String>> {
     let path = config::paths()?.base.join("PERSONA.md");
     if !path.exists() {
@@ -228,7 +212,6 @@ pub fn build_context_prompt_for_user(
     let paths = config::paths()?;
     let mut lines = Vec::new();
 
-    // Load per-user identity
     let identity = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
         load_identity_for_user(ch, uid)?
     } else {
@@ -245,14 +228,12 @@ pub fn build_context_prompt_for_user(
         })
         .unwrap_or_else(|| "Cica".to_string());
 
-    // Load per-user profile
     let user_content = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
         load_user_for_user(ch, uid)?
     } else {
         None
     };
 
-    // Core identity with channel info
     let channel_info = channel_display
         .map(|c| format!(" (via {})", c))
         .unwrap_or_default();
@@ -262,7 +243,6 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
-    // Current date/time
     let now = chrono::Local::now();
     lines.push(format!(
         "Current date and time: {}",
@@ -270,7 +250,6 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
-    // Capabilities section
     lines.push("## Capabilities".to_string());
     lines.push("You can:".to_string());
     lines.push("- Have conversations and answer questions".to_string());
@@ -281,7 +260,6 @@ pub fn build_context_prompt_for_user(
     lines.push("- Schedule tasks to run automatically (cron jobs)".to_string());
     lines.push(String::new());
 
-    // Channel-specific guidance
     if let Some(channel_name) = channel_display {
         lines.push("## Messaging Channel".to_string());
         lines.push(format!(
@@ -336,7 +314,6 @@ pub fn build_context_prompt_for_user(
         lines.push(String::new());
     }
 
-    // Skills section
     lines.push("## Skills".to_string());
     lines.push(
         "Skills extend your capabilities. They live in the skills/ folder of your workspace."
@@ -406,7 +383,6 @@ pub fn build_context_prompt_for_user(
     lines.push("- Fall back to global config if no per-user config exists".to_string());
     lines.push(String::new());
 
-    // Workspace
     lines.push("## Workspace".to_string());
     lines.push(format!(
         "Your workspace directory is: {}",
@@ -414,7 +390,6 @@ pub fn build_context_prompt_for_user(
     ));
     lines.push(String::new());
 
-    // Current user context (for skills/tools that need channel and user_id)
     if let (Some(ch), Some(uid)) = (channel_id, user_id) {
         lines.push("## Current User Context".to_string());
         lines.push(format!("- Channel: {}", ch));
@@ -422,7 +397,6 @@ pub fn build_context_prompt_for_user(
         lines.push(String::new());
     }
 
-    // MCP configuration
     let cfg = config::Config::load().unwrap_or_default();
     lines.push("## MCP (Model Context Protocol)".to_string());
     lines.push("You can extend your capabilities by adding MCP servers. MCP servers provide additional tools (API access, databases, services, etc.) that become available to you automatically.".to_string());
@@ -488,7 +462,6 @@ pub fn build_context_prompt_for_user(
     lines.push("After adding an MCP server, it will be available on the next message (new session). The user may need to send /new to start a fresh session for new MCP servers to take effect.".to_string());
     lines.push(String::new());
 
-    // Cron job management
     lines.push("## Cron Job Management".to_string());
     lines.push(
         "You can manage scheduled cron jobs conversationally by reading and writing the cron store file directly."
@@ -571,7 +544,6 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
     );
     lines.push(String::new());
 
-    // Project context from files
     lines.push("# Project Context".to_string());
     lines.push(String::new());
 
@@ -593,7 +565,6 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
         lines.push(String::new());
     }
 
-    // Memory system
     if let (Some(ch), Some(uid)) = (channel_id, user_id) {
         let mem_dir = memories_dir(ch, uid)?;
 
@@ -621,10 +592,6 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
         if let Some(query) = user_message {
             match MemoryIndex::open() {
                 Ok(index) => {
-                    // First ensure memories are indexed
-                    // Note: We don't call index_user_memories here because it's mutable
-                    // That should be done at startup or when files change
-
                     match index.search(ch, uid, query, 3) {
                         Ok(results) if !results.is_empty() => {
                             lines.push("### Relevant Memories".to_string());
@@ -636,16 +603,13 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
 
                             for result in results {
                                 if result.score > 0.3 {
-                                    // Only include reasonably relevant results
                                     lines.push(format!("**From {}:**", result.path));
                                     lines.push(result.chunk);
                                     lines.push(String::new());
                                 }
                             }
                         }
-                        Ok(_) => {
-                            // No relevant memories found, that's fine
-                        }
+                        Ok(_) => {}
                         Err(e) => {
                             warn!("Failed to search memories: {}", e);
                         }

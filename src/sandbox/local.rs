@@ -25,7 +25,6 @@ impl SandboxProvider for LocalProcessProvider {
     }
 }
 
-/// Map a `TurnJob` to the backend-agnostic `QueryOptions`.
 fn job_to_query_options(job: &TurnJob) -> backends::QueryOptions {
     backends::QueryOptions {
         system_prompt: job.system_prompt.clone(),
@@ -35,7 +34,6 @@ fn job_to_query_options(job: &TurnJob) -> backends::QueryOptions {
     }
 }
 
-/// Convert a backend `QueryResult` into a `TurnResult`.
 pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
     TurnResult {
         response: qr.response,
@@ -45,7 +43,6 @@ pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
     }
 }
 
-/// Convert a `TurnResult` back into a `QueryResult` for existing call sites.
 pub fn query_result_from_turn(tr: TurnResult) -> QueryResult {
     QueryResult {
         response: tr.response,

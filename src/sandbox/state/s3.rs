@@ -15,8 +15,6 @@ use tokio::sync::OnceCell;
 use crate::config::S3Config;
 use crate::sandbox::state::{StateStore, clear_dir};
 
-/// `StateStore` backed by an S3 bucket. The client is built lazily on first use
-/// so `default_store` can stay synchronous.
 pub struct S3StateStore {
     config: S3Config,
     prefix: String, // normalized: no leading/trailing slashes
@@ -183,7 +181,6 @@ impl StateStore for S3StateStore {
             }
         }
 
-        // Upload every file under `src`, keyed by its path relative to `src`.
         for entry in walk_files(src)? {
             let rel = entry
                 .strip_prefix(src)

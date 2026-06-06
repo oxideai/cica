@@ -12,22 +12,18 @@ use uuid::Uuid;
 use crate::sandbox::state::StateStore;
 use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
 
-/// Store key for a turn's job blob.
 fn job_key(turn_id: &str) -> String {
     format!("turns/{turn_id}/job")
 }
 
-/// Store key for a turn's result blob.
 fn result_key(turn_id: &str) -> String {
     format!("turns/{turn_id}/result")
 }
 
-/// Store key for the whole turn subtree.
 fn turn_prefix(turn_id: &str) -> String {
     format!("turns/{turn_id}")
 }
 
-/// A unique temp dir for staging a blob in/out of the store.
 fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "cica-turn-{turn_id}-{kind}-{}",
@@ -35,7 +31,6 @@ fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
     ))
 }
 
-/// Serialize `job` into a fresh dir and push it under `turns/<id>/job`.
 async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Result<()> {
     let dir = scratch_dir(turn_id, "job");
     std::fs::create_dir_all(&dir)?;
@@ -45,7 +40,6 @@ async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Resul
     Ok(())
 }
 
-/// Pull `turns/<id>/job` and deserialize the `TurnJob`.
 async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
     let dir = scratch_dir(turn_id, "job-in");
     let found = store.pull(&job_key(turn_id), &dir).await?;
@@ -59,7 +53,6 @@ async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
     result
 }
 
-/// Serialize `result` into a fresh dir and push it under `turns/<id>/result`.
 async fn push_result(store: &dyn StateStore, turn_id: &str, result: &TurnResult) -> Result<()> {
     let dir = scratch_dir(turn_id, "result");
     std::fs::create_dir_all(&dir)?;
@@ -69,7 +62,7 @@ async fn push_result(store: &dyn StateStore, turn_id: &str, result: &TurnResult)
     Ok(())
 }
 
-/// Pull `turns/<id>/result`; `None` if the worker never wrote one.
+/// `None` if the worker never wrote a result.
 async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<TurnResult>> {
     let dir = scratch_dir(turn_id, "result-in");
     let found = store.pull(&result_key(turn_id), &dir).await?;
@@ -93,7 +86,6 @@ async fn cleanup(store: &dyn StateStore, turn_id: &str) {
     }
 }
 
-/// Worker side: pull the job, run it through `engine`, push the result.
 pub async fn run_worker_turn(
     store: &dyn StateStore,
     engine: &dyn crate::sandbox::SandboxProvider,

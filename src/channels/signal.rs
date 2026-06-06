@@ -24,11 +24,6 @@ use crate::config::{self, SignalConfig};
 use crate::pairing::PairingStore;
 use crate::setup;
 
-// ============================================================================
-// Channel Implementation
-// ============================================================================
-
-/// Signal channel implementation
 pub struct SignalChannel {
     client: Arc<HttpClient>,
     recipient: String,
@@ -63,7 +58,6 @@ impl Channel for SignalChannel {
         params.insert("recipient", vec![self.recipient.as_str()])?;
         params.insert("message", message)?;
 
-        // Add attachments if any
         if !attachment_paths.is_empty() {
             let attachment_strings: Vec<String> = attachment_paths
                 .iter()
@@ -88,21 +82,15 @@ impl Channel for SignalChannel {
 
         tokio::spawn(async move {
             loop {
-                // Send typing indicator (lasts 15 seconds on Signal)
+                // Typing indicator lasts 15 seconds on Signal; refresh every 10.
                 let mut params = ObjectParams::new();
                 if params.insert("recipient", vec![recipient.as_str()]).is_ok() {
                     let _: Result<Value, _> = client.request("sendTyping", params).await;
                 }
 
-                // Wait 10 seconds or until cancelled
                 tokio::select! {
-                    _ = sleep(Duration::from_secs(10)) => {
-                        // Continue loop, send typing again
-                    }
-                    _ = &mut cancel_rx => {
-                        // Cancelled, stop the loop
-                        break;
-                    }
+                    _ = sleep(Duration::from_secs(10)) => {}
+                    _ = &mut cancel_rx => break,
                 }
             }
         });
@@ -111,26 +99,19 @@ impl Channel for SignalChannel {
     }
 }
 
-// ============================================================================
-// Daemon Management
-// ============================================================================
-
 const DAEMON_PORT: u16 = 18080;
 const PID_FILE_NAME: &str = "cica-signal-daemon.pid";
 
-/// signal-cli daemon manager
 struct SignalDaemon {
     process: Child,
     pid_file: PathBuf,
 }
 
 impl SignalDaemon {
-    /// Get the PID file path
     fn pid_file_path() -> Result<PathBuf> {
         Ok(config::paths()?.signal_data_dir.join(PID_FILE_NAME))
     }
 
-    /// Check if an existing daemon is running (and still alive)
     fn check_existing() -> Option<u32> {
         let pid_file = Self::pid_file_path().ok()?;
         if !pid_file.exists() {
@@ -158,13 +139,11 @@ impl SignalDaemon {
         None
     }
 
-    /// Check if daemon HTTP endpoint is responding
     async fn is_daemon_ready() -> bool {
         let url = format!("http://127.0.0.1:{}/api/v1/rpc", DAEMON_PORT);
         reqwest::get(&url).await.is_ok()
     }
 
-    /// Start signal-cli daemon with JSON-RPC HTTP interface
     async fn start(phone_number: &str) -> Result<Self> {
         let paths = config::paths()?;
         let pid_file = Self::pid_file_path()?;
@@ -194,7 +173,6 @@ impl SignalDaemon {
         let signal_cli = setup::find_signal_cli()
             .ok_or_else(|| anyhow!("signal-cli not found. Run setup first."))?;
 
-        // Get the signal-cli lib directory (parent of bin)
         let signal_cli_home = signal_cli
             .parent()
             .and_then(|p| p.parent())
@@ -202,17 +180,14 @@ impl SignalDaemon {
 
         info!("Starting signal-cli daemon on port {}...", DAEMON_PORT);
 
-        // Build JAVA_HOME from java binary path
         let java_home = java
             .parent() // bin
             .and_then(|p| p.parent())
             .ok_or_else(|| anyhow!("Could not determine JAVA_HOME"))?;
 
-        // Ensure data directory exists
         std::fs::create_dir_all(&paths.signal_data_dir)?;
 
-        // Start signal-cli daemon
-        // Use --receive-mode manual so we can poll with the receive RPC method
+        // --receive-mode manual so we can poll with the receive RPC method.
         let http_addr = format!("localhost:{}", DAEMON_PORT);
         let process = Command::new(&signal_cli)
             .args([
@@ -242,7 +217,6 @@ impl SignalDaemon {
             .spawn()
             .context("Failed to start signal-cli daemon")?;
 
-        // Write PID file
         if let Some(pid) = process.id() {
             std::fs::write(&pid_file, pid.to_string())?;
         }
@@ -255,14 +229,12 @@ impl SignalDaemon {
         Ok(daemon)
     }
 
-    /// Wait for the daemon HTTP server to become available
     async fn wait_for_ready(&mut self) -> Result<()> {
         for i in 0..30 {
             sleep(Duration::from_millis(500)).await;
 
             // Check if process has exited
             if let Ok(Some(status)) = self.process.try_wait() {
-                // Process exited, try to get stderr
                 let stderr = self.process.stderr.take();
                 let stderr_msg = if let Some(mut stderr) = stderr {
                     use tokio::io::AsyncReadExt;
@@ -289,16 +261,13 @@ impl SignalDaemon {
         bail!("signal-cli daemon failed to start within 15 seconds")
     }
 
-    /// Get the JSON-RPC endpoint URL
     fn rpc_url(&self) -> String {
         format!("http://127.0.0.1:{}/api/v1/rpc", DAEMON_PORT)
     }
 
-    /// Gracefully shutdown the daemon
     async fn shutdown(&mut self) {
         info!("Shutting down signal-cli daemon...");
 
-        // Try graceful termination first
         #[cfg(unix)]
         if let Some(pid) = self.process.id() {
             use std::process::Command as StdCommand;
@@ -306,7 +275,6 @@ impl SignalDaemon {
                 .args(["-TERM", &pid.to_string()])
                 .status();
 
-            // Wait a bit for graceful shutdown
             for _ in 0..10 {
                 sleep(Duration::from_millis(200)).await;
                 if self.process.try_wait().ok().flatten().is_some() {
@@ -315,10 +283,7 @@ impl SignalDaemon {
             }
         }
 
-        // Force kill if still running
         let _ = self.process.kill().await;
-
-        // Clean up PID file
         let _ = std::fs::remove_file(&self.pid_file);
 
         info!("signal-cli daemon stopped");
@@ -327,17 +292,11 @@ impl SignalDaemon {
 
 impl Drop for SignalDaemon {
     fn drop(&mut self) {
-        // Synchronous cleanup - try to kill the process
         let _ = self.process.start_kill();
         let _ = std::fs::remove_file(&self.pid_file);
     }
 }
 
-// ============================================================================
-// Message Types
-// ============================================================================
-
-/// Message received from Signal
 #[derive(Debug, Deserialize)]
 struct SignalMessage {
     envelope: Option<Envelope>,
@@ -373,20 +332,12 @@ struct Attachment {
     size: Option<u64>,
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Run the Signal bot
 pub async fn run(config: SignalConfig) -> Result<()> {
     info!("Starting Signal bot for {}...", config.phone_number);
 
-    // Create shared task manager for per-user message handling (persists across restarts)
     let task_manager = UserTaskManager::new();
 
-    // Outer loop for daemon recovery
     loop {
-        // Start the signal-cli daemon
         let mut daemon = match SignalDaemon::start(&config.phone_number).await {
             Ok(d) => d,
             Err(e) => {
@@ -397,7 +348,7 @@ pub async fn run(config: SignalConfig) -> Result<()> {
             }
         };
 
-        // Create JSON-RPC client with longer timeouts to handle contention
+        // Longer timeout to handle contention with the daemon.
         let client = Arc::new(
             HttpClientBuilder::default()
                 .request_timeout(Duration::from_secs(30))
@@ -407,17 +358,14 @@ pub async fn run(config: SignalConfig) -> Result<()> {
 
         info!("Signal bot running. Listening for messages...");
 
-        // Run message loop until it signals a restart is needed
         let needs_restart = run_message_loop(client, Arc::clone(&task_manager)).await;
 
-        // Shutdown daemon gracefully
         daemon.shutdown().await;
 
         if needs_restart {
             warn!("Restarting signal-cli daemon due to repeated failures...");
             sleep(Duration::from_secs(2)).await;
         } else {
-            // Clean exit requested
             break;
         }
     }
@@ -425,22 +373,15 @@ pub async fn run(config: SignalConfig) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Message Handling
-// ============================================================================
-
-/// Maximum consecutive receive failures before restarting daemon
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Main message polling loop
-/// Returns true if daemon should be restarted, false for clean exit
+/// Returns true if daemon should be restarted, false for clean exit.
 async fn run_message_loop(client: Arc<HttpClient>, task_manager: Arc<UserTaskManager>) -> bool {
     let mut consecutive_failures: u32 = 0;
 
     loop {
         match receive_messages(&client).await {
             Ok(messages) => {
-                // Reset failure counter on success
                 consecutive_failures = 0;
 
                 for msg in messages {
@@ -463,34 +404,29 @@ async fn run_message_loop(client: Arc<HttpClient>, task_manager: Arc<UserTaskMan
                         "Too many consecutive receive failures ({}), triggering daemon restart",
                         consecutive_failures
                     );
-                    return true; // Signal restart needed
+                    return true;
                 }
             }
         }
 
-        // Poll interval
         sleep(Duration::from_secs(1)).await;
     }
 }
 
-/// Receive pending messages
 async fn receive_messages(client: &HttpClient) -> Result<Vec<SignalMessage>> {
-    // In single-account daemon mode, we don't pass account parameter
     let mut params = ObjectParams::new();
-    params.insert("timeout", 1)?; // 1 second timeout
+    params.insert("timeout", 1)?;
 
     let result: Value = client
         .request("receive", params)
         .await
         .context("Failed to receive messages")?;
 
-    // Parse the response - it's an array of message envelopes
     let messages: Vec<SignalMessage> = serde_json::from_value(result).unwrap_or_default();
 
     Ok(messages)
 }
 
-/// Get the path where signal-cli stores attachments
 fn get_attachment_path(attachment_id: &str) -> Option<PathBuf> {
     let paths = config::paths().ok()?;
     let attachment_path = paths
@@ -504,7 +440,6 @@ fn get_attachment_path(attachment_id: &str) -> Option<PathBuf> {
     }
 }
 
-/// Check if a content type is an image type that Claude can process
 fn is_image_content_type(content_type: &str) -> bool {
     matches!(
         content_type,
@@ -512,7 +447,6 @@ fn is_image_content_type(content_type: &str) -> bool {
     )
 }
 
-/// Handle an incoming message
 async fn handle_message(
     client: Arc<HttpClient>,
     msg: SignalMessage,
@@ -523,7 +457,7 @@ async fn handle_message(
         None => return Ok(()),
     };
 
-    // Get sender info - prefer phone number, fall back to UUID
+    // Prefer phone number over UUID as the sender identifier.
     let sender = envelope
         .source_number
         .or(envelope.source_uuid)
@@ -534,7 +468,6 @@ async fn handle_message(
         return Ok(());
     }
 
-    // Extract message content and attachments
     let data_message = match envelope.data_message {
         Some(dm) => dm,
         None => return Ok(()),
@@ -543,7 +476,6 @@ async fn handle_message(
     let text = data_message.message.clone().unwrap_or_default();
     let attachments = data_message.attachments.unwrap_or_default();
 
-    // Collect image attachment paths
     let image_paths: Vec<PathBuf> = attachments
         .iter()
         .filter(|a| {
@@ -555,7 +487,6 @@ async fn handle_message(
         .filter_map(|a| a.id.as_ref().and_then(|id| get_attachment_path(id)))
         .collect();
 
-    // Skip if no text and no images
     if text.is_empty() && image_paths.is_empty() {
         return Ok(());
     }
@@ -571,10 +502,8 @@ async fn handle_message(
         );
     }
 
-    // Create channel wrapper
     let channel: Arc<dyn Channel> = Arc::new(SignalChannel::new(client, sender.clone()));
 
-    // Determine what action to take
     let mut store = PairingStore::load()?;
     let action = determine_action(
         channel.name(),
@@ -582,13 +511,11 @@ async fn handle_message(
         &text,
         &image_paths,
         &mut store,
-        None, // Signal doesn't have usernames
+        None, // Signal has no usernames
         display_name,
     )?;
 
-    // Execute the action
     if let Some(query_text) = execute_action(channel.as_ref(), &sender, action).await? {
-        // QueryClaude action - queue with task manager for debouncing
         let text_with_images = build_text_with_images(&query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), sender);
         let channel_clone = channel.clone();
@@ -604,11 +531,6 @@ async fn handle_message(
     Ok(())
 }
 
-// ============================================================================
-// Registration
-// ============================================================================
-
-/// Result of registration attempt
 pub enum RegistrationResult {
     /// Registration succeeded, SMS sent
     Success,
@@ -622,7 +544,6 @@ pub enum RegistrationResult {
     RateLimited,
 }
 
-/// Register a new Signal account (called during setup)
 pub async fn register_account(
     phone_number: &str,
     captcha: Option<&str>,
@@ -632,7 +553,6 @@ pub async fn register_account(
     let java = setup::find_java().ok_or_else(|| anyhow!("Java not found"))?;
     let signal_cli = setup::find_signal_cli().ok_or_else(|| anyhow!("signal-cli not found"))?;
 
-    // Ensure data directory exists
     std::fs::create_dir_all(&paths.signal_data_dir)?;
 
     let java_home = java
@@ -650,21 +570,15 @@ pub async fn register_account(
         "register",
     ];
 
-    // Add voice flag if requested (voice call instead of SMS)
     if use_voice {
         args.push("-v");
     }
 
-    // Add captcha if provided
     let captcha_owned: String;
     if let Some(c) = captcha {
         captcha_owned = c.to_string();
         args.push("--captcha");
         args.push(&captcha_owned);
-        debug!(
-            "Using captcha token (first 50 chars): {}...",
-            &captcha_owned[..captcha_owned.len().min(50)]
-        );
     }
 
     let output = Command::new(&signal_cli)
@@ -687,7 +601,6 @@ pub async fn register_account(
     let combined = format!("{}{}", stdout, stderr);
     let combined_lower = combined.to_lowercase();
 
-    // Log for debugging
     debug!("Registration stdout: {}", stdout);
     debug!("Registration stderr: {}", stderr);
     debug!("Registration exit status: {}", output.status);
@@ -696,8 +609,7 @@ pub async fn register_account(
         return Ok(RegistrationResult::Success);
     }
 
-    // Check for captcha requirement - but only if we didn't already provide one
-    // If we provided a captcha and still get this error, the captcha was invalid
+    // If captcha was provided but still fails, the token was invalid.
     if combined_lower.contains("captcha") {
         if captcha.is_some() {
             // We already provided a captcha but it failed - report specific error
@@ -715,12 +627,11 @@ pub async fn register_account(
         return Ok(RegistrationResult::AlreadyRegistered);
     }
 
-    // Authorization failed usually means the number is registered on another device
+    // Authorization failure usually means the number is registered on another device.
     if combined_lower.contains("authorization failed") || combined_lower.contains("403") {
         return Ok(RegistrationResult::AuthorizationFailed);
     }
 
-    // Rate limited
     if combined_lower.contains("rate limit") || combined_lower.contains("429") {
         return Ok(RegistrationResult::RateLimited);
     }
@@ -728,7 +639,6 @@ pub async fn register_account(
     bail!("Registration failed: {}", combined.trim());
 }
 
-/// Verify a Signal account with SMS code (called during setup)
 pub async fn verify_account(phone_number: &str, code: &str) -> Result<()> {
     let paths = config::paths()?;
     let java = setup::find_java().ok_or_else(|| anyhow!("Java not found"))?;

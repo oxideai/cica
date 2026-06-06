@@ -14,9 +14,7 @@ use crate::memory::MemoryIndex;
 use crate::pairing::PairingStore;
 use crate::setup;
 
-/// Run the assistant (default command)
 pub async fn run() -> Result<()> {
-    // Check if configured
     if !Config::exists()? {
         println!("Cica is not configured yet.");
         println!("Run `cica init` to get started.");
@@ -39,10 +37,8 @@ pub async fn run() -> Result<()> {
         warn!("Failed to prepare dependencies: {}", e);
     }
 
-    // Index memories for all approved users at startup
     index_all_user_memories();
 
-    // Start cron scheduler service
     let cron_service = start_cron_service(&config)?;
 
     // Skills git-sync (router-side): keep skills_dir + the state store's "skills"
@@ -70,7 +66,6 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Spawn tasks for each configured channel
     let mut handles = Vec::new();
 
     if let Some(telegram_config) = config.channels.telegram {
@@ -97,7 +92,6 @@ pub async fn run() -> Result<()> {
         }));
     }
 
-    // Wait for Ctrl+C
     tokio::select! {
         _ = signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down...");
@@ -109,7 +103,6 @@ pub async fn run() -> Result<()> {
         } => {}
     }
 
-    // Stop cron service
     if let Some(service) = cron_service {
         let mut service = service.lock().await;
         service.stop().await;
@@ -118,7 +111,6 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Start the cron scheduler service
 fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<SystemClock>>>>> {
     let clock = SystemClock;
     let cron_config = CronConfig::default();
@@ -131,7 +123,6 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
         }
     };
 
-    // Create result sender that routes messages to the appropriate channel
     let telegram_token = config
         .channels
         .telegram
@@ -153,7 +144,6 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
             Box::pin(async move {
                 match channel.as_str() {
                     "telegram" => {
-                        // Telegram: target is ignored, always DM to user_id (chat_id)
                         if let Some(token) = telegram_token {
                             send_telegram_message(&token, &user_id, &message).await
                         } else {
@@ -161,7 +151,6 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
                         }
                     }
                     "signal" => {
-                        // Signal: target is ignored, always DM to user_id (phone number)
                         if let Some(_phone) = signal_phone {
                             send_signal_message(&user_id, &message).await
                         } else {
@@ -193,7 +182,6 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
     Ok(Some(Arc::new(Mutex::new(service))))
 }
 
-/// Send a message via Telegram
 async fn send_telegram_message(token: &str, user_id: &str, message: &str) -> Result<()> {
     use teloxide::prelude::*;
 
@@ -203,14 +191,12 @@ async fn send_telegram_message(token: &str, user_id: &str, message: &str) -> Res
     Ok(())
 }
 
-/// Send a message via Signal
 async fn send_signal_message(recipient: &str, message: &str) -> Result<()> {
     use jsonrpsee::core::client::ClientT;
     use jsonrpsee::core::params::ObjectParams;
     use jsonrpsee::http_client::HttpClientBuilder;
     use serde_json::Value;
 
-    // Connect to the signal-cli daemon
     let url = "http://127.0.0.1:18080/api/v1/rpc";
     let client = HttpClientBuilder::default().build(url)?;
 
@@ -222,7 +208,6 @@ async fn send_signal_message(recipient: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Send a message via Slack
 async fn send_slack_message(
     bot_token: &str,
     channel_id: &str,
@@ -235,7 +220,6 @@ async fn send_slack_message(
     let token = SlackApiToken::new(bot_token.into());
     let session = client.open_session(&token);
 
-    // Apply markdown-to-mrkdwn conversion
     let mrkdwn_message = crate::channels::slack::markdown_to_mrkdwn(message);
 
     let mut request = SlackApiChatPostMessageRequest::new(
@@ -251,7 +235,6 @@ async fn send_slack_message(
     Ok(())
 }
 
-/// Index memories for all approved users
 fn index_all_user_memories() {
     let store = match PairingStore::load() {
         Ok(s) => s,
@@ -269,9 +252,7 @@ fn index_all_user_memories() {
         }
     };
 
-    // Index memories for each approved user
     for key in store.approved.keys() {
-        // Key format is "channel:user_id"
         let parts: Vec<&str> = key.splitn(2, ':').collect();
         if parts.len() != 2 {
             continue;

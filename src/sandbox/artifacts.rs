@@ -31,7 +31,6 @@ pub fn claude_project_slug(cwd: &Path) -> String {
         .collect()
 }
 
-/// Capture/restore of Claude session files.
 pub struct ClaudeSessionArtifacts;
 
 impl ClaudeSessionArtifacts {

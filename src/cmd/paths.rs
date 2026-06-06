@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::config;
 
-/// Run the paths command
 pub fn run() -> Result<()> {
     let paths = config::paths()?;
 

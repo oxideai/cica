@@ -13,10 +13,6 @@ use tracing::warn;
 
 use crate::config::{self, Config};
 
-// ============================================================================
-// Global connection (same pattern as memory.rs)
-// ============================================================================
-
 static DB: Mutex<Option<Connection>> = Mutex::new(None);
 
 fn with_db<F, R>(f: F) -> Result<R>
@@ -91,14 +87,9 @@ fn open_db() -> Result<Connection> {
     Ok(conn)
 }
 
-/// Check if audit logging is enabled in the config.
 fn is_enabled() -> bool {
     Config::load().map(|c| c.audit).unwrap_or(true)
 }
-
-// ============================================================================
-// Public API
-// ============================================================================
 
 /// Log a user↔assistant message exchange. Errors are swallowed.
 #[allow(clippy::too_many_arguments)]

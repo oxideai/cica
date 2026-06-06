@@ -14,7 +14,6 @@ pub struct Paths {
     pub pairing_file: PathBuf,
     pub memory_dir: PathBuf,
     pub skills_dir: PathBuf,
-    // Internal paths (hidden from user)
     pub internal_dir: PathBuf,
     pub deps_dir: PathBuf,
     pub bun_dir: PathBuf,
@@ -23,14 +22,11 @@ pub struct Paths {
     pub claude_code_dir: PathBuf,
     pub claude_home: PathBuf,
     pub signal_data_dir: PathBuf,
-    // Cursor CLI paths
     pub cursor_cli_dir: PathBuf,
     pub cursor_home: PathBuf,
-    // Audit database
     pub audit_db: PathBuf,
 }
 
-/// Get all Cica paths
 pub fn paths() -> Result<Paths> {
     let base = ProjectDirs::from("", "", "cica")
         .map(|dirs| dirs.config_dir().to_path_buf())
@@ -44,7 +40,6 @@ pub fn paths() -> Result<Paths> {
         pairing_file: base.join("pairing.json"),
         memory_dir: base.join("memory"),
         skills_dir: base.join("skills"),
-        // Internal paths
         internal_dir: internal_dir.clone(),
         deps_dir: deps_dir.clone(),
         bun_dir: deps_dir.join("bun"),
@@ -53,17 +48,14 @@ pub fn paths() -> Result<Paths> {
         claude_code_dir: deps_dir.join("claude-code"),
         claude_home: internal_dir.join("claude-home"),
         signal_data_dir: internal_dir.join("signal-data"),
-        // Cursor CLI paths
         cursor_cli_dir: deps_dir.join("cursor-cli"),
         cursor_home: internal_dir.join("cursor-home"),
-        // Audit database
         audit_db: base.join("audit.db"),
         base,
     })
 }
 
 impl Paths {
-    /// Create all necessary directories and default files
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.base)?;
         std::fs::create_dir_all(&self.memory_dir)?;
@@ -114,7 +106,6 @@ fn default_true() -> bool {
 // Config Types
 // ============================================================================
 
-/// Which AI backend to use
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AiBackend {
@@ -250,7 +241,6 @@ pub struct SkillsConfig {
     pub refresh_secs: u64,
 }
 
-/// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -282,7 +272,6 @@ pub struct Config {
     pub onboarding_prompt: Option<String>,
 }
 
-/// All channel configurations
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
@@ -290,7 +279,6 @@ pub struct ChannelsConfig {
     pub slack: Option<SlackConfig>,
 }
 
-/// Telegram-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TelegramConfig {
     #[serde(default)]
@@ -311,7 +299,6 @@ impl TelegramConfig {
     }
 }
 
-/// Signal-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SignalConfig {
     #[serde(default)]
@@ -332,7 +319,6 @@ impl SignalConfig {
     }
 }
 
-/// Slack-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SlackConfig {
     #[serde(default)]
@@ -359,7 +345,6 @@ impl SlackConfig {
     }
 }
 
-/// Channel settings relevant to pairing/onboarding
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSettings {
     pub auto_approve: bool,
@@ -407,7 +392,6 @@ impl Config {
     }
 }
 
-/// Claude configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeConfig {
     /// Anthropic API key or OAuth token (used when not using Vertex AI)
@@ -426,7 +410,6 @@ pub struct ClaudeConfig {
     pub vertex_credentials_path: Option<String>,
 }
 
-/// Cursor CLI configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CursorConfig {
     /// Cursor API key (from dashboard)
@@ -440,7 +423,6 @@ pub struct CursorConfig {
 // ============================================================================
 
 impl Config {
-    /// Load config from the standard location
     pub fn load() -> Result<Self> {
         let path = paths()?.config_file;
         let mut config: Config = match std::fs::read_to_string(&path) {
@@ -502,7 +484,6 @@ impl Config {
         }
     }
 
-    /// Save config to the standard location
     pub fn save(&self) -> Result<()> {
         let paths = paths()?;
         paths.ensure_dirs()?;
@@ -513,12 +494,10 @@ impl Config {
         Ok(())
     }
 
-    /// Check if config file exists
     pub fn exists() -> Result<bool> {
         Ok(paths()?.config_file.exists())
     }
 
-    /// Get list of configured channel names
     pub fn configured_channels(&self) -> Vec<&'static str> {
         let mut channels = Vec::new();
 
@@ -535,7 +514,6 @@ impl Config {
         channels
     }
 
-    /// Check if Claude is configured (Anthropic API key or Vertex AI)
     pub fn is_claude_configured(&self) -> bool {
         if self.claude.use_vertex {
             self.claude
@@ -547,12 +525,10 @@ impl Config {
         }
     }
 
-    /// Check if Cursor is configured
     pub fn is_cursor_configured(&self) -> bool {
         self.cursor.api_key.is_some()
     }
 
-    /// Check if the selected backend is configured
     pub fn is_backend_configured(&self) -> bool {
         match self.backend {
             AiBackend::Claude => self.is_claude_configured(),

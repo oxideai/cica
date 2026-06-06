@@ -4,7 +4,6 @@ use tracing::info;
 use crate::channels;
 use crate::pairing::PairingStore;
 
-/// Run the approve command
 pub fn run(code: &str) -> Result<()> {
     let mut store = PairingStore::load()?;
 

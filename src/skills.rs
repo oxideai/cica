@@ -26,37 +26,56 @@ pub fn discover_skills() -> Result<Vec<Skill>> {
         return Ok(Vec::new());
     }
 
-    let mut skills = Vec::new();
-
     let prep_deps = config::prep_skill_deps_locally(
         config::Config::load()
             .map(|c| c.deployment.provider)
             .unwrap_or(None),
     );
 
-    let entries = std::fs::read_dir(&skills_dir)?;
+    let mut skills = Vec::new();
+    collect_skills(&skills_dir, prep_deps, &mut skills)?;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+/// Directory names never descended into during discovery (vendored deps, VCS,
+/// docs, and any hidden dir).
+///
+/// Note: a user skill directory literally named `docs` or `node_modules` would
+/// be skipped.
+fn is_excluded_dir(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "node_modules" | "docs")
+}
+
+/// Recursively collect skills. A directory containing a `SKILL.md` is a leaf
+/// entry (a skill or knowledge doc) and is not descended into further.
+fn collect_skills(dir: &Path, prep_deps: bool, out: &mut Vec<Skill>) -> Result<()> {
+    let skill_file = dir.join("SKILL.md");
+    if skill_file.exists() {
+        if let Ok(skill) = parse_skill(&skill_file) {
+            if prep_deps {
+                setup::ensure_skill_deps(dir);
+            }
+            out.push(skill);
+        }
+        return Ok(());
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-
-        let skill_file = path.join("SKILL.md");
-        if !skill_file.exists() {
+        let name = entry.file_name();
+        if is_excluded_dir(&name.to_string_lossy()) {
             continue;
         }
-
-        if let Ok(skill) = parse_skill(&skill_file) {
-            if prep_deps {
-                setup::ensure_skill_deps(&path);
-            }
-            skills.push(skill);
-        }
+        collect_skills(&path, prep_deps, out)?;
     }
-
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-
-    Ok(skills)
+    Ok(())
 }
 
 fn parse_frontmatter(
@@ -147,14 +166,15 @@ fn parse_skill(path: &PathBuf) -> Result<Skill> {
 /// to `workspace` (the agent's cwd) so they resolve on whichever host runs the
 /// agent (router or an ephemeral worker), falling back to the absolute path if
 /// a skill lives outside the workspace. Skills are grouped by category in the
-/// fixed order: tool, workflow, report, then any remaining categories sorted.
+/// fixed order: tool, workflow, report, knowledge, then any remaining categories
+/// sorted.
 pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    // Fixed category order; any unknown categories follow, sorted.
-    let mut categories: Vec<&str> = vec!["tool", "workflow", "report"];
+    // Fixed order; any unknown categories follow, sorted.
+    let mut categories: Vec<&str> = vec!["tool", "workflow", "report", "knowledge"];
     let mut extras: Vec<&str> = skills
         .iter()
         .map(|s| s.category.as_str())
@@ -271,6 +291,72 @@ mod tests {
         let skill = parse_skill(&skill_dir.join("SKILL.md")).unwrap();
         assert_eq!(skill.category, "tool");
         assert_eq!(skill.when_to_use, "");
+    }
+
+    #[test]
+    fn collect_skills_finds_nested_and_excludes_vendor_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write_skill = |rel: &str, name: &str| {
+            let d = root.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("SKILL.md"),
+                format!("---\nname: {name}\ncategory: tool\ndescription: d\nwhen_to_use: w\n---\n"),
+            )
+            .unwrap();
+        };
+        write_skill("root-db-query", "root-db-query");
+        write_skill("knowledge/data-model", "data-model");
+        write_skill("node_modules/pkg", "pkg");
+        write_skill("docs/superpowers", "superpowers");
+        write_skill("knowledge/.hidden-wip/draft", "draft"); // hidden dir excluded too
+
+        let mut out = Vec::new();
+        collect_skills(root, false, &mut out).unwrap();
+        let mut names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["data-model", "root-db-query"]);
+    }
+
+    #[test]
+    fn format_skills_xml_groups_knowledge_after_skills() {
+        use std::path::PathBuf;
+        let base = PathBuf::from("/ws");
+        let skills = vec![
+            Skill {
+                name: "root-db-query".into(),
+                description: "db".into(),
+                category: "tool".into(),
+                when_to_use: "data".into(),
+                location: PathBuf::from("/ws/root-db-query/SKILL.md"),
+            },
+            Skill {
+                name: "competitor-brief".into(),
+                description: "brief".into(),
+                category: "workflow".into(),
+                when_to_use: "for competitive analysis".into(),
+                location: PathBuf::from("/ws/competitor-brief/SKILL.md"),
+            },
+            Skill {
+                name: "data-model".into(),
+                description: "schema".into(),
+                category: "knowledge".into(),
+                when_to_use: "before SQL".into(),
+                location: PathBuf::from("/ws/knowledge/data-model/SKILL.md"),
+            },
+        ];
+        let xml = format_skills_xml(&skills, &base);
+        assert!(xml.contains("category=\"knowledge\""), "got: {xml}");
+        let tool = xml.find("category=\"tool\"").unwrap();
+        let know = xml.find("category=\"knowledge\"").unwrap();
+        assert!(tool < know, "knowledge should group after tool: {xml}");
+        let wf = xml.find("category=\"workflow\"").unwrap();
+        assert!(wf < know, "workflow should group before knowledge: {xml}");
+        assert!(
+            xml.contains("<location>knowledge/data-model/SKILL.md</location>"),
+            "got: {xml}"
+        );
     }
 
     #[test]

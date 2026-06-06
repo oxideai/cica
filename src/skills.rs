@@ -173,8 +173,7 @@ pub fn format_skills_xml(skills: &[Skill], workspace: &Path) -> String {
         return String::new();
     }
 
-    // Fixed category order: tool, workflow, report, knowledge, then any
-    // remaining categories sorted.
+    // Fixed order; any unknown categories follow, sorted.
     let mut categories: Vec<&str> = vec!["tool", "workflow", "report", "knowledge"];
     let mut extras: Vec<&str> = skills
         .iter()

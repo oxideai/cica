@@ -86,6 +86,9 @@ jobs:
       - name: Build worker image
         run: docker build -t cica-worker:latest .
 
+      - name: devenv sandbox test (non-root)
+        run: IMAGE=cica-worker:latest scripts/test-devenv-sandbox.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

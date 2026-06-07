@@ -30,8 +30,12 @@ FROM ${BIN_SOURCE} AS binsrc
 # Match the compile-stage glibc (Ubuntu 24.04 = glibc 2.39).
 FROM ubuntu:24.04
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip git \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip git xz-utils \
  && rm -rf /var/lib/apt/lists/*
+
+# Non-root runtime user (uid 10001). Created early because Nix is installed
+# single-user, owned by this uid (claude-code refuses root; Fargate runs `cica`).
+RUN useradd --create-home --uid 10001 cica
 
 # Pin cica's data dir to /data/cica (ProjectDirs honors XDG_CONFIG_HOME on Linux).
 ENV XDG_CONFIG_HOME=/data
@@ -42,6 +46,28 @@ RUN mkdir -p \
       /data/cica/internal/deps/claude-code \
       /data/cica/internal/claude-home \
       /data/cica/internal/cursor-home
+
+# Nix: flakes + public binary caches (cold builds are downloads, not from-source).
+RUN mkdir -p /etc/nix \
+ && printf '%s\n' \
+      'experimental-features = nix-command flakes' \
+      'substituters = https://cache.nixos.org https://devenv.cachix.org' \
+      'trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=' \
+      'trusted-users = root cica' \
+    > /etc/nix/nix.conf
+
+# -- Nix (single-user, store owned by uid 10001) + devenv --
+RUN mkdir -m 0755 /nix && chown cica:cica /nix
+USER cica
+ENV USER=cica HOME=/home/cica
+RUN curl -L https://releases.nixos.org/nix/nix-2.24.10/install | sh -s -- --no-daemon --no-modify-profile \
+ && . /home/cica/.nix-profile/etc/profile.d/nix.sh \
+ && nix profile install nixpkgs#devenv \
+ && devenv version
+USER root
+# nix + devenv on PATH for non-login shells (the agent runs non-login bash) and
+# HOME for the runtime cica user (needed to find ~/.nix-profile).
+ENV PATH="/home/cica/.nix-profile/bin:${PATH}"
 
 # -- Bun --
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
@@ -64,12 +90,6 @@ RUN cd /data/cica/internal/deps/claude-code \
 
 COPY --from=binsrc /cica /usr/local/bin/cica
 
-# A non-root user (uid 10001) owning /data/cica. The image default stays root
-# (so the local DockerLauncher's bind-mounted state-store stays writable); the
-# runtime opts into this user where it matters — e.g. the Fargate task-def sets
-# `user: cica`, because claude-code refuses --dangerously-skip-permissions under
-# root and the cloud worker's state is in S3 (no host mount to worry about).
-RUN useradd --create-home --uid 10001 cica \
- && chown -R cica:cica /data/cica
+RUN chown -R cica:cica /data/cica
 
 ENTRYPOINT ["cica"]

@@ -235,6 +235,9 @@ async fn send_slack_message(
     Ok(())
 }
 
+/// Startup warm-up: index whatever memories are already on local disk. In cloud
+/// mode the per-turn `reindex_user_memories` hook is authoritative (it pulls from
+/// the store first), so the index converges after the first turn either way.
 fn index_all_user_memories() {
     let store = match PairingStore::load() {
         Ok(s) => s,

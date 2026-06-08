@@ -33,7 +33,12 @@ The fix is to make memory honor the same S3-mediated round-trip the session and 
 4. Router's post-turn hook (`reindex_user_memories`): **pull** `mem/{channel}_{user_id}` from S3 into the router-local memories dir, **then** reindex into the sqlite-vec DB.
 5. Next turn, the new memory is in the index and surfaces in search → injected into the prompt. Loop closed.
 
-Single-box mode: no store configured → no token substitution divergence (worker == router == same paths), no pull step. Identical to today's behavior.
+**Single-box parity (invariant).** In local mode (`provider = Local`, no `[deployment].store`), `try_default_provider` returns a bare `LocalProcessProvider` — no `HydratingProvider`, no S3. All three changes are then either no-ops or string-identical to today:
+- **#1 token:** `LocalProcessProvider` still substitutes `{MEMORIES_DIR}`, but derives it from the same `config::paths().base` the prompt embeds today → the *identical* local path. Same resulting string.
+- **#2 pull:** gated on `default_store(config)` being `Some`; single-box is `None` → pull skipped → `reindex_user_memories` runs exactly as today.
+- **#3 guidance:** prompt text, applies to all modes — an intentional content improvement, the only universal change.
+
+This invariant is load-bearing and gets an explicit unit test (the no-store path must not attempt a pull).
 
 ---
 

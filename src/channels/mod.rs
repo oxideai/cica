@@ -386,7 +386,7 @@ pub async fn execute_claude_query(
         warn!("Failed to send message: {}", e);
     }
 
-    reindex_user_memories(channel.name(), user_id);
+    reindex_user_memories(channel.name(), user_id).await;
 }
 
 const DEBOUNCE_MS: u64 = 200;
@@ -1028,7 +1028,44 @@ pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> R
     Ok(qr.response)
 }
 
-pub fn reindex_user_memories(channel: &str, user_id: &str) {
+/// Pull a user's memories from the state store into `dest`. `None` store
+/// (single-box) is a no-op returning `Ok(false)` — never attempts a pull.
+async fn pull_memories_with_store(
+    store: Option<&std::sync::Arc<dyn crate::sandbox::state::StateStore>>,
+    dest: &std::path::Path,
+    channel: &str,
+    user_id: &str,
+) -> anyhow::Result<bool> {
+    match store {
+        Some(s) => s.pull(&format!("mem/{channel}_{user_id}"), dest).await,
+        None => Ok(false),
+    }
+}
+
+pub async fn reindex_user_memories(channel: &str, user_id: &str) {
+    // Cloud mode: S3 is authoritative for memories — pull this user's prefix so
+    // the router index reflects what workers wrote. (Hand-edits on the router's
+    // disk get clobbered by this pull; route operator edits through a turn or
+    // straight to the store.) Single-box: no store → skipped. Best-effort.
+    match crate::config::Config::load()
+        .and_then(|cfg| crate::sandbox::state::default_store(&cfg))
+        .and_then(|store| crate::memory::memories_dir(channel, user_id).map(|dir| (store, dir)))
+    {
+        Ok((store, dest)) => {
+            if let Err(e) = pull_memories_with_store(store.as_ref(), &dest, channel, user_id).await
+            {
+                warn!(
+                    "Failed to pull memories for {}:{} (reindexing local copy): {}",
+                    channel, user_id, e
+                );
+            }
+        }
+        Err(e) => warn!(
+            "Failed to resolve store for memory pull {}:{}: {}",
+            channel, user_id, e
+        ),
+    }
+
     match MemoryIndex::open() {
         Ok(mut index) => {
             if let Err(e) = index.index_user_memories(channel, user_id) {
@@ -1069,4 +1106,43 @@ pub const SUPPORTED_CHANNELS: &[ChannelInfo] = &[
 /// Get channel info by name
 pub fn get_channel_info(name: &str) -> Option<&'static ChannelInfo> {
     SUPPORTED_CHANNELS.iter().find(|c| c.name == name)
+}
+
+#[cfg(test)]
+mod memory_pull_tests {
+    use super::*;
+    use crate::sandbox::state::{FilesystemStateStore, StateStore};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn pulls_from_store_into_dest() {
+        let store_root = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
+        // Seed a memory blob at mem/telegram_1.
+        let seed = tempfile::tempdir().unwrap();
+        std::fs::write(seed.path().join("note.md"), "remember this").unwrap();
+        store.push(seed.path(), "mem/telegram_1").await.unwrap();
+
+        let store_dyn: Option<Arc<dyn StateStore>> = Some(store);
+        let pulled = pull_memories_with_store(store_dyn.as_ref(), dest.path(), "telegram", "1")
+            .await
+            .unwrap();
+        assert!(pulled);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("note.md")).unwrap(),
+            "remember this"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_store_is_a_noop() {
+        let dest = tempfile::tempdir().unwrap();
+        let pulled = pull_memories_with_store(None, dest.path(), "telegram", "1")
+            .await
+            .unwrap();
+        assert!(!pulled);
+        // dest stays empty — single-box must not attempt any pull.
+        assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0);
+    }
 }

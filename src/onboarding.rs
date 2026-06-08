@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use crate::config;
-use crate::memory::{MemoryIndex, memories_dir};
+use crate::memory::MemoryIndex;
 use crate::setup;
 use crate::skills;
 
@@ -566,26 +566,22 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
     }
 
     if let (Some(ch), Some(uid)) = (channel_id, user_id) {
-        let mem_dir = memories_dir(ch, uid)?;
-
-        // Add memory guidance
+        // Memory guidance — personal vs. org-wide routing.
         lines.push("## Memories".to_string());
         lines.push(format!(
-            "You can save important information about conversations to your memory system at: {}",
-            mem_dir.display()
+            "You have a per-user memory store at: {}",
+            crate::memory::MEMORIES_DIR_TOKEN
         ));
         lines.push(String::new());
-        lines.push("When you learn something important about the user (preferences, projects they're working on, significant life events, technical details they share), you can save it as a memory file.".to_string());
+        lines.push("**Personal / user-specific** facts — this user's preferences, the projects they're driving, how they like answers, things they tell you about themselves — go in memory:".to_string());
+        lines.push("1. Ask the user if they'd like you to remember it.".to_string());
+        lines.push(format!(
+            "2. If they agree, write a markdown file under {} with a descriptive name (e.g. `preferences.md`, `project-foo.md`), formatted with headers and bullets.",
+            crate::memory::MEMORIES_DIR_TOKEN
+        ));
+        lines.push("Ask first; don't save trivia.".to_string());
         lines.push(String::new());
-        lines.push("To save a memory:".to_string());
-        lines.push("1. Ask the user if they'd like you to remember this".to_string());
-        lines.push("2. If they agree, write a markdown file to the memories directory".to_string());
-        lines.push(
-            "3. Use a descriptive filename like `project-foo.md` or `preferences.md`".to_string(),
-        );
-        lines.push("4. Format the content clearly with headers and bullet points".to_string());
-        lines.push(String::new());
-        lines.push("DO ask before saving memories. DON'T save trivial information.".to_string());
+        lines.push("**Durable org-wide** facts — where a feature lives, a data/schema gotcha, a domain term, a repo-routing rule — do NOT go in personal memory. Offer to capture them in the shared knowledge corpus via the `propose-knowledge` skill (a Draft PR others review) instead.".to_string());
         lines.push(String::new());
 
         // Search for relevant memories if we have a user message
@@ -621,4 +617,20 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
     }
 
     Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod memory_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn guidance_emits_token_and_routing_rule() {
+        let prompt =
+            build_context_prompt_for_user(Some("Telegram"), Some("telegram"), Some("1"), None)
+                .expect("prompt builds");
+        // Emits the placeholder token, not a router-absolute path.
+        assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
+        // Routes durable org facts to propose-knowledge, not personal memory.
+        assert!(prompt.contains("propose-knowledge"));
+    }
 }

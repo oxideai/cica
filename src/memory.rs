@@ -58,6 +58,11 @@ where
     f(guard.as_mut().unwrap())
 }
 
+/// Placeholder emitted into the system prompt by the router; substituted to the
+/// local per-user memories path by `LocalProcessProvider` in the process that
+/// actually runs the agent (the worker in cloud mode, the box itself single-box).
+pub const MEMORIES_DIR_TOKEN: &str = "{MEMORIES_DIR}";
+
 /// Get the memories directory for a user
 pub fn memories_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
     Ok(user_dir(channel, user_id)?.join("memories"))

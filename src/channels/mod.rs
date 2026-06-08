@@ -1042,6 +1042,11 @@ async fn pull_memories_with_store(
     }
 }
 
+/// Pull the user's memories from the authoritative state store (cloud) or skip
+/// (single-box), then re-index the local copy.
+///
+/// If a same-user follow-up message aborts this mid-pull, the local copy may be
+/// transiently incomplete; the next turn's pull re-heals it.
 pub async fn reindex_user_memories(channel: &str, user_id: &str) {
     // Cloud mode: S3 is authoritative for memories — pull this user's prefix so
     // the router index reflects what workers wrote. (Hand-edits on the router's
@@ -1144,5 +1149,24 @@ mod memory_pull_tests {
         assert!(!pulled);
         // dest stays empty — single-box must not attempt any pull.
         assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn absent_key_is_a_noop_and_does_not_clobber() {
+        let store_root = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
+        // Pre-existing local file that must survive a pull of a non-existent key.
+        std::fs::write(dest.path().join("local.md"), "keep me").unwrap();
+
+        let store_dyn: Option<Arc<dyn StateStore>> = Some(store);
+        let pulled = pull_memories_with_store(store_dyn.as_ref(), dest.path(), "telegram", "1")
+            .await
+            .unwrap();
+        assert!(!pulled);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("local.md")).unwrap(),
+            "keep me"
+        );
     }
 }

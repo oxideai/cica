@@ -1,0 +1,82 @@
+# Cica configuration example.
+#
+# Copy to your platform config dir (run `cica paths` to find it) as config.toml,
+# or let `cica init` generate one. Every section except a channel + backend is
+# optional. See docs/configuration.md for the full reference.
+
+# Which AI backend: "claude" or "cursor".
+backend = "claude"
+
+# Log conversations + system events to audit.db (default: true).
+audit = true
+
+# ----------------------------------------------------------------------------
+# Channels — configure at least one. A section's presence enables that channel.
+# ----------------------------------------------------------------------------
+
+[channels.telegram]
+bot_token = "123456:ABC-your-telegram-bot-token"
+# auto_approve = false      # auto-approve new users (skip `cica approve`)
+# shared_identity = false   # use shared PERSONA.md instead of per-user identity
+
+# [channels.signal]
+# phone_number = "+15551234567"
+
+# [channels.slack]
+# bot_token = "xoxb-..."
+# app_token = "xapp-..."
+# unfurl_links = false
+
+# ----------------------------------------------------------------------------
+# Backend credentials.
+# ----------------------------------------------------------------------------
+
+[claude]
+api_key = "sk-ant-..."
+# model = "sonnet"          # alias or full model ID
+
+# Vertex AI instead of the Anthropic API:
+# use_vertex = true
+# vertex_project_id = "my-gcp-project"
+# vertex_region = "europe-west1"
+# vertex_credentials_path = "/path/to/service-account.json"
+
+# [cursor]
+# api_key = "..."
+
+# ----------------------------------------------------------------------------
+# Cloud mode (optional). Omit everything below for single-box.
+# See docs/architecture.md.
+# ----------------------------------------------------------------------------
+
+# [deployment]
+# store = "s3"              # "filesystem" or "s3"
+# provider = "fargate"      # "local" | "subprocess" | "docker" | "fargate"
+# docker_image = "cica-worker:latest"   # for provider = "docker"
+# state_path = "/var/lib/cica/state"    # for store = "filesystem"
+
+# [deployment.s3]
+# bucket = "cica-state"
+# region = "eu-central-1"
+# prefix = "cica"           # optional key namespace
+# endpoint = "http://localhost:4566"    # LocalStack / MinIO override
+
+# [deployment.fargate]      # requires building with --features fargate
+# cluster = "cica-workers"
+# task_definition = "cica-worker"
+# subnets = ["subnet-aaa", "subnet-bbb"]
+# security_groups = ["sg-aaa"]
+# assign_public_ip = false
+# container_name = "cica-worker"
+# poll_interval_secs = 5
+# timeout_secs = 900
+
+# ----------------------------------------------------------------------------
+# Skills git-sync (optional, router-side). Pulls a skills repo and mirrors it to
+# the state store for workers. The git token comes from CICA_SKILLS_GIT_TOKEN.
+# ----------------------------------------------------------------------------
+
+# [skills]
+# repo = "https://github.com/your-org/ai-skills"
+# ref = "main"
+# refresh_secs = 600

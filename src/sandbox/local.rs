@@ -33,7 +33,10 @@ impl SandboxProvider for LocalProcessProvider {
 /// path. Token absent → prompt returned unchanged; `None` prompt → `None`.
 fn substitute_token(system_prompt: Option<&str>, memories_dir: &std::path::Path) -> Option<String> {
     let sp = system_prompt?;
-    Some(sp.replace(crate::memory::MEMORIES_DIR_TOKEN, &memories_dir.to_string_lossy()))
+    Some(sp.replace(
+        crate::memory::MEMORIES_DIR_TOKEN,
+        &memories_dir.to_string_lossy(),
+    ))
 }
 
 fn job_to_query_options(job: &TurnJob) -> backends::QueryOptions {
@@ -138,8 +141,14 @@ mod tests {
 
     #[test]
     fn substitutes_memories_token_when_present() {
-        let out = substitute_token(Some("save to {MEMORIES_DIR}/x.md please"), Path::new("/data/cica/users/telegram_1/memories"));
-        assert_eq!(out.as_deref(), Some("save to /data/cica/users/telegram_1/memories/x.md please"));
+        let out = substitute_token(
+            Some("save to {MEMORIES_DIR}/x.md please"),
+            Path::new("/data/cica/users/telegram_1/memories"),
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("save to /data/cica/users/telegram_1/memories/x.md please")
+        );
     }
 
     #[test]
@@ -152,5 +161,15 @@ mod tests {
     fn none_prompt_stays_none() {
         let out = substitute_token(None, Path::new("/m"));
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn job_options_substitutes_memories_token() {
+        let mut job = sample_job();
+        job.system_prompt = Some("write to {MEMORIES_DIR}/notes.md".into());
+        let opts = job_to_query_options(&job);
+        let sp = opts.system_prompt.unwrap();
+        assert!(!sp.contains("{MEMORIES_DIR}"));
+        assert!(sp.contains("/notes.md"));
     }
 }

@@ -77,6 +77,7 @@ pub fn query_result_from_turn(tr: TurnResult) -> QueryResult {
 mod tests {
     use super::*;
     use crate::config::AiBackend;
+    use std::path::Path;
 
     fn sample_job() -> TurnJob {
         TurnJob {
@@ -136,8 +137,6 @@ mod tests {
         let p = LocalProcessProvider::new();
         let _boxed: Box<dyn crate::sandbox::SandboxProvider> = Box::new(p);
     }
-
-    use std::path::Path;
 
     #[test]
     fn substitutes_memories_token_when_present() {

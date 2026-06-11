@@ -120,6 +120,7 @@ pub enum AiBackend {
 pub enum StoreKind {
     Filesystem,
     S3,
+    Gcs,
 }
 
 /// Where a turn executes (none/local = in-process; subprocess = one-shot worker).
@@ -130,6 +131,7 @@ pub enum ProviderKind {
     Subprocess,
     Docker,
     Fargate,
+    CloudRun,
 }
 
 /// Whether to `bun install` skill deps on this host at discovery time. Only
@@ -201,6 +203,44 @@ pub struct FargateConfig {
     pub timeout_secs: u64,
 }
 
+/// GCS state-store settings (used when `store = "gcs"`). Credentials come from
+/// Application Default Credentials (ADC), never config. No region: GCS object
+/// operations are addressed globally (the bucket carries its own location).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GcsConfig {
+    /// Bucket name (required).
+    pub bucket: String,
+    /// Optional key namespace within the bucket.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Optional endpoint override (fake-gcs-server / testing).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
+/// Cloud Run launcher settings (used when `provider = "cloudrun"`). Credentials
+/// come from ADC (the router VM's service account), never config. Networking
+/// (VPC connector, egress) is configured on the Cloud Run Job resource by the
+/// IaC — `RunJob` has no per-run network knob — so there are no network fields.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CloudRunConfig {
+    /// GCP project id (required).
+    pub project: String,
+    /// Region, e.g. "europe-west1" (required — Cloud Run is regional).
+    pub region: String,
+    /// Cloud Run Job name to execute (required).
+    pub job: String,
+    /// Which container's args to override; `None` = the job's single container.
+    #[serde(default)]
+    pub container_name: Option<String>,
+    /// GetExecution poll interval in seconds.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Max seconds to wait for the execution to finish before bailing.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
 /// Distributed-deployment configuration. All optional; absent = single-box.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeploymentConfig {
@@ -222,6 +262,12 @@ pub struct DeploymentConfig {
     /// Fargate launcher settings (used when `provider = "fargate"`).
     #[serde(default)]
     pub fargate: Option<FargateConfig>,
+    /// GCS store settings (used when `store = "gcs"`).
+    #[serde(default)]
+    pub gcs: Option<GcsConfig>,
+    /// Cloud Run launcher settings (used when `provider = "cloudrun"`).
+    #[serde(default)]
+    pub cloudrun: Option<CloudRunConfig>,
 }
 
 fn default_skills_ref() -> String {
@@ -766,5 +812,36 @@ ref = "v2.0"
         assert!(prep_skill_deps_locally(Some(ProviderKind::Docker)));
         // Remote worker hydrates its own skills + installs on demand → skip.
         assert!(!prep_skill_deps_locally(Some(ProviderKind::Fargate)));
+    }
+
+    #[test]
+    fn parses_gcs_store_and_cloudrun_provider() {
+        let toml = r#"
+            [deployment]
+            provider = "cloudrun"
+            store = "gcs"
+
+            [deployment.gcs]
+            bucket = "cica-state-acme"
+            prefix = "cica"
+
+            [deployment.cloudrun]
+            project = "acme-prod"
+            region = "europe-west1"
+            job = "cica-worker"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.deployment.store, Some(StoreKind::Gcs));
+        assert_eq!(cfg.deployment.provider, Some(ProviderKind::CloudRun));
+        let gcs = cfg.deployment.gcs.unwrap();
+        assert_eq!(gcs.bucket, "cica-state-acme");
+        assert_eq!(gcs.prefix.as_deref(), Some("cica"));
+        let cr = cfg.deployment.cloudrun.unwrap();
+        assert_eq!(cr.project, "acme-prod");
+        assert_eq!(cr.region, "europe-west1");
+        assert_eq!(cr.job, "cica-worker");
+        assert_eq!(cr.poll_interval_secs, 5); // serde default
+        assert_eq!(cr.timeout_secs, 900); // serde default
+        assert!(cr.container_name.is_none());
     }
 }

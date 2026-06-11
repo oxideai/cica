@@ -60,6 +60,9 @@ pub fn default_store(config: &Config) -> Result<Option<Arc<dyn StateStore>>> {
                 anyhow::bail!("`store = s3` requires the binary to be built with `--features s3`")
             }
         }
+        Some(StoreKind::Gcs) => {
+            anyhow::bail!("`store = gcs` is not yet implemented")
+        }
     }
 }
 

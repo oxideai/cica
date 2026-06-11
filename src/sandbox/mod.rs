@@ -135,6 +135,9 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
                 )
             }
         }
+        ProviderKind::CloudRun => {
+            anyhow::bail!("`provider = cloudrun` is not yet implemented")
+        }
     }
 }
 

@@ -134,11 +134,14 @@ pub enum ProviderKind {
     CloudRun,
 }
 
-/// Whether to `bun install` skill deps on this host at discovery time. Only
-/// `false` for Fargate, where turns run on a remote worker that hydrates its own
-/// skills copy and installs deps on demand — so installing here is wasted work.
+/// Whether to `bun install` skill deps on this host at discovery time. Returns
+/// `false` for Fargate and Cloud Run — both are remote workers that hydrate their
+/// own skills copy and install deps on demand — so installing here is wasted work.
 pub fn prep_skill_deps_locally(provider: Option<ProviderKind>) -> bool {
-    !matches!(provider, Some(ProviderKind::Fargate))
+    !matches!(
+        provider,
+        Some(ProviderKind::Fargate) | Some(ProviderKind::CloudRun)
+    )
 }
 
 /// S3 state-store settings (used when `store = "s3"`). Credentials come from the
@@ -520,6 +523,7 @@ impl Config {
             match v.as_str() {
                 "s3" => self.deployment.store = Some(StoreKind::S3),
                 "filesystem" => self.deployment.store = Some(StoreKind::Filesystem),
+                "gcs" => self.deployment.store = Some(StoreKind::Gcs),
                 other => tracing::warn!("ignoring unknown CICA_STORE={other}"),
             }
         }
@@ -534,6 +538,12 @@ impl Config {
                 .s3
                 .get_or_insert_with(Default::default)
                 .region = Some(v);
+        }
+        if let Some(v) = get("CICA_GCS_BUCKET") {
+            self.deployment
+                .gcs
+                .get_or_insert_with(Default::default)
+                .bucket = v;
         }
     }
 
@@ -812,6 +822,24 @@ ref = "v2.0"
         assert!(prep_skill_deps_locally(Some(ProviderKind::Docker)));
         // Remote worker hydrates its own skills + installs on demand → skip.
         assert!(!prep_skill_deps_locally(Some(ProviderKind::Fargate)));
+    }
+
+    #[test]
+    fn env_overlay_sets_gcs_store_and_bucket() {
+        let mut cfg = Config::default();
+        let env = |k: &str| match k {
+            "CICA_STORE" => Some("gcs".to_string()),
+            "CICA_GCS_BUCKET" => Some("cica-state-acme".to_string()),
+            _ => None,
+        };
+        cfg.overlay_from_env(env);
+        assert_eq!(cfg.deployment.store, Some(StoreKind::Gcs));
+        assert_eq!(cfg.deployment.gcs.unwrap().bucket, "cica-state-acme");
+    }
+
+    #[test]
+    fn cloudrun_skips_local_skill_deps() {
+        assert!(!prep_skill_deps_locally(Some(ProviderKind::CloudRun)));
     }
 
     #[test]

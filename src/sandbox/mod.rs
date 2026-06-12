@@ -7,6 +7,8 @@
 pub mod artifacts;
 #[cfg(feature = "fargate")]
 mod fargate;
+#[cfg(feature = "cloudrun")]
+mod cloudrun;
 pub mod hydrating;
 mod local;
 pub mod state;

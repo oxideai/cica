@@ -994,6 +994,7 @@ dependencies = [
  "fastembed",
  "flate2",
  "google-cloud-auth",
+ "google-cloud-run-v2",
  "google-cloud-storage",
  "http-body-util",
  "hyper 1.10.1",
@@ -2117,6 +2118,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "google-cloud-api"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c61af87418a72938df35c626f9de0c47942c279d41f10c5485315ddbaef4f95"
+dependencies = [
+ "bytes",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with 3.16.1",
+]
+
+[[package]]
 name = "google-cloud-auth"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2263,6 +2277,28 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with 3.16.1",
+]
+
+[[package]]
+name = "google-cloud-run-v2"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0ac50dc1c1876fa2451e3ee8487ba0cb63bb83367d7f10ada5a12df938945f2"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "google-cloud-api",
+ "google-cloud-gax",
+ "google-cloud-gax-internal",
+ "google-cloud-iam-v1",
+ "google-cloud-longrunning",
+ "google-cloud-lro",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
+ "serde",
+ "serde_json",
+ "serde_with 3.16.1",
+ "tracing",
 ]
 
 [[package]]
@@ -2720,7 +2756,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4094,7 +4130,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4132,7 +4168,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]

@@ -92,12 +92,15 @@ google-cloud-storage = { version = "1.14", optional = true }
 # `aws-lc-rs ^1.17`, which conflicts with the `rustls`-locked `aws-lc-rs 1.15`.
 # Anonymous credentials need none of those backends.
 google-cloud-auth = { version = "1.13", default-features = false, optional = true }
+# Cloud Run launcher (feature "cloudrun")
+google-cloud-run-v2 = { version = "1.11", optional = true }
 
 [features]
 default = []
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 fargate = ["s3", "dep:aws-sdk-ecs"]
 gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
+cloudrun = ["gcs", "dep:google-cloud-run-v2"]
 cloud = ["fargate"]
 
 [dev-dependencies]

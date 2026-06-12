@@ -447,32 +447,13 @@ git commit -m "feat(state): GcsStateStore (feature gcs) + gated fake-gcs-server 
 
 ---
 
-## Task 5: CI `gcs-store` job
+## Task 5: ~~CI `gcs-store` job~~ → SUPERSEDED (no GCS emulator in CI)
 
-Mirror the `s3-store` CI job, swapping LocalStack for `fake-gcs-server`.
+**Revised 2026-06-12 by the Task 4 finding.** The planned `fake-gcs-server` job is **infeasible**: the official `google-cloud-storage` SDK serves list/delete via `StorageControl`, a **gRPC-only** client, while `fake-gcs-server` is JSON/REST only (verified: `HTTP2 GoAway / FRAME_SIZE_ERROR` on `list_objects`). Google's `storage-testbench` does gRPC but needs a `/start_grpc` dance and has known gRPC-in-Docker flakiness (testbench #295) — rejected for CI.
 
-**Files:**
-- Modify: the CI workflow that defines `s3-store` (find with `grep -rl 's3-store' .github/workflows`)
+**Decision:** no GCS emulator job. The live `GcsStateStore` IT (already written in Task 4, auto-skips without `CICA_GCS_IT`) is **deferred to the GCP-IaC/deploy track against a real bucket** — the same pattern as Fargate's first real `RunTask`. CI coverage of the `gcs` feature (build + clippy + unit tests) is folded into **Task 9's `cloud` lane** (`cargo clippy --features cloud …` + `cargo test --features cloud`), so there is no separate `gcs-store` job.
 
-- [ ] **Step 1: Add the job**
-
-Copy the `s3-store` job to a `gcs-store` job: a `fsouza/fake-gcs-server` service container (or `docker run` step) on `4443` with `-scheme http`, then:
-```bash
-CICA_GCS_IT=1 CICA_GCS_ENDPOINT=http://localhost:4443 CICA_GCS_BUCKET=cica-test \
-  cargo test --features gcs --lib sandbox::state::gcs -- --include-ignored
-```
-Match the existing job's runner, cache, and checkout steps exactly.
-
-- [ ] **Step 2: Verify the workflow parses**
-
-Run: `grep -n 'gcs-store' .github/workflows/*.yml` and confirm the YAML indentation matches the sibling job.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add .github/workflows/
-git commit -m "ci: gcs-store job (fake-gcs-server integration test)"
-```
+**No action in this task** beyond the spec/plan note (already applied). The spec's "Testing strategy" section records the finding and the deferral. Proceed to Task 6.
 
 ---
 

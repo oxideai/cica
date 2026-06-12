@@ -82,7 +82,10 @@ impl Launcher for CloudRunLauncher {
                 if let Err(e) = self.run.cancel_execution(&exec).await {
                     tracing::warn!("failed to cancel timed-out execution {exec}: {e}");
                 }
-                bail!("worker execution timed out after {}s", self.config.timeout_secs);
+                bail!(
+                    "worker execution timed out after {}s",
+                    self.config.timeout_secs
+                );
             }
             sleep(interval).await;
         }
@@ -191,9 +194,8 @@ impl CloudRunClient for GcpRunClient {
 
         let terminal = exec.completion_time.is_some();
         // Count-based success decision (avoids depending on a success-state enum variant).
-        let succeeded = exec.succeeded_count > 0
-            && exec.failed_count == 0
-            && exec.cancelled_count == 0;
+        let succeeded =
+            exec.succeeded_count > 0 && exec.failed_count == 0 && exec.cancelled_count == 0;
         let reason = if terminal && !succeeded {
             exec.conditions
                 .iter()

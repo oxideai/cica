@@ -5,10 +5,10 @@
 //! providers behind the same `SandboxProvider` trait.
 
 pub mod artifacts;
-#[cfg(feature = "fargate")]
-mod fargate;
 #[cfg(feature = "cloudrun")]
 mod cloudrun;
+#[cfg(feature = "fargate")]
+mod fargate;
 pub mod hydrating;
 mod local;
 pub mod state;
@@ -144,7 +144,9 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
             #[cfg(feature = "cloudrun")]
             {
                 let cc = config.deployment.cloudrun.clone().ok_or_else(|| {
-                    anyhow::anyhow!("`provider = cloudrun` requires a [deployment.cloudrun] section")
+                    anyhow::anyhow!(
+                        "`provider = cloudrun` requires a [deployment.cloudrun] section"
+                    )
                 })?;
                 Ok(Box::new(worker::LaunchedWorkerProvider::new(
                     store,

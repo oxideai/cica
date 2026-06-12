@@ -105,7 +105,7 @@ s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 fargate = ["s3", "dep:aws-sdk-ecs"]
 gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
 cloudrun = ["gcs", "dep:google-cloud-run-v2", "dep:google-cloud-lro"]
-cloud = ["fargate"]
+cloud = ["fargate", "cloudrun"]
 
 [dev-dependencies]
 tempfile = "3"

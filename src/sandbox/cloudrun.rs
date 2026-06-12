@@ -14,7 +14,6 @@ use crate::config::CloudRunConfig;
 use crate::sandbox::worker::Launcher;
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // used by CloudRunLauncher (Task 8 wires the provider)
 pub(crate) struct RunJobRequest {
     pub project: String,
     pub region: String,
@@ -24,7 +23,6 @@ pub(crate) struct RunJobRequest {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // used by CloudRunLauncher (Task 8 wires the provider)
 pub(crate) struct ExecutionStatus {
     pub terminal: bool,
     pub succeeded: bool,
@@ -33,20 +31,17 @@ pub(crate) struct ExecutionStatus {
 
 /// What CloudRunLauncher needs from Cloud Run — keeps google-cloud-run-v2 at the edge.
 #[async_trait]
-#[allow(dead_code)] // implemented by GcpRunClient and FakeRun; Task 8 wires the provider
 pub(crate) trait CloudRunClient: Send + Sync {
     async fn run_job(&self, req: &RunJobRequest) -> Result<String>;
     async fn get_execution(&self, execution: &str) -> Result<ExecutionStatus>;
     async fn cancel_execution(&self, execution: &str) -> Result<()>;
 }
 
-#[allow(dead_code)] // Task 8 wires this into try_default_provider
 pub struct CloudRunLauncher {
     run: Box<dyn CloudRunClient>,
     config: CloudRunConfig,
 }
 
-#[allow(dead_code)] // Task 8 wires this into try_default_provider; methods unused until then
 impl CloudRunLauncher {
     /// Build the GCP-backed launcher (lazy client). Real client is Task 7.
     pub fn new(config: CloudRunConfig) -> Self {

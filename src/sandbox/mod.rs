@@ -138,7 +138,26 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
             }
         }
         ProviderKind::CloudRun => {
-            anyhow::bail!("`provider = cloudrun` is not yet implemented")
+            let store = store.ok_or_else(|| {
+                anyhow::anyhow!("`provider = cloudrun` requires [deployment].store to be set")
+            })?;
+            #[cfg(feature = "cloudrun")]
+            {
+                let cc = config.deployment.cloudrun.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`provider = cloudrun` requires a [deployment.cloudrun] section")
+                })?;
+                Ok(Box::new(worker::LaunchedWorkerProvider::new(
+                    store,
+                    Box::new(cloudrun::CloudRunLauncher::new(cc)),
+                )))
+            }
+            #[cfg(not(feature = "cloudrun"))]
+            {
+                let _ = store;
+                anyhow::bail!(
+                    "`provider = cloudrun` requires the binary to be built with `--features cloudrun`"
+                )
+            }
         }
     }
 }
@@ -222,6 +241,25 @@ mod tests {
         use crate::config::{Config, ProviderKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Fargate);
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[cfg(not(feature = "cloudrun"))]
+    #[test]
+    fn cloudrun_provider_requires_feature() {
+        use crate::config::{Config, ProviderKind, StoreKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::CloudRun);
+        cfg.deployment.store = Some(StoreKind::Filesystem);
+        cfg.deployment.state_path = Some("/tmp/cica-cr-test".into());
+        assert!(try_default_provider(&cfg).is_err());
+    }
+
+    #[test]
+    fn cloudrun_provider_requires_a_store() {
+        use crate::config::{Config, ProviderKind};
+        let mut cfg = Config::default();
+        cfg.deployment.provider = Some(ProviderKind::CloudRun);
         assert!(try_default_provider(&cfg).is_err());
     }
 

@@ -113,6 +113,13 @@ fn job_name(project: &str, region: &str, job: &str) -> String {
     format!("projects/{project}/locations/{region}/jobs/{job}")
 }
 
+/// Whether a Cloud Run execution counts as a successful worker run: at least one
+/// task succeeded and none failed or were cancelled. Used by `get_execution` to
+/// map raw task counts onto `ExecutionStatus.succeeded`.
+fn execution_succeeded(succeeded_count: i32, failed_count: i32, cancelled_count: i32) -> bool {
+    succeeded_count > 0 && failed_count == 0 && cancelled_count == 0
+}
+
 impl GcpRunClient {
     pub(crate) fn new(_config: &CloudRunConfig) -> Self {
         Self {
@@ -195,7 +202,7 @@ impl CloudRunClient for GcpRunClient {
         let terminal = exec.completion_time.is_some();
         // Count-based success decision (avoids depending on a success-state enum variant).
         let succeeded =
-            exec.succeeded_count > 0 && exec.failed_count == 0 && exec.cancelled_count == 0;
+            execution_succeeded(exec.succeeded_count, exec.failed_count, exec.cancelled_count);
         let reason = if terminal && !succeeded {
             exec.conditions
                 .iter()
@@ -293,6 +300,16 @@ mod tests {
             succeeded,
             reason: None,
         }
+    }
+
+    #[test]
+    fn execution_succeeded_only_when_one_ok_and_no_bad() {
+        assert!(execution_succeeded(1, 0, 0));
+        assert!(execution_succeeded(3, 0, 0));
+        assert!(!execution_succeeded(0, 0, 0)); // nothing ran/succeeded
+        assert!(!execution_succeeded(1, 1, 0)); // a task failed
+        assert!(!execution_succeeded(1, 0, 1)); // a task was cancelled
+        assert!(!execution_succeeded(0, 1, 0));
     }
 
     #[test]

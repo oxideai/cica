@@ -5,8 +5,9 @@
 //! `CloudRunClient` trait so the launch/poll/cancel state machine is testable
 //! without GCP; `google-cloud-run-v2` lives only in `GcpRunClient` (Task 7).
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use tokio::sync::OnceCell;
 use tokio::time::{Duration, Instant, sleep};
 
 use crate::config::CloudRunConfig;
@@ -93,25 +94,138 @@ impl Launcher for CloudRunLauncher {
     }
 }
 
-// --- TEMPORARY stub: replaced by the real google-cloud-run-v2 impl in Task 7 ---
-#[allow(dead_code)] // replaced in Task 7; kept so CloudRunLauncher::new compiles
-struct GcpRunClient;
-#[allow(dead_code)] // replaced in Task 7; kept so CloudRunLauncher::new compiles
+// --- Real google-cloud-run-v2 client (ADC), mirroring AwsEcsClient's lazy pattern. ---
+
+/// The two Cloud Run clients we need, built once on first use.
+struct RunClients {
+    jobs: google_cloud_run_v2::client::Jobs,
+    executions: google_cloud_run_v2::client::Executions,
+}
+
+/// Real `CloudRunClient` over `google-cloud-run-v2`, with lazily-built ADC clients.
+///
+/// Holds no config: every call gets its target (project/region/job) from the
+/// `RunJobRequest` the launcher builds, and ADC resolves credentials itself.
+pub(crate) struct GcpRunClient {
+    clients: OnceCell<RunClients>,
+}
+
+/// The fully-qualified Cloud Run Job resource name. Pure, for testing.
+fn job_name(project: &str, region: &str, job: &str) -> String {
+    format!("projects/{project}/locations/{region}/jobs/{job}")
+}
+
 impl GcpRunClient {
-    fn new(_config: &CloudRunConfig) -> Self {
-        GcpRunClient
+    pub(crate) fn new(_config: &CloudRunConfig) -> Self {
+        Self {
+            clients: OnceCell::new(),
+        }
+    }
+
+    async fn clients(&self) -> Result<&RunClients> {
+        self.clients
+            .get_or_try_init(|| async {
+                // ADC by default (resolved on the worker / Cloud Run service account).
+                let jobs = google_cloud_run_v2::client::Jobs::builder()
+                    .build()
+                    .await
+                    .context("building Cloud Run Jobs client")?;
+                let executions = google_cloud_run_v2::client::Executions::builder()
+                    .build()
+                    .await
+                    .context("building Cloud Run Executions client")?;
+                Ok::<_, anyhow::Error>(RunClients { jobs, executions })
+            })
+            .await
     }
 }
+
 #[async_trait]
 impl CloudRunClient for GcpRunClient {
-    async fn run_job(&self, _req: &RunJobRequest) -> Result<String> {
-        bail!("GcpRunClient not yet implemented (Task 7)")
+    async fn run_job(&self, req: &RunJobRequest) -> Result<String> {
+        use google_cloud_lro::{Poller, PollingResult};
+        use google_cloud_run_v2::model::run_job_request::{
+            Overrides, overrides::ContainerOverride,
+        };
+
+        let mut container = ContainerOverride::new().set_args(req.args.clone());
+        // Name targets a specific container; omitted (empty) for a sole-container job.
+        if let Some(name) = &req.container_name {
+            container = container.set_name(name.clone());
+        }
+        let overrides = Overrides::new().set_container_overrides([container]);
+        let name = job_name(&req.project, &req.region, &req.job);
+
+        // Fire RunJob and read the execution resource name from the first poll —
+        // do NOT await the job to completion (we poll GetExecution on our cadence).
+        let mut poller = self
+            .clients()
+            .await?
+            .jobs
+            .run_job()
+            .set_name(name)
+            .set_overrides(overrides)
+            .poller();
+        match poller.poll().await {
+            Some(PollingResult::InProgress(Some(exec))) => Ok(exec.name),
+            Some(PollingResult::Completed(res)) => {
+                Ok(res.context("run_job execution completed with error")?.name)
+            }
+            Some(PollingResult::InProgress(None)) => {
+                bail!("run_job: no execution metadata on first poll")
+            }
+            Some(PollingResult::PollingError(e)) => {
+                Err(anyhow::Error::from(e).context("run_job: polling error"))
+            }
+            None => bail!("run_job: poller returned no result"),
+        }
     }
-    async fn get_execution(&self, _e: &str) -> Result<ExecutionStatus> {
-        bail!("GcpRunClient not yet implemented (Task 7)")
+
+    async fn get_execution(&self, execution: &str) -> Result<ExecutionStatus> {
+        use google_cloud_run_v2::model::condition::State;
+
+        let exec = self
+            .clients()
+            .await?
+            .executions
+            .get_execution()
+            .set_name(execution)
+            .send()
+            .await
+            .context("cloud run get_execution")?;
+
+        let terminal = exec.completion_time.is_some();
+        // Count-based success decision (avoids depending on a success-state enum variant).
+        let succeeded = exec.succeeded_count > 0
+            && exec.failed_count == 0
+            && exec.cancelled_count == 0;
+        let reason = if terminal && !succeeded {
+            exec.conditions
+                .iter()
+                .find(|c| c.state == State::ConditionFailed)
+                .map(|c| c.message.clone())
+        } else {
+            None
+        };
+
+        Ok(ExecutionStatus {
+            terminal,
+            succeeded,
+            reason,
+        })
     }
-    async fn cancel_execution(&self, _e: &str) -> Result<()> {
-        bail!("GcpRunClient not yet implemented (Task 7)")
+
+    async fn cancel_execution(&self, execution: &str) -> Result<()> {
+        // Best-effort, also an LRO: fire send() and don't await completion.
+        self.clients()
+            .await?
+            .executions
+            .cancel_execution()
+            .set_name(execution)
+            .send()
+            .await
+            .context("cloud run cancel_execution")?;
+        Ok(())
     }
 }
 
@@ -182,6 +296,14 @@ mod tests {
             succeeded,
             reason: None,
         }
+    }
+
+    #[test]
+    fn job_name_is_fully_qualified() {
+        assert_eq!(
+            job_name("acme", "europe-west1", "cica-worker"),
+            "projects/acme/locations/europe-west1/jobs/cica-worker"
+        );
     }
 
     #[test]

@@ -994,6 +994,7 @@ dependencies = [
  "fastembed",
  "flate2",
  "google-cloud-auth",
+ "google-cloud-lro",
  "google-cloud-run-v2",
  "google-cloud-storage",
  "http-body-util",

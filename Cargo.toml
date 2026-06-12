@@ -94,13 +94,17 @@ google-cloud-storage = { version = "1.14", optional = true }
 google-cloud-auth = { version = "1.13", default-features = false, optional = true }
 # Cloud Run launcher (feature "cloudrun")
 google-cloud-run-v2 = { version = "1.11", optional = true }
+# LRO poller types (`Poller`/`PollingResult`) — used to read the execution
+# resource name from RunJob's first poll. `google-cloud-run-v2` depends on this
+# transitively but does NOT re-export the trait/enum, so it's a direct dep.
+google-cloud-lro = { version = "1.8", optional = true }
 
 [features]
 default = []
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 fargate = ["s3", "dep:aws-sdk-ecs"]
 gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
-cloudrun = ["gcs", "dep:google-cloud-run-v2"]
+cloudrun = ["gcs", "dep:google-cloud-run-v2", "dep:google-cloud-lro"]
 cloud = ["fargate"]
 
 [dev-dependencies]

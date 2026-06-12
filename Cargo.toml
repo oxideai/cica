@@ -84,10 +84,20 @@ aws-sdk-s3 = { version = "1", optional = true }
 # Fargate launcher (feature "fargate")
 aws-sdk-ecs = { version = "1", optional = true }
 
+# GCS state store (feature "gcs")
+google-cloud-storage = { version = "1.14", optional = true }
+# Only needed to construct anonymous credentials for the emulator/endpoint path
+# (real GCS uses ADC, which `google-cloud-storage` resolves on its own).
+# default-features disabled: the default `default-idtoken-backend` pulls
+# `aws-lc-rs ^1.17`, which conflicts with the `rustls`-locked `aws-lc-rs 1.15`.
+# Anonymous credentials need none of those backends.
+google-cloud-auth = { version = "1.13", default-features = false, optional = true }
+
 [features]
 default = []
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 fargate = ["s3", "dep:aws-sdk-ecs"]
+gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
 cloud = ["fargate"]
 
 [dev-dependencies]

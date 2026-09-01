@@ -122,8 +122,10 @@ pub fn markdown_to_mrkdwn(text: &str) -> String {
     result
 }
 
-/// How often the "thinking" status is refreshed while a turn runs.
-const STATUS_REFRESH: Duration = Duration::from_secs(30);
+/// How often the "thinking" status is re-asserted while a turn runs. Short
+/// because Slack re-applies its own default status after ours; this is the
+/// window in which the user sees Slack's text instead of the turn's progress.
+const STATUS_REFRESH: Duration = Duration::from_secs(10);
 
 /// Status text for a turn that has been running for `elapsed`. The minute count
 /// is what distinguishes a slow turn from a dead one.

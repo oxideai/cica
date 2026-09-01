@@ -130,10 +130,16 @@ Absent means no skills sync (skills are read from the local folder only).
 
 These overlay config at load time (env wins over file). The cloud worker uses these so it needs no `config.toml`.
 
+> With `provider = "fargate"`, a worker's config is **only** what these variables carry — the launcher overrides the
+> container command and cannot deliver the router's `config.toml`. A setting with no variable in this table falls back
+> to its default on every worker turn, whatever the router's `config.toml` says.
+
 | Variable | Overrides | Notes |
 |---|---|---|
 | `CICA_CLAUDE_API_KEY` | `claude.api_key` | |
 | `CICA_CURSOR_API_KEY` | `cursor.api_key` | |
+| `CICA_CLAUDE_MODEL` | `claude.model` | Alias (`"sonnet"`, `"opus"`) or full model ID. |
+| `CICA_CURSOR_MODEL` | `cursor.model` | |
 | `CICA_BACKEND` | `backend` | `claude` or `cursor`. |
 | `CICA_STORE` | `deployment.store` | `s3` or `filesystem`. |
 | `CICA_S3_BUCKET` | `deployment.s3.bucket` | |

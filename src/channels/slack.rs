@@ -4,6 +4,7 @@ use slack_morphism::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -119,6 +120,20 @@ pub fn markdown_to_mrkdwn(text: &str) -> String {
     result = link_re.replace_all(&result, "<$2|$1>").to_string();
 
     result
+}
+
+/// How often the "thinking" status is re-asserted while a turn runs. Short
+/// because Slack re-applies its own default status after ours; this is the
+/// window in which the user sees Slack's text instead of the turn's progress.
+const STATUS_REFRESH: Duration = Duration::from_secs(10);
+
+/// Status text for a turn that has been running for `elapsed`. The minute count
+/// is what distinguishes a slow turn from a dead one.
+fn thinking_status(elapsed: Duration) -> String {
+    match elapsed.as_secs() / 60 {
+        0 => "is thinking...".to_string(),
+        mins => format!("is thinking... ({mins}m)"),
+    }
 }
 
 /// Slack channel implementation for AI Assistant threads.
@@ -286,34 +301,39 @@ impl Channel for SlackChannel {
             let channel_id = self.channel_id.clone();
             let thread_ts = thread_ts.clone();
 
-            let client_clone = client.clone();
-            let token_clone = token.clone();
-            let channel_id_clone = channel_id.clone();
-            let thread_ts_clone = thread_ts.clone();
+            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
 
+            // Refresh rather than set once: a status frozen at "is thinking..."
+            // for several minutes is indistinguishable from a crashed turn.
             tokio::spawn(async move {
-                let session = client_clone.open_session(&token_clone);
-                let request = SlackApiAssistantThreadsSetStatusRequest::new(
-                    channel_id_clone,
-                    "is thinking...".to_string(),
-                    thread_ts_clone,
-                );
-                if let Err(e) = session.assistant_threads_set_status(&request).await {
-                    warn!("Failed to set assistant status: {}", e);
-                }
-            });
-
-            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-
-            tokio::spawn(async move {
-                let _ = cancel_rx.await;
                 let session = client.open_session(&token);
-                let request = SlackApiAssistantThreadsSetStatusRequest::new(
-                    channel_id,
-                    String::new(),
-                    thread_ts,
-                );
-                let _ = session.assistant_threads_set_status(&request).await;
+                let started = Instant::now();
+                let mut status = thinking_status(Duration::ZERO);
+
+                loop {
+                    let request = SlackApiAssistantThreadsSetStatusRequest::new(
+                        channel_id.clone(),
+                        status.clone(),
+                        thread_ts.clone(),
+                    );
+                    if let Err(e) = session.assistant_threads_set_status(&request).await {
+                        warn!("Failed to set assistant status: {}", e);
+                    }
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(STATUS_REFRESH) => {
+                            status = thinking_status(started.elapsed());
+                        }
+                        _ = &mut cancel_rx => {
+                            status = String::new();
+                            let request = SlackApiAssistantThreadsSetStatusRequest::new(
+                                channel_id, status, thread_ts,
+                            );
+                            let _ = session.assistant_threads_set_status(&request).await;
+                            break;
+                        }
+                    }
+                }
             });
 
             TypingGuard::new(cancel_tx)
@@ -890,4 +910,28 @@ async fn handle_command_events(
     Ok(SlackCommandEventResponse::new(
         SlackMessageContent::new().with_text("OK".to_string()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::thinking_status;
+    use std::time::Duration;
+
+    #[test]
+    fn shows_no_minutes_under_a_minute() {
+        assert_eq!(thinking_status(Duration::from_secs(0)), "is thinking...");
+        assert_eq!(thinking_status(Duration::from_secs(59)), "is thinking...");
+    }
+
+    #[test]
+    fn counts_whole_minutes() {
+        assert_eq!(
+            thinking_status(Duration::from_secs(60)),
+            "is thinking... (1m)"
+        );
+        assert_eq!(
+            thinking_status(Duration::from_secs(570)),
+            "is thinking... (9m)"
+        );
+    }
 }

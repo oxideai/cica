@@ -45,7 +45,8 @@ RUN mkdir -p \
       /data/cica/internal/deps/cursor-cli \
       /data/cica/internal/deps/claude-code \
       /data/cica/internal/claude-home \
-      /data/cica/internal/cursor-home
+      /data/cica/internal/cursor-home \
+ && chown -R cica:cica /data/cica
 
 # Nix: flakes + public binary caches (cold builds are downloads, not from-source).
 RUN mkdir -p /etc/nix \
@@ -73,6 +74,8 @@ ENV PATH="/home/cica/.nix-profile/bin:${PATH}"
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
  && bun --version
 
+USER cica
+
 # -- Cursor CLI (cursor-agent) -- (amd64 / linux x64 only)
 ARG CURSOR_CLI_VERSION=2026.01.28-fd13201
 RUN curl -fsSL \
@@ -88,8 +91,7 @@ ARG CLAUDE_CODE_VERSION=2.1.32
 RUN cd /data/cica/internal/deps/claude-code \
  && bun add "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
+USER root
 COPY --from=binsrc /cica /usr/local/bin/cica
-
-RUN chown -R cica:cica /data/cica
 
 ENTRYPOINT ["cica"]

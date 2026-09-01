@@ -449,7 +449,10 @@ impl Config {
 
     /// Overlay deployment-relevant config and credential secrets from the
     /// process environment. Lets a cloud worker run with NO `config.toml` —
-    /// everything (backend, store, S3 coords, AI keys) comes from the task env.
+    /// everything (backend, store, S3 coords, AI keys, model) comes from the
+    /// task env. A provider that cannot deliver the operator's `config.toml`
+    /// to the worker (Fargate: command override only, no bind mount) can only
+    /// configure what is listed here.
     pub(crate) fn apply_env_overlay(&mut self) {
         self.overlay_from_env(|k| std::env::var(k).ok());
     }
@@ -462,6 +465,12 @@ impl Config {
         }
         if let Some(v) = get("CICA_CLAUDE_API_KEY") {
             self.claude.api_key = Some(v);
+        }
+        if let Some(v) = get("CICA_CURSOR_MODEL") {
+            self.cursor.model = Some(v);
+        }
+        if let Some(v) = get("CICA_CLAUDE_MODEL") {
+            self.claude.model = Some(v);
         }
         if let Some(v) = get("CICA_BACKEND") {
             match v.as_str() {
@@ -646,6 +655,36 @@ mod tests {
     }
 
     #[test]
+    fn env_overlay_sets_claude_and_cursor_models() {
+        let mut cfg = Config::default();
+        assert!(cfg.claude.model.is_none());
+        let env = |k: &str| match k {
+            "CICA_CLAUDE_MODEL" => Some("opus".to_string()),
+            "CICA_CURSOR_MODEL" => Some("auto".to_string()),
+            _ => None,
+        };
+        cfg.overlay_from_env(env);
+        assert_eq!(cfg.claude.model.as_deref(), Some("opus"));
+        assert_eq!(cfg.cursor.model.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn env_overlay_model_overrides_config_file_value() {
+        let mut cfg = Config::default();
+        cfg.claude.model = Some("from-file".into());
+        cfg.overlay_from_env(|k| (k == "CICA_CLAUDE_MODEL").then(|| "opus".to_string()));
+        assert_eq!(cfg.claude.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn env_overlay_leaves_model_when_env_absent() {
+        let mut cfg = Config::default();
+        cfg.claude.model = Some("from-file".into());
+        cfg.overlay_from_env(|_| None);
+        assert_eq!(cfg.claude.model.as_deref(), Some("from-file"));
+    }
+
+    #[test]
     fn env_overlay_leaves_config_value_when_env_absent() {
         let mut cfg = Config::default();
         cfg.cursor.api_key = Some("from-file".into());
@@ -688,12 +727,14 @@ mod tests {
             "CICA_S3_BUCKET" => Some("b".to_string()),
             "CICA_S3_REGION" => Some("r".to_string()),
             "CICA_CURSOR_API_KEY" => Some("sekret".to_string()),
+            "CICA_CURSOR_MODEL" => Some("auto".to_string()),
             _ => None,
         };
         cfg.overlay_from_env(env);
         assert_eq!(cfg.backend, AiBackend::Cursor);
         assert_eq!(cfg.deployment.store, Some(StoreKind::S3));
         assert_eq!(cfg.cursor.api_key.as_deref(), Some("sekret"));
+        assert_eq!(cfg.cursor.model.as_deref(), Some("auto"));
     }
 
     #[test]

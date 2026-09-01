@@ -36,6 +36,13 @@ pub struct QueryOptions {
     pub model: Option<String>,
 }
 
+/// Matches Claude Code's "No conversation found with session ID: <uuid>".
+/// Kept narrow: a broader match would drop a live session's history on
+/// unrelated errors.
+fn is_missing_conversation(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("no conversation found")
+}
+
 #[allow(dead_code)]
 pub async fn query(prompt: &str) -> Result<String> {
     let result = query_with_options(prompt, QueryOptions::default()).await?;
@@ -71,90 +78,108 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
     debug!("Using bun: {:?}", bun);
     debug!("Using claude_code: {:?}", claude_code);
 
-    let mut cmd = Command::new(&bun);
-    cmd.arg("run")
-        .arg(&claude_code)
-        .args(["-p", "--output-format", "json"])
-        .env("HOME", &paths.claude_home);
+    let build_command = |resume_session: Option<&str>| {
+        let mut cmd = Command::new(&bun);
+        cmd.arg("run")
+            .arg(&claude_code)
+            .args(["-p", "--output-format", "json"])
+            .env("HOME", &paths.claude_home);
 
-    if options.skip_permissions {
-        cmd.arg("--dangerously-skip-permissions");
-    }
-
-    if let Some(ref system_prompt) = options.system_prompt {
-        if options.resume_session.is_none() {
-            cmd.args(["--system-prompt", system_prompt]);
-        } else {
-            cmd.args(["--append-system-prompt", system_prompt]);
+        if options.skip_permissions {
+            cmd.arg("--dangerously-skip-permissions");
         }
-    }
 
-    if let Some(ref session_id) = options.resume_session {
-        cmd.args(["--resume", session_id]);
-    }
-
-    if let Some(ref model) = options.model {
-        cmd.args(["--model", model]);
-    }
-
-    if let Some(ref cwd) = options.cwd {
-        cmd.current_dir(cwd);
-    } else {
-        cmd.current_dir(&paths.base);
-    }
-
-    cmd.arg(prompt);
-
-    if use_vertex {
-        cmd.env("CLAUDE_CODE_USE_VERTEX", "1");
-        cmd.env(
-            "ANTHROPIC_VERTEX_PROJECT_ID",
-            vertex_project_id.unwrap_or(""),
-        );
-        cmd.env(
-            "CLOUD_ML_REGION",
-            config
-                .claude
-                .vertex_region
-                .as_deref()
-                .unwrap_or("europe-west1"),
-        );
-        // Long-lived auth: service account key file (recommended for servers; no gcloud expiry)
-        if let Some(ref cred_path) = config.claude.vertex_credentials_path {
-            let path = std::path::Path::new(cred_path);
-            let abs = if path.is_relative() {
-                paths.base.join(cred_path)
+        if let Some(ref system_prompt) = options.system_prompt {
+            if resume_session.is_none() {
+                cmd.args(["--system-prompt", system_prompt]);
             } else {
-                path.to_path_buf()
-            };
-            if abs.exists() {
-                cmd.env("GOOGLE_APPLICATION_CREDENTIALS", &abs);
+                cmd.args(["--append-system-prompt", system_prompt]);
             }
         }
-        // Otherwise Vertex uses gcloud ADC or existing GOOGLE_APPLICATION_CREDENTIALS env
-    } else if let Some(cred) = credential {
-        match setup::detect_credential_type(cred) {
-            setup::CredentialType::ApiKey => {
-                cmd.env("ANTHROPIC_API_KEY", cred);
+
+        if let Some(session_id) = resume_session {
+            cmd.args(["--resume", session_id]);
+        }
+
+        if let Some(ref model) = options.model {
+            cmd.args(["--model", model]);
+        }
+
+        if let Some(ref cwd) = options.cwd {
+            cmd.current_dir(cwd);
+        } else {
+            cmd.current_dir(&paths.base);
+        }
+
+        cmd.arg(prompt);
+
+        if use_vertex {
+            cmd.env("CLAUDE_CODE_USE_VERTEX", "1");
+            cmd.env(
+                "ANTHROPIC_VERTEX_PROJECT_ID",
+                vertex_project_id.unwrap_or(""),
+            );
+            cmd.env(
+                "CLOUD_ML_REGION",
+                config
+                    .claude
+                    .vertex_region
+                    .as_deref()
+                    .unwrap_or("europe-west1"),
+            );
+            // Long-lived auth: service account key file (recommended for servers; no gcloud expiry)
+            if let Some(ref cred_path) = config.claude.vertex_credentials_path {
+                let path = std::path::Path::new(cred_path);
+                let abs = if path.is_relative() {
+                    paths.base.join(cred_path)
+                } else {
+                    path.to_path_buf()
+                };
+                if abs.exists() {
+                    cmd.env("GOOGLE_APPLICATION_CREDENTIALS", &abs);
+                }
             }
-            setup::CredentialType::OAuthToken => {
-                cmd.env("CLAUDE_CODE_OAUTH_TOKEN", cred);
-                cmd.env("ANTHROPIC_OAUTH_TOKEN", cred);
+            // Otherwise Vertex uses gcloud ADC or existing GOOGLE_APPLICATION_CREDENTIALS env
+        } else if let Some(cred) = credential {
+            match setup::detect_credential_type(cred) {
+                setup::CredentialType::ApiKey => {
+                    cmd.env("ANTHROPIC_API_KEY", cred);
+                }
+                setup::CredentialType::OAuthToken => {
+                    cmd.env("CLAUDE_CODE_OAUTH_TOKEN", cred);
+                    cmd.env("ANTHROPIC_OAUTH_TOKEN", cred);
+                }
             }
         }
-    }
 
-    let output = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+        cmd
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // At most one retry: `resume` is cleared before looping.
+    let mut resume = options.resume_session.clone();
+    let output = loop {
+        let output = build_command(resume.as_deref())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
 
-    if !output.status.success() {
+        if output.status.success() {
+            break output;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if let Some(lost) = resume.take().filter(|_| is_missing_conversation(&stderr)) {
+            warn!(
+                "Session {} no longer exists; starting a fresh session and losing its history",
+                lost
+            );
+            continue;
+        }
+
         warn!("Claude CLI failed. stdout: {}", stdout);
         warn!("Claude CLI failed. stderr: {}", stderr);
         bail!(
@@ -163,7 +188,9 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
             stderr,
             if stderr.is_empty() { &stdout } else { "" }
         );
-    }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     debug!("Claude raw output: {}", stdout);
 
@@ -194,4 +221,39 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
     }
 
     Err(anyhow!("No result found in Claude output"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_conversation;
+
+    #[test]
+    fn detects_a_missing_conversation() {
+        assert!(is_missing_conversation(
+            "No conversation found with session ID: b1623d31-e974-4d04-a3ea-36493ce262f3"
+        ));
+    }
+
+    #[test]
+    fn detection_is_case_insensitive() {
+        assert!(is_missing_conversation(
+            "no conversation found with session id: abc"
+        ));
+    }
+
+    #[test]
+    fn leaves_unrelated_failures_alone() {
+        for stderr in [
+            "Invalid API key",
+            "rate limit exceeded",
+            "session ID is malformed",
+            "Error: connection reset by peer",
+            "",
+        ] {
+            assert!(
+                !is_missing_conversation(stderr),
+                "should not match: {stderr}"
+            );
+        }
+    }
 }

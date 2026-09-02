@@ -139,3 +139,25 @@ jobs:
 
       - name: S3 integration test (LocalStack)
         run: CICA_S3_IT=1 cargo test --features s3 it_tests -- --nocapture
+
+  cloud-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy (gcs feature)
+        run: cargo clippy --features gcs --all-targets -- -D warnings
+
+      - name: Clippy (cloudrun feature)
+        run: cargo clippy --features cloudrun --all-targets -- -D warnings
+
+      - name: Clippy (cloud feature — AWS + GCP)
+        run: cargo clippy --features cloud --all-targets -- -D warnings
+
+      - name: Tests (cloud feature; gated GCS IT auto-skips without CICA_GCS_IT)
+        run: cargo test --features cloud

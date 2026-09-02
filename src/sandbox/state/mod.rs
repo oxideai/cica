@@ -4,6 +4,8 @@
 //! feature-gated S3/GCS backends behind the same `StateStore` trait.
 
 pub mod filesystem;
+#[cfg(feature = "gcs")]
+pub mod gcs;
 #[cfg(feature = "s3")]
 pub mod s3;
 
@@ -58,6 +60,19 @@ pub fn default_store(config: &Config) -> Result<Option<Arc<dyn StateStore>>> {
             #[cfg(not(feature = "s3"))]
             {
                 anyhow::bail!("`store = s3` requires the binary to be built with `--features s3`")
+            }
+        }
+        Some(StoreKind::Gcs) => {
+            #[cfg(feature = "gcs")]
+            {
+                let gcs = config.deployment.gcs.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`store = gcs` requires a [deployment.gcs] section")
+                })?;
+                Ok(Some(Arc::new(gcs::GcsStateStore::new(gcs))))
+            }
+            #[cfg(not(feature = "gcs"))]
+            {
+                anyhow::bail!("`store = gcs` requires the binary to be built with `--features gcs`")
             }
         }
     }
@@ -196,6 +211,37 @@ mod tests {
         let mut cfg = Config::default();
         cfg.deployment.store = Some(StoreKind::S3);
         cfg.deployment.s3 = None;
+        assert!(default_store(&cfg).is_err());
+    }
+
+    #[cfg(not(feature = "gcs"))]
+    #[test]
+    fn gcs_store_requires_feature() {
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::Gcs);
+        assert!(default_store(&cfg).is_err());
+    }
+
+    #[cfg(feature = "gcs")]
+    #[test]
+    fn gcs_store_built_lazily_when_feature_on() {
+        use crate::config::GcsConfig;
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::Gcs);
+        cfg.deployment.gcs = Some(GcsConfig {
+            bucket: "b".into(),
+            ..Default::default()
+        });
+        // Lazy client: constructing the store does not connect, so this is Ok without GCP.
+        assert!(default_store(&cfg).unwrap().is_some());
+    }
+
+    #[cfg(feature = "gcs")]
+    #[test]
+    fn gcs_store_without_section_errors() {
+        let mut cfg = Config::default();
+        cfg.deployment.store = Some(StoreKind::Gcs);
+        cfg.deployment.gcs = None;
         assert!(default_store(&cfg).is_err());
     }
 }

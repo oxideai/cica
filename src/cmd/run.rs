@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::signal;
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::channels::{signal as signal_channel, slack, telegram};
@@ -12,7 +11,7 @@ use crate::config::Config;
 use crate::cron::{CronConfig, CronService, SystemClock};
 use crate::memory::MemoryIndex;
 use crate::pairing::PairingStore;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, lock};
 use crate::setup;
 
 pub async fn run() -> Result<()> {
@@ -33,12 +32,24 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let provider = crate::sandbox::try_default_provider(&config, &paths)
-        .context("invalid [deployment] configuration")?;
+    let provider: Arc<dyn crate::sandbox::SandboxProvider> = Arc::from(
+        crate::sandbox::try_default_provider(&config, &paths)
+            .context("invalid [deployment] configuration")?,
+    );
+    let pairing = PairingStore::load(&paths)?;
+    let cron = CronService::new(
+        SystemClock,
+        CronConfig::default(),
+        config.clone(),
+        paths.clone(),
+        provider.clone(),
+    )?;
     let rt = Arc::new(Runtime {
         config,
         paths,
         provider,
+        pairing: std::sync::Mutex::new(pairing),
+        cron,
     });
 
     info!("Starting Cica with channels: {}", channels.join(", "));
@@ -48,9 +59,8 @@ pub async fn run() -> Result<()> {
         warn!("Failed to prepare dependencies: {}", e);
     }
 
-    index_all_user_memories(&rt.paths);
-
-    let cron_service = start_cron_service(rt.clone())?;
+    index_all_user_memories(&rt.paths, &lock(&rt.pairing));
+    rt.cron.start(cron_result_sender(&rt));
 
     // Skills git-sync (router-side): keep skills_dir + the state store's "skills"
     // prefix fresh from the configured repo. No-op when [skills] is unset.
@@ -110,26 +120,12 @@ pub async fn run() -> Result<()> {
         } => {}
     }
 
-    if let Some(service) = cron_service {
-        let mut service = service.lock().await;
-        service.stop().await;
-    }
+    rt.cron.stop();
 
     Ok(())
 }
 
-fn start_cron_service(rt: Arc<Runtime>) -> Result<Option<Arc<Mutex<CronService<SystemClock>>>>> {
-    let clock = SystemClock;
-    let cron_config = CronConfig::default();
-
-    let mut service = match CronService::new(clock, cron_config, rt.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to initialize cron service: {}", e);
-            return Ok(None);
-        }
-    };
-
+fn cron_result_sender(rt: &Runtime) -> crate::cron::ResultSender {
     let telegram_token = rt
         .config
         .channels
@@ -190,10 +186,8 @@ fn start_cron_service(rt: Arc<Runtime>) -> Result<Option<Arc<Mutex<CronService<S
             }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
         });
 
-    service.start(result_sender);
     info!("Cron scheduler started");
-
-    Ok(Some(Arc::new(Mutex::new(service))))
+    result_sender
 }
 
 async fn send_telegram_message(token: &str, user_id: &str, message: &str) -> Result<()> {
@@ -252,15 +246,7 @@ async fn send_slack_message(
 /// Startup warm-up: index whatever memories are already on local disk. In cloud
 /// mode the per-turn `reindex_user_memories` hook is authoritative (it pulls from
 /// the store first), so the index converges after the first turn either way.
-fn index_all_user_memories(paths: &crate::config::Paths) {
-    let store = match PairingStore::load(paths) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to load pairing store for memory indexing: {}", e);
-            return;
-        }
-    };
-
+fn index_all_user_memories(paths: &crate::config::Paths, store: &PairingStore) {
     let mut index = match MemoryIndex::open(paths) {
         Ok(i) => i,
         Err(e) => {

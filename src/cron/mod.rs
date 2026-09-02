@@ -10,20 +10,21 @@ pub use store::{CronJob, CronStore, DeliveryTarget, JobId, JobStatus};
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::audit;
 use crate::backends::QueryResult;
 use crate::channels::get_channel_info;
+use crate::config::{Config, Paths};
 use crate::onboarding;
-use crate::runtime::Runtime;
-use crate::sandbox::{self, TurnJob};
+use crate::runtime::lock;
+use crate::sandbox::{self, SandboxProvider, TurnJob};
 
 /// Configuration for the cron service.
 #[derive(Clone)]
@@ -57,14 +58,22 @@ pub struct CronService<C: Clock> {
     clock: C,
     store: Arc<Mutex<CronStore>>,
     config: CronConfig,
-    shutdown_tx: Option<mpsc::Sender<()>>,
-    rt: Arc<Runtime>,
+    shutdown_tx: Mutex<Option<mpsc::Sender<()>>>,
+    app_config: Arc<Config>,
+    paths: Arc<Paths>,
+    provider: Arc<dyn SandboxProvider>,
 }
 
 impl<C: Clock> CronService<C> {
     /// Create a new cron service.
-    pub fn new(clock: C, config: CronConfig, rt: Arc<Runtime>) -> Result<Self> {
-        let mut store = CronStore::load(&rt.paths)?;
+    pub fn new(
+        clock: C,
+        config: CronConfig,
+        app_config: Arc<Config>,
+        paths: Arc<Paths>,
+        provider: Arc<dyn SandboxProvider>,
+    ) -> Result<Self> {
+        let mut store = CronStore::load(&paths)?;
 
         let recovered = store.recover_stuck_jobs(clock.now_millis());
         if recovered > 0 {
@@ -82,21 +91,25 @@ impl<C: Clock> CronService<C> {
             clock,
             store: Arc::new(Mutex::new(store)),
             config,
-            shutdown_tx: None,
-            rt,
+            shutdown_tx: Mutex::new(None),
+            app_config,
+            paths,
+            provider,
         })
     }
 
     /// Start the scheduler loop (spawns background task).
     /// Returns a JoinHandle that can be awaited for shutdown.
-    pub fn start(&mut self, result_sender: ResultSender) -> tokio::task::JoinHandle<()> {
+    pub fn start(&self, result_sender: ResultSender) -> tokio::task::JoinHandle<()> {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-        self.shutdown_tx = Some(shutdown_tx);
+        *lock(&self.shutdown_tx) = Some(shutdown_tx);
 
         let clock = self.clock.clone();
         let store = Arc::clone(&self.store);
         let tick_interval = self.config.tick_interval;
-        let rt = self.rt.clone();
+        let app_config = self.app_config.clone();
+        let paths = self.paths.clone();
+        let provider = self.provider.clone();
 
         tokio::spawn(async move {
             info!(
@@ -111,17 +124,13 @@ impl<C: Clock> CronService<C> {
                         break;
                     }
                     _ = clock.sleep(tick_interval) => {
-                        {
-                            let mut store_guard = store.lock().await;
+                        let now = clock.now_millis();
+                        let due_jobs = {
+                            let mut store_guard = lock(&store);
                             if let Err(e) = store_guard.reload() {
                                 warn!("Failed to reload cron store: {}", e);
                             }
-                        }
-
-                        let now = clock.now_millis();
-                        let due_jobs = {
-                            let store = store.lock().await;
-                            store.get_due_jobs(now)
+                            store_guard.get_due_jobs(now)
                                 .iter()
                                 .map(|j| (*j).clone())
                                 .collect::<Vec<_>>()
@@ -135,10 +144,12 @@ impl<C: Clock> CronService<C> {
                             let store = Arc::clone(&store);
                             let result_sender = result_sender.clone();
                             let clock = clock.clone();
-                            let rt = rt.clone();
+                            let app_config = app_config.clone();
+                            let paths = paths.clone();
+                            let provider = provider.clone();
 
                             tokio::spawn(async move {
-                                execute_job(job, store, result_sender, &clock, &rt).await;
+                                execute_job(job, store, result_sender, &clock, &app_config, &paths, provider.as_ref()).await;
                             });
                         }
                     }
@@ -148,15 +159,14 @@ impl<C: Clock> CronService<C> {
     }
 
     /// Stop the scheduler.
-    pub async fn stop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(()).await;
+    pub fn stop(&self) {
+        if let Some(tx) = lock(&self.shutdown_tx).take() {
+            let _ = tx.try_send(());
         }
     }
 
     /// Add a new job.
-    #[allow(dead_code)]
-    pub async fn add(
+    pub fn add(
         &self,
         name: String,
         prompt: String,
@@ -164,23 +174,22 @@ impl<C: Clock> CronService<C> {
         channel: String,
         user_id: String,
         target: Option<DeliveryTarget>,
-    ) -> Result<JobId> {
+    ) -> Result<CronJob> {
         let job = CronJob::new(name, prompt, schedule, channel, user_id, target);
-        let mut store = self.store.lock().await;
-        store.modify(|store| store.add(job))
+        lock(&self.store).modify(|store| {
+            store.add(job.clone())?;
+            Ok(job)
+        })
     }
 
     /// Remove a job.
-    #[allow(dead_code)]
-    pub async fn remove(&self, id: &str, channel: &str, user_id: &str) -> Result<Option<CronJob>> {
-        let mut store = self.store.lock().await;
-        store.modify(|store| store.remove(id, channel, user_id))
+    pub fn remove(&self, id: &str, channel: &str, user_id: &str) -> Result<Option<CronJob>> {
+        lock(&self.store).modify(|store| store.remove(id, channel, user_id))
     }
 
     /// List jobs for a user.
-    #[allow(dead_code)]
-    pub async fn list(&self, channel: &str, user_id: &str) -> Vec<CronJob> {
-        let store = self.store.lock().await;
+    pub fn list(&self, channel: &str, user_id: &str) -> Vec<CronJob> {
+        let store = lock(&self.store);
         store
             .list_for_user(channel, user_id)
             .into_iter()
@@ -188,55 +197,58 @@ impl<C: Clock> CronService<C> {
             .collect()
     }
 
-    /// Manually trigger a job (for testing via /cron run).
-    #[allow(dead_code)]
-    pub async fn run_now(
+    /// Get job status.
+    pub fn status(&self, id: &str, channel: &str, user_id: &str) -> Option<CronJob> {
+        let store = lock(&self.store);
+        store.get(id, channel, user_id).cloned()
+    }
+
+    pub fn set_enabled(
         &self,
         id: &str,
         channel: &str,
         user_id: &str,
-        result_sender: ResultSender,
-    ) -> Result<()> {
-        let job = {
-            let store = self.store.lock().await;
+        enabled: bool,
+    ) -> Result<CronJob> {
+        lock(&self.store).modify(|store| {
             store
                 .get(id, channel, user_id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Job not found: {}", id))?
-        };
-
-        let store = Arc::clone(&self.store);
-
-        execute_job(job, store, result_sender, &self.clock, &self.rt).await;
-
-        Ok(())
-    }
-
-    /// Get job status.
-    #[allow(dead_code)]
-    pub async fn status(&self, id: &str, channel: &str, user_id: &str) -> Option<CronJob> {
-        let store = self.store.lock().await;
-        store.get(id, channel, user_id).cloned()
-    }
-
-    /// Toggle job enabled state.
-    #[allow(dead_code)]
-    pub async fn toggle(&self, id: &str, channel: &str, user_id: &str) -> Result<bool> {
-        let mut store = self.store.lock().await;
-        store.modify(|store| {
-            let job = store
-                .get(id, channel, user_id)
                 .ok_or_else(|| anyhow::anyhow!("Job not found: {}", id))?;
-            let new_state = !job.enabled;
             let job = store.jobs.get_mut(id).expect("job was just found");
-            job.enabled = new_state;
-            if new_state {
+            job.enabled = enabled;
+            if enabled {
                 job.update_next_run(self.clock.now_millis());
             } else {
                 job.state.next_run_at = None;
             }
-            Ok(new_state)
+            Ok(job.clone())
         })
+    }
+
+    pub fn resolve_id(&self, channel: &str, user_id: &str, id_or_prefix: &str) -> Result<JobId> {
+        let store = lock(&self.store);
+        let id = id_or_prefix.trim();
+        if store.get(id, channel, user_id).is_some() {
+            return Ok(id.to_string());
+        }
+        let matches: Vec<_> = store
+            .list_for_user(channel, user_id)
+            .into_iter()
+            .filter(|j| j.id.starts_with(id))
+            .collect();
+        match matches.len() {
+            0 => anyhow::bail!("Job not found: {}", id),
+            1 => Ok(matches[0].id.clone()),
+            _ => anyhow::bail!(
+                "Ambiguous job ID '{}'. Matches: {}",
+                id,
+                matches
+                    .iter()
+                    .map(|j| j.short_id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
     }
 }
 
@@ -246,7 +258,9 @@ async fn execute_job<C: Clock>(
     store: Arc<Mutex<CronStore>>,
     result_sender: ResultSender,
     clock: &C,
-    rt: &Runtime,
+    config: &Config,
+    paths: &Paths,
+    provider: &dyn SandboxProvider,
 ) {
     let job_id = job.id.clone();
     info!("Executing cron job: {} ({})", job.name, job.short_id());
@@ -255,7 +269,7 @@ async fn execute_job<C: Clock>(
 
     // Mark as running and clear next_run_at to prevent duplicate execution
     {
-        let mut store = store.lock().await;
+        let mut store = lock(&store);
         if let Err(e) = store.update_job(&job_id, |job| {
             job.state.last_status = JobStatus::Running;
             job.state.next_run_at = None;
@@ -267,8 +281,8 @@ async fn execute_job<C: Clock>(
     // Build context prompt so the job has access to skills, configs, etc.
     let channel_display = get_channel_info(&job.channel).map(|c| c.display_name);
     let context_prompt = onboarding::build_context_prompt_for_user(
-        &rt.config,
-        &rt.paths,
+        config,
+        paths,
         channel_display,
         Some(&job.channel),
         Some(&job.user_id),
@@ -286,10 +300,10 @@ async fn execute_job<C: Clock>(
                 resume_session: None,
                 cwd: None,
                 skip_permissions: true,
-                backend: rt.config.backend,
+                backend: config.backend,
                 model: None,
             };
-            rt.provider
+            provider
                 .run_turn(turn)
                 .await
                 .map(sandbox::query_result_from_turn)
@@ -312,7 +326,7 @@ async fn execute_job<C: Clock>(
     );
 
     {
-        let mut store = store.lock().await;
+        let mut store = lock(&store);
         if let Err(e) = store.update_job(&job_id, |stored_job| {
             stored_job.state.last_run_at = Some(end_time);
             stored_job.state.last_duration_ms = Some(duration_ms);
@@ -443,6 +457,112 @@ pub fn truncate_for_name(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+
+    struct ErrorProvider;
+
+    #[async_trait]
+    impl SandboxProvider for ErrorProvider {
+        async fn run_turn(&self, _job: TurnJob) -> Result<crate::sandbox::TurnResult> {
+            anyhow::bail!("unused test provider")
+        }
+    }
+
+    fn service(paths: &Paths) -> CronService<SystemClock> {
+        CronService::new(
+            SystemClock,
+            CronConfig::default(),
+            Arc::new(Config::default()),
+            Arc::new(paths.clone()),
+            Arc::new(ErrorProvider),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn set_enabled_is_not_a_toggle() {
+        let (_temp, paths) = crate::config::test_paths();
+        let service = service(&paths);
+        let job = service
+            .add(
+                "job".into(),
+                "prompt".into(),
+                CronSchedule::Every(60_000),
+                "telegram".into(),
+                "1".into(),
+                None,
+            )
+            .unwrap();
+
+        service
+            .set_enabled(&job.id, "telegram", "1", false)
+            .unwrap();
+        let paused = service
+            .set_enabled(&job.id, "telegram", "1", false)
+            .unwrap();
+        assert!(!paused.enabled);
+        assert_eq!(paused.state.next_run_at, None);
+
+        let resumed = service.set_enabled(&job.id, "telegram", "1", true).unwrap();
+        assert!(resumed.enabled);
+        assert!(resumed.state.next_run_at.is_some());
+    }
+
+    #[test]
+    fn cron_init_fails_on_corrupt_file() {
+        let (_temp, paths) = crate::config::test_paths();
+        let cron_path = paths.base.join("cron.json");
+        std::fs::write(&cron_path, "{").unwrap();
+        let error = CronService::new(
+            SystemClock,
+            CronConfig::default(),
+            Arc::new(Config::default()),
+            Arc::new(paths),
+            Arc::new(ErrorProvider),
+        )
+        .err()
+        .expect("corrupt cron store must fail");
+        assert!(error.to_string().contains(cron_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn cron_add_during_running_job_survives_completion() {
+        let (_temp, paths) = crate::config::test_paths();
+        let service = service(&paths);
+        let first = service
+            .add(
+                "first".into(),
+                "prompt".into(),
+                CronSchedule::Every(60_000),
+                "telegram".into(),
+                "1".into(),
+                None,
+            )
+            .unwrap();
+        lock(&service.store)
+            .update_job(&first.id, |job| job.state.last_status = JobStatus::Running)
+            .unwrap();
+        let second = service
+            .add(
+                "second".into(),
+                "prompt".into(),
+                CronSchedule::Every(60_000),
+                "telegram".into(),
+                "1".into(),
+                None,
+            )
+            .unwrap();
+        lock(&service.store)
+            .update_job(&first.id, |job| job.state.last_status = JobStatus::Success)
+            .unwrap();
+
+        assert!(service.status(&first.id, "telegram", "1").is_some());
+        assert!(service.status(&second.id, "telegram", "1").is_some());
+        let stored = CronStore::load(&paths).unwrap();
+        assert!(stored.jobs.contains_key(&first.id));
+        assert!(stored.jobs.contains_key(&second.id));
+        assert_eq!(stored.jobs[&first.id].state.last_status, JobStatus::Success);
+    }
 
     #[test]
     fn test_parse_add_every() {

@@ -13,7 +13,6 @@ use super::{
     execute_action, execute_claude_query,
 };
 use crate::config::{self, Paths, SlackConfig};
-use crate::pairing::PairingStore;
 use crate::runtime::Runtime;
 use crate::skills;
 
@@ -598,15 +597,12 @@ async fn handle_message_event(
         None => format!("{}:{}", channel.name(), user_id),
     };
 
-    let mut store = PairingStore::load(&state.rt.paths)?;
-
     let action = determine_action(
         &state.rt,
         channel.name(),
         &user_id_str,
         &text,
         &image_paths,
-        &mut store,
         username,
         display_name,
     )?;
@@ -737,30 +733,38 @@ async fn handle_app_mention_event(
     );
 
     let user_id_str = user_id.to_string();
-    let mut store = PairingStore::load(&state.rt.paths)?;
-
-    if !store.is_approved("slack", &user_id_str) {
-        store.reload()?;
+    let user_info = if crate::runtime::lock(&state.rt.pairing).is_approved("slack", &user_id_str) {
+        None
+    } else {
+        Some(get_user_info(&client, &state.bot_token, &user_id).await)
+    };
+    let needs_pairing = {
+        let mut store = crate::runtime::lock(&state.rt.pairing);
         if !store.is_approved("slack", &user_id_str) {
-            let settings = state.rt.config.channel_settings("slack");
-
-            if !settings.auto_approve {
-                send_ephemeral_message(
-                    &client,
-                    &state.bot_token,
-                    &channel_id,
-                    &user_id,
-                    "Hi! I don't recognize you yet. Please send me a direct message to get started.",
-                )
-                .await;
-                return Ok(());
-            }
-
-            let (username, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
+            store.reload()?;
+        }
+        if store.is_approved("slack", &user_id_str) {
+            false
+        } else if state.rt.config.channel_settings("slack").auto_approve {
+            let (username, display_name) = user_info.unwrap_or_default();
             store.modify(|store| {
                 store.auto_approve("slack", &user_id_str, username, display_name)
             })?;
+            false
+        } else {
+            true
         }
+    };
+    if needs_pairing {
+        send_ephemeral_message(
+            &client,
+            &state.bot_token,
+            &channel_id,
+            &user_id,
+            "Hi! I don't recognize you yet. Please send me a direct message to get started.",
+        )
+        .await;
+        return Ok(());
     }
 
     let settings = state.rt.config.channel_settings("slack");

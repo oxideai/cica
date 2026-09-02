@@ -15,13 +15,12 @@ use tracing::{debug, warn};
 use crate::audit;
 use crate::backends::{self, QueryResult};
 use crate::cron::{
-    self, CronSchedule, CronStore, DeliveryTarget, format_timestamp, parse_add_command,
+    CronSchedule, CronService, DeliveryTarget, SystemClock, format_timestamp, parse_add_command,
     truncate_for_name,
 };
 use crate::memory::MemoryIndex;
 use crate::onboarding;
-use crate::pairing::PairingStore;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, lock};
 use crate::sandbox::{self, TurnJob};
 use crate::skills;
 
@@ -104,12 +103,12 @@ pub fn determine_action(
     user_id: &str,
     text: &str,
     _image_paths: &[PathBuf],
-    store: &mut PairingStore,
     username: Option<String>,
     display_name: Option<String>,
 ) -> Result<MessageAction> {
     let text = text.trim();
 
+    let mut store = lock(&rt.pairing);
     if !store.is_approved(channel, user_id) {
         store.reload()?;
         if !store.is_approved(channel, user_id) {
@@ -126,13 +125,14 @@ pub fn determine_action(
             }
         }
     }
+    drop(store);
 
     let settings = rt.config.channel_settings(channel);
     let onboarding_complete =
         onboarding::is_complete_for_user(&rt.paths, &settings, channel, user_id)?;
 
     // Commands work even during onboarding.
-    match process_command(rt, store, channel, user_id, text, onboarding_complete)? {
+    match process_command(rt, channel, user_id, text, onboarding_complete)? {
         CommandResult::Response(response) => {
             return Ok(MessageAction::SendResponse(response));
         }
@@ -325,20 +325,8 @@ pub async fn execute_claude_query(
         }
     };
 
-    let mut store = match PairingStore::load(&rt.paths) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to load pairing store: {}", e);
-            let _ = channel
-                .send_message(&format!("Sorry, I encountered an error: {}", e))
-                .await;
-            return;
-        }
-    };
-
     let qr = match query_ai_with_session(
         &rt,
-        &mut store,
         channel.name(),
         user_id,
         &combined_text,
@@ -499,7 +487,6 @@ const COMMANDS: &[(&str, &str)] = &[
 
 pub fn process_command(
     rt: &Runtime,
-    store: &mut PairingStore,
     channel: &str,
     user_id: &str,
     text: &str,
@@ -522,7 +509,8 @@ pub fn process_command(
             ));
         }
         let session_key = format!("{}:{}", channel, user_id);
-        let old_session_id = store.modify(|store| Ok(store.sessions.remove(&session_key)))?;
+        let old_session_id =
+            lock(&rt.pairing).modify(|store| Ok(store.sessions.remove(&session_key)))?;
 
         let detail = old_session_id
             .as_ref()
@@ -601,7 +589,7 @@ pub fn process_command(
             )),
         );
         let args = text.strip_prefix("/cron").unwrap_or("").trim();
-        return process_cron_command(&rt.paths, channel, user_id, args);
+        return process_cron_command(&rt.cron, channel, user_id, args);
     }
 
     Ok(CommandResult::NotACommand)
@@ -630,7 +618,7 @@ fn extract_target_flag(input: &str) -> (Option<DeliveryTarget>, String) {
 }
 
 fn process_cron_command(
-    paths: &crate::config::Paths,
+    cron: &CronService<SystemClock>,
     channel: &str,
     user_id: &str,
     args: &str,
@@ -641,8 +629,7 @@ fn process_cron_command(
 
     match subcommand {
         "list" | "ls" => {
-            let store = CronStore::load(paths)?;
-            let jobs = store.list_for_user(channel, user_id);
+            let jobs = cron.list(channel, user_id);
 
             if jobs.is_empty() {
                 return Ok(CommandResult::Response(
@@ -709,28 +696,23 @@ fn process_cron_command(
             };
 
             let name = truncate_for_name(&prompt, 30);
-            let mut store = CronStore::load(paths)?;
-            let job = cron::CronJob::new(
+            let job = cron.add(
                 name.clone(),
                 prompt,
                 schedule.clone(),
                 channel.to_string(),
                 user_id.to_string(),
                 target,
-            );
-            let id = store.modify(|store| store.add(job))?;
+            )?;
+            let id = &job.id;
 
             let next = match &schedule {
                 CronSchedule::At(ts) => format_timestamp(*ts),
-                CronSchedule::Every(_) | CronSchedule::Cron(_) => {
-                    let store = CronStore::load(paths)?;
-                    store
-                        .jobs
-                        .get(&id)
-                        .and_then(|j| j.state.next_run_at)
-                        .map(format_timestamp)
-                        .unwrap_or_else(|| "soon".to_string())
-                }
+                CronSchedule::Every(_) | CronSchedule::Cron(_) => job
+                    .state
+                    .next_run_at
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "soon".to_string()),
             };
 
             Ok(CommandResult::Response(format!(
@@ -751,12 +733,9 @@ fn process_cron_command(
                 ));
             }
 
-            let mut store = CronStore::load(paths)?;
+            let job_id = cron.resolve_id(channel, user_id, id)?;
 
-            // Find job by full ID or prefix
-            let job_id = find_job_id(&store, channel, user_id, id)?;
-
-            match store.modify(|store| store.remove(&job_id, channel, user_id))? {
+            match cron.remove(&job_id, channel, user_id)? {
                 Some(job) => Ok(CommandResult::Response(format!(
                     "Removed job [{}] \"{}\"",
                     job.short_id(),
@@ -774,8 +753,7 @@ fn process_cron_command(
                 ));
             }
 
-            let store = CronStore::load(paths)?;
-            let job_id = find_job_id(&store, channel, user_id, id)?;
+            let job_id = cron.resolve_id(channel, user_id, id)?;
             Ok(CommandResult::CronRun(job_id))
         }
 
@@ -787,30 +765,13 @@ fn process_cron_command(
                 ));
             }
 
-            let mut store = CronStore::load(paths)?;
-            let job_id = find_job_id(&store, channel, user_id, id)?;
-
-            let result = store.modify(|store| {
-                Ok(if let Some(job) = store.get_mut(&job_id) {
-                    if job.channel != channel || job.user_id != user_id {
-                        return Ok(None);
-                    }
-                    job.enabled = false;
-                    job.state.next_run_at = None;
-                    Some((job.short_id().to_string(), job.name.clone()))
-                } else {
-                    None
-                })
-            })?;
-
-            if let Some((short_id, name)) = result {
-                Ok(CommandResult::Response(format!(
-                    "Paused job [{}] \"{}\"",
-                    short_id, name
-                )))
-            } else {
-                Ok(CommandResult::Response(format!("Job not found: {}", id)))
-            }
+            let job_id = cron.resolve_id(channel, user_id, id)?;
+            let job = cron.set_enabled(&job_id, channel, user_id, false)?;
+            Ok(CommandResult::Response(format!(
+                "Paused job [{}] \"{}\"",
+                job.short_id(),
+                job.name
+            )))
         }
 
         "resume" | "enable" => {
@@ -821,35 +782,19 @@ fn process_cron_command(
                 ));
             }
 
-            let mut store = CronStore::load(paths)?;
-            let job_id = find_job_id(&store, channel, user_id, id)?;
-
-            let result = store.modify(|store| {
-                Ok(if let Some(job) = store.get_mut(&job_id) {
-                    if job.channel != channel || job.user_id != user_id {
-                        return Ok(None);
-                    }
-                    job.enabled = true;
-                    job.update_next_run(cron::store::now_millis());
-                    let next = job
-                        .state
-                        .next_run_at
-                        .map(format_timestamp)
-                        .unwrap_or_else(|| "soon".to_string());
-                    Some((job.short_id().to_string(), job.name.clone(), next))
-                } else {
-                    None
-                })
-            })?;
-
-            if let Some((short_id, name, next)) = result {
-                Ok(CommandResult::Response(format!(
-                    "Resumed job [{}] \"{}\"\nNext run: {}",
-                    short_id, name, next
-                )))
-            } else {
-                Ok(CommandResult::Response(format!("Job not found: {}", id)))
-            }
+            let job_id = cron.resolve_id(channel, user_id, id)?;
+            let job = cron.set_enabled(&job_id, channel, user_id, true)?;
+            let next = job
+                .state
+                .next_run_at
+                .map(format_timestamp)
+                .unwrap_or_else(|| "soon".to_string());
+            Ok(CommandResult::Response(format!(
+                "Resumed job [{}] \"{}\"\nNext run: {}",
+                job.short_id(),
+                job.name,
+                next
+            )))
         }
 
         _ => Ok(CommandResult::Response(
@@ -883,9 +828,9 @@ pub async fn execute_cron_job(
     channel: &str,
     user_id: &str,
 ) -> Result<String> {
-    let store = CronStore::load(&rt.paths)?;
-    let job = store
-        .get(job_id, channel, user_id)
+    let job = rt
+        .cron
+        .status(job_id, channel, user_id)
         .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
 
     let channel_display = get_channel_info(channel).map(|c| c.display_name);
@@ -916,43 +861,9 @@ pub async fn execute_cron_job(
     Ok(format!("[Cron: {}]\n\n{}", job.name, tr.response))
 }
 
-fn find_job_id(
-    store: &CronStore,
-    channel: &str,
-    user_id: &str,
-    id_or_prefix: &str,
-) -> Result<String> {
-    let id = id_or_prefix.trim();
-
-    if store.get(id, channel, user_id).is_some() {
-        return Ok(id.to_string());
-    }
-
-    let matches: Vec<_> = store
-        .list_for_user(channel, user_id)
-        .into_iter()
-        .filter(|j| j.id.starts_with(id))
-        .collect();
-
-    match matches.len() {
-        0 => anyhow::bail!("Job not found: {}", id),
-        1 => Ok(matches[0].id.clone()),
-        _ => anyhow::bail!(
-            "Ambiguous job ID '{}'. Matches: {}",
-            id,
-            matches
-                .iter()
-                .map(|j| j.short_id())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
 /// Query the AI backend through the configured provider and persist the returned session id.
 pub async fn query_ai_with_session(
     rt: &Runtime,
-    store: &mut PairingStore,
     channel: &str,
     user_id: &str,
     text: &str,
@@ -963,7 +874,7 @@ pub async fn query_ai_with_session(
         Some(key) => key.to_string(),
         None => format!("{}:{}", channel, user_id),
     };
-    let existing_session = store.sessions.get(&session_key).cloned();
+    let existing_session = lock(&rt.pairing).sessions.get(&session_key).cloned();
 
     let job = TurnJob {
         session_id: session_key.clone(),
@@ -981,7 +892,7 @@ pub async fn query_ai_with_session(
     let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
 
     if !qr.session_id.is_empty() {
-        let written = store.modify(|store| {
+        let written = lock(&rt.pairing).modify(|store| {
             Ok(store.set_session_if(&session_key, existing_session.as_deref(), &qr.session_id))
         })?;
         if !written {
@@ -1152,6 +1063,145 @@ mod memory_pull_tests {
         assert_eq!(
             std::fs::read_to_string(dest.path().join("local.md")).unwrap(),
             "keep me"
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_store_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    use crate::config::{Config, Paths};
+    use crate::cron::{CronConfig, CronService, SystemClock};
+    use crate::pairing::PairingStore;
+    use crate::sandbox::{SandboxProvider, TurnResult};
+
+    struct BlockingProvider {
+        entered: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl SandboxProvider for BlockingProvider {
+        async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let release = self.release.lock().unwrap().take().unwrap();
+            let _ = release.await;
+            Ok(TurnResult {
+                response: "done".into(),
+                backend_session_id: "sess-1".into(),
+                cost_usd: None,
+                duration_ms: None,
+            })
+        }
+    }
+
+    fn runtime(paths: &Paths) -> (Arc<Runtime>, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let config = Arc::new(Config::default());
+        let paths = Arc::new(paths.clone());
+        let pairing = PairingStore::load(&paths).unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider: Arc<dyn SandboxProvider> = Arc::new(BlockingProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let cron = CronService::new(
+            SystemClock,
+            CronConfig::default(),
+            config.clone(),
+            paths.clone(),
+            provider.clone(),
+        )
+        .unwrap();
+        (
+            Arc::new(Runtime {
+                config,
+                paths,
+                provider,
+                pairing: std::sync::Mutex::new(pairing),
+                cron,
+            }),
+            entered_rx,
+            release_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn approval_during_turn_survives_turn_completion() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut seed = PairingStore::load(&paths).unwrap();
+        let code = seed
+            .modify(|store| store.get_or_create_pending("telegram", "2", None, None))
+            .unwrap()
+            .0;
+        let (rt, entered, release) = runtime(&paths);
+        let turn_rt = rt.clone();
+        let turn = tokio::spawn(async move {
+            query_ai_with_session(&turn_rt, "telegram", "1", "hello", String::new(), None).await
+        });
+        entered.await.unwrap();
+        PairingStore::load(&paths)
+            .unwrap()
+            .modify(|store| store.approve(&code))
+            .unwrap();
+        release.send(()).unwrap();
+        turn.await.unwrap().unwrap();
+
+        let stored = PairingStore::load(&paths).unwrap();
+        assert!(stored.is_approved("telegram", "2"));
+        assert_eq!(stored.sessions.get("telegram:1").unwrap(), "sess-1");
+    }
+
+    #[tokio::test]
+    async fn session_write_is_compare_and_set() {
+        let (_temp, paths) = crate::config::test_paths();
+        PairingStore::load(&paths)
+            .unwrap()
+            .modify(|store| {
+                store.sessions.insert("telegram:1".into(), "old".into());
+                Ok(())
+            })
+            .unwrap();
+        let (rt, entered, release) = runtime(&paths);
+        let turn_rt = rt.clone();
+        let turn = tokio::spawn(async move {
+            query_ai_with_session(&turn_rt, "telegram", "1", "hello", String::new(), None).await
+        });
+        entered.await.unwrap();
+        process_command(&rt, "telegram", "1", "/new", true).unwrap();
+        release.send(()).unwrap();
+        turn.await.unwrap().unwrap();
+        assert!(
+            !PairingStore::load(&paths)
+                .unwrap()
+                .sessions
+                .contains_key("telegram:1")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_write_succeeds_when_unchanged() {
+        let (_temp, paths) = crate::config::test_paths();
+        let (rt, entered, release) = runtime(&paths);
+        let turn = tokio::spawn(async move {
+            query_ai_with_session(&rt, "telegram", "1", "hello", String::new(), None).await
+        });
+        entered.await.unwrap();
+        release.send(()).unwrap();
+        turn.await.unwrap().unwrap();
+        assert_eq!(
+            PairingStore::load(&paths)
+                .unwrap()
+                .sessions
+                .get("telegram:1")
+                .unwrap(),
+            "sess-1"
         );
     }
 }

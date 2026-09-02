@@ -266,11 +266,6 @@ impl CronStore {
             .filter(|j| j.channel == channel && j.user_id == user_id)
     }
 
-    /// Get mutable reference (internal use, no ownership check).
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut CronJob> {
-        self.jobs.get_mut(id)
-    }
-
     /// Get all jobs that are due to run.
     pub fn get_due_jobs(&self, now_ms: u64) -> Vec<&CronJob> {
         self.jobs.values().filter(|j| j.is_due(now_ms)).collect()

@@ -57,9 +57,6 @@ fastembed = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlite-vec = "0.1.7-alpha.2"
 
-# For zero-copy vector conversion
-zerocopy = { version = "0.8", features = ["derive"] }
-
 # Cron job scheduling
 croner = "2"
 chrono = { version = "0.4", features = ["serde"] }
@@ -67,9 +64,6 @@ uuid = { version = "1", features = ["v4"] }
 
 # Slack
 slack-morphism = { version = "2", features = ["hyper"] }
-hyper = { version = "1", features = ["server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 
 # TLS (needed for slack-morphism)
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

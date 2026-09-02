@@ -48,16 +48,6 @@ pub fn user_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
     Ok(user_dir(channel, user_id)?.join("USER.md"))
 }
 
-#[allow(dead_code)]
-pub fn is_identity_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
-    Ok(identity_path_for_user(channel, user_id)?.exists())
-}
-
-#[allow(dead_code)]
-pub fn is_user_configured_for_user(channel: &str, user_id: &str) -> Result<bool> {
-    Ok(user_path_for_user(channel, user_id)?.exists())
-}
-
 pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
     let settings = crate::config::Config::load()
         .map(|c: crate::config::Config| c.channel_settings(channel))

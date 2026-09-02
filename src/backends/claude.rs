@@ -54,12 +54,6 @@ fn is_missing_conversation(stderr: &str) -> bool {
     stderr.to_lowercase().contains("no conversation found")
 }
 
-#[allow(dead_code)]
-pub async fn query(prompt: &str) -> Result<String> {
-    let result = query_with_options(prompt, QueryOptions::default()).await?;
-    Ok(result.response)
-}
-
 pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
     let config = Config::load()?;
     let paths = config::paths()?;

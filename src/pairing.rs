@@ -206,72 +206,6 @@ impl PairingStore {
 
         Ok(())
     }
-
-    /// List all pending requests
-    #[allow(dead_code)]
-    pub fn list_pending(&mut self) -> Vec<&PendingRequest> {
-        self.prune_expired();
-        self.pending.iter().collect()
-    }
-
-    /// Get or create a session ID for a user
-    #[allow(dead_code)]
-    pub fn get_or_create_session(&mut self, channel: &str, user_id: &str) -> Result<String> {
-        let key = format!("{}:{}", channel, user_id);
-
-        if let Some(session_id) = self.sessions.get(&key) {
-            return Ok(session_id.clone());
-        }
-
-        let session_id = generate_uuid();
-        self.sessions.insert(key, session_id.clone());
-        self.save()?;
-
-        Ok(session_id)
-    }
-
-    /// Reset a user's session (start fresh conversation)
-    #[allow(dead_code)]
-    pub fn reset_session(&mut self, channel: &str, user_id: &str) -> Result<()> {
-        let key = format!("{}:{}", channel, user_id);
-        self.sessions.remove(&key);
-        self.save()
-    }
-
-    /// Get a user's profile
-    #[allow(dead_code)]
-    pub fn get_user_profile(&self, channel: &str, user_id: &str) -> Option<&UserProfile> {
-        let key = format!("{}:{}", channel, user_id);
-        self.user_profiles.get(&key)
-    }
-
-    /// Get or create a user's profile
-    #[allow(dead_code)]
-    pub fn get_or_create_user_profile(&mut self, channel: &str, user_id: &str) -> &mut UserProfile {
-        let key = format!("{}:{}", channel, user_id);
-        self.user_profiles.entry(key).or_default()
-    }
-
-    /// Update a user's profile
-    #[allow(dead_code)]
-    pub fn update_user_profile(
-        &mut self,
-        channel: &str,
-        user_id: &str,
-        profile: UserProfile,
-    ) -> Result<()> {
-        let key = format!("{}:{}", channel, user_id);
-        self.user_profiles.insert(key, profile);
-        self.save()
-    }
-
-    /// Check if a user's onboarding is complete
-    #[allow(dead_code)]
-    pub fn is_user_onboarded(&self, channel: &str, user_id: &str) -> bool {
-        self.get_user_profile(channel, user_id)
-            .map(|p| p.onboarding_complete)
-            .unwrap_or(false)
-    }
 }
 
 /// Generate a unique pairing code
@@ -333,38 +267,4 @@ fn now_timestamp() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
-}
-
-/// Generate a UUID v4 (random)
-#[allow(dead_code)]
-fn generate_uuid() -> String {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-
-    let mut rng = SimpleRng::new(now ^ std::process::id() as u64);
-
-    let bytes: Vec<u8> = (0..16).map(|_| rng.next() as u8).collect();
-
-    // Format as UUID with version 4 and variant bits
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6] & 0x0f,
-        bytes[7],
-        (bytes[8] & 0x3f) | 0x80,
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }

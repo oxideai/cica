@@ -61,7 +61,6 @@ impl TypingGuard {
         }
     }
 
-    #[allow(dead_code)]
     pub fn noop() -> Self {
         Self { cancel: None }
     }

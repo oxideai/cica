@@ -322,14 +322,10 @@ struct DataMessage {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct Attachment {
     #[serde(rename = "contentType")]
     content_type: Option<String>,
     id: Option<String>,
-    #[serde(rename = "filename")]
-    filename: Option<String>,
-    size: Option<u64>,
 }
 
 pub async fn run(config: SignalConfig) -> Result<()> {

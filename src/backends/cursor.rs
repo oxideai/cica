@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::backends::QueryResult;
-use crate::config::{self, Config};
+use crate::config::{CursorConfig, Paths};
 use crate::setup;
 
 #[cfg(target_os = "macos")]
@@ -24,15 +24,10 @@ pub const FALLBACK_MODELS: &[(&str, &str)] = &[
 ];
 
 /// Falls back to `FALLBACK_MODELS` if the CLI is unavailable or the command fails.
-pub async fn list_models(api_key: &str) -> Vec<(String, String)> {
-    let cli = match setup::find_cursor_cli() {
+pub async fn list_models(paths: &Paths, api_key: &str) -> Vec<(String, String)> {
+    let cli = match setup::find_cursor_cli(paths) {
         Some(p) => p,
         None => return fallback_models(),
-    };
-
-    let paths = match config::paths() {
-        Ok(p) => p,
-        Err(_) => return fallback_models(),
     };
 
     let output = Command::new(&cli)
@@ -108,15 +103,17 @@ pub struct QueryOptions {
     pub force: bool,
 }
 
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
-    let config = Config::load()?;
-    let paths = config::paths()?;
-
-    let api_key = config.cursor.api_key.ok_or_else(|| {
+pub async fn query_with_options(
+    cursor: &CursorConfig,
+    paths: &Paths,
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<QueryResult> {
+    let api_key = cursor.api_key.as_deref().ok_or_else(|| {
         anyhow!("No Cursor API key configured. Run `cica init` to set up Cursor.")
     })?;
 
-    let cursor_cli = setup::find_cursor_cli()
+    let cursor_cli = setup::find_cursor_cli(paths)
         .ok_or_else(|| anyhow!("Cursor CLI not found. Run `cica init` to set up Cursor."))?;
 
     let full_prompt = match &options.context {
@@ -132,7 +129,7 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
     let mut cmd = Command::new(&cursor_cli);
     cmd.args(["-p", "--output-format", "stream-json"])
         .arg("--approve-mcps")
-        .args(["--api-key", &api_key])
+        .args(["--api-key", api_key])
         .env("HOME", &paths.cursor_home);
 
     if options.force {
@@ -141,7 +138,7 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
 
     let model = options
         .model
-        .or(config.cursor.model)
+        .or_else(|| cursor.model.clone())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     cmd.args(["--model", &model]);
 

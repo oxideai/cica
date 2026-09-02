@@ -5,7 +5,7 @@ pub mod cursor;
 
 use anyhow::Result;
 
-use crate::config::{AiBackend, Config};
+use crate::config::{AiBackend, Config, Paths};
 
 #[derive(Default)]
 pub struct QueryOptions {
@@ -37,22 +37,30 @@ fn fake_result(prompt: &str) -> QueryResult {
     }
 }
 
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
+pub async fn query_with_options(
+    config: &Config,
+    paths: &Paths,
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<QueryResult> {
     // Test hook: a deterministic response without invoking the real backend CLI.
     // Inert unless `CICA_FAKE_BACKEND` is set (used only by the Docker CI test).
     if std::env::var_os("CICA_FAKE_BACKEND").is_some() {
         return Ok(fake_result(prompt));
     }
 
-    let config = Config::load()?;
-
     match config.backend {
-        AiBackend::Claude => query_claude(prompt, options, &config).await,
-        AiBackend::Cursor => query_cursor(prompt, options, &config).await,
+        AiBackend::Claude => query_claude(config, paths, prompt, options).await,
+        AiBackend::Cursor => query_cursor(config, paths, prompt, options).await,
     }
 }
 
-async fn query_claude(prompt: &str, options: QueryOptions, config: &Config) -> Result<QueryResult> {
+async fn query_claude(
+    config: &Config,
+    paths: &Paths,
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<QueryResult> {
     let claude_options = claude::QueryOptions {
         system_prompt: options.system_prompt,
         resume_session: options.resume_session,
@@ -61,10 +69,15 @@ async fn query_claude(prompt: &str, options: QueryOptions, config: &Config) -> R
         model: config.claude.model.clone(),
     };
 
-    claude::query_with_options(prompt, claude_options).await
+    claude::query_with_options(&config.claude, paths, prompt, claude_options).await
 }
 
-async fn query_cursor(prompt: &str, options: QueryOptions, config: &Config) -> Result<QueryResult> {
+async fn query_cursor(
+    config: &Config,
+    paths: &Paths,
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<QueryResult> {
     let cursor_options = cursor::QueryOptions {
         context: options.system_prompt,
         resume_session: options.resume_session,
@@ -73,7 +86,7 @@ async fn query_cursor(prompt: &str, options: QueryOptions, config: &Config) -> R
         model: config.cursor.model.clone(),
     };
 
-    cursor::query_with_options(prompt, cursor_options).await
+    cursor::query_with_options(&config.cursor, paths, prompt, cursor_options).await
 }
 
 #[cfg(test)]

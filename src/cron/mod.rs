@@ -61,7 +61,8 @@ pub struct CronService<C: Clock> {
 impl<C: Clock> CronService<C> {
     /// Create a new cron service.
     pub fn new(clock: C, config: CronConfig) -> Result<Self> {
-        let mut store = CronStore::load()?;
+        let paths = crate::config::paths()?;
+        let mut store = CronStore::load(&paths)?;
 
         let recovered = store.recover_stuck_jobs(clock.now_millis());
         if recovered > 0 {
@@ -107,7 +108,14 @@ impl<C: Clock> CronService<C> {
                         // while preserving in-memory state for running jobs
                         {
                             let mut store_guard = store.lock().await;
-                            match CronStore::load() {
+                            let paths = match crate::config::paths() {
+                                Ok(paths) => paths,
+                                Err(error) => {
+                                    warn!("Failed to resolve paths: {}", error);
+                                    continue;
+                                }
+                            };
+                            match CronStore::load(&paths) {
                                 Ok(fresh) => store_guard.merge_from_disk(fresh),
                                 Err(e) => warn!("Failed to reload cron store: {}", e),
                             }
@@ -247,6 +255,20 @@ async fn execute_job<C: Clock>(
     result_sender: ResultSender,
     clock: &C,
 ) {
+    let config = match crate::config::Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!("Failed to load config: {}", error);
+            return;
+        }
+    };
+    let paths = match crate::config::paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            warn!("Failed to resolve paths: {}", error);
+            return;
+        }
+    };
     let job_id = job.id.clone();
     info!("Executing cron job: {} ({})", job.name, job.short_id());
 
@@ -265,6 +287,8 @@ async fn execute_job<C: Clock>(
     // Build context prompt so the job has access to skills, configs, etc.
     let channel_display = get_channel_info(&job.channel).map(|c| c.display_name);
     let context_prompt = onboarding::build_context_prompt_for_user(
+        &config,
+        &paths,
         channel_display,
         Some(&job.channel),
         Some(&job.user_id),
@@ -274,6 +298,8 @@ async fn execute_job<C: Clock>(
     let result = match context_prompt {
         Ok(ctx) => {
             backends::query_with_options(
+                &config,
+                &paths,
                 &job.prompt,
                 QueryOptions {
                     system_prompt: Some(ctx),

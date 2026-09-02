@@ -4,15 +4,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::backends::{self, QueryResult};
+use crate::config::{Config, Paths};
 use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
 
 /// Runs an agent turn in a local subprocess (today's behavior).
-#[derive(Default)]
-pub struct LocalProcessProvider;
+pub struct LocalProcessProvider {
+    config: Config,
+    paths: Paths,
+}
 
 impl LocalProcessProvider {
-    pub fn new() -> Self {
-        Self
+    pub fn new(config: Config, paths: Paths) -> Self {
+        Self { config, paths }
     }
 }
 
@@ -20,11 +23,11 @@ impl LocalProcessProvider {
 impl SandboxProvider for LocalProcessProvider {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
         // Make sure the per-user memories dir exists so the agent can write into it.
-        if let Ok(dir) = crate::memory::memories_dir(&job.channel, &job.user_id) {
-            let _ = std::fs::create_dir_all(&dir);
-        }
-        let options = job_to_query_options(&job);
-        let qr = backends::query_with_options(&job.prompt, options).await?;
+        let dir = crate::memory::memories_dir(&self.paths, &job.channel, &job.user_id);
+        let _ = std::fs::create_dir_all(&dir);
+        let options = job_to_query_options(&self.paths, &job);
+        let qr =
+            backends::query_with_options(&self.config, &self.paths, &job.prompt, options).await?;
         Ok(turn_result_from_query(qr))
     }
 }
@@ -39,14 +42,9 @@ fn substitute_token(system_prompt: Option<&str>, memories_dir: &std::path::Path)
     ))
 }
 
-fn job_to_query_options(job: &TurnJob) -> backends::QueryOptions {
-    // The agent runs in *this* process, so the local per-user memories path is
-    // the one it can write to and that HydratingProvider later captures. Token
-    // unresolvable (path lookup fails) → leave the prompt as-is, harmless.
-    let system_prompt = match crate::memory::memories_dir(&job.channel, &job.user_id) {
-        Ok(dir) => substitute_token(job.system_prompt.as_deref(), &dir),
-        Err(_) => job.system_prompt.clone(),
-    };
+fn job_to_query_options(paths: &Paths, job: &TurnJob) -> backends::QueryOptions {
+    let dir = crate::memory::memories_dir(paths, &job.channel, &job.user_id);
+    let system_prompt = substitute_token(job.system_prompt.as_deref(), &dir);
     backends::QueryOptions {
         system_prompt,
         resume_session: job.resume_session.clone(),
@@ -96,8 +94,9 @@ mod tests {
 
     #[test]
     fn job_maps_to_query_options() {
+        let (_temp, paths) = crate::config::test_paths();
         let job = sample_job();
-        let opts = job_to_query_options(&job);
+        let opts = job_to_query_options(&paths, &job);
         assert_eq!(opts.system_prompt.as_deref(), Some("ctx"));
         assert_eq!(opts.resume_session.as_deref(), Some("sess-1"));
         assert_eq!(opts.cwd.as_deref(), Some("/tmp/work"));
@@ -134,7 +133,8 @@ mod tests {
 
     #[test]
     fn provider_is_constructible_and_object_safe() {
-        let p = LocalProcessProvider::new();
+        let (_temp, paths) = crate::config::test_paths();
+        let p = LocalProcessProvider::new(Config::default(), paths);
         let _boxed: Box<dyn crate::sandbox::SandboxProvider> = Box::new(p);
     }
 
@@ -164,9 +164,10 @@ mod tests {
 
     #[test]
     fn job_options_substitutes_memories_token() {
+        let (_temp, paths) = crate::config::test_paths();
         let mut job = sample_job();
         job.system_prompt = Some("write to {MEMORIES_DIR}/notes.md".into());
-        let opts = job_to_query_options(&job);
+        let opts = job_to_query_options(&paths, &job);
         let sp = opts.system_prompt.unwrap();
         assert!(!sp.contains("{MEMORIES_DIR}"));
         assert!(sp.contains("/notes.md"));

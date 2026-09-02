@@ -16,15 +16,15 @@ pub async fn run(turn_id: &str) -> Result<()> {
     let config = Config::load()?;
     let paths = crate::config::paths()?;
 
-    let store = default_store(&config)?
+    let store = default_store(&config, &paths)?
         .ok_or_else(|| anyhow!("`cica worker` requires [deployment].store to be configured"))?;
 
     let engine = HydratingProvider::new(
-        LocalProcessProvider::new(),
+        LocalProcessProvider::new(config.clone(), paths.clone()),
         store.clone(),
-        paths.claude_home,
-        paths.cursor_home,
-        paths.base,
+        paths.claude_home.clone(),
+        paths.cursor_home.clone(),
+        paths.base.clone(),
     );
 
     run_worker_turn(store.as_ref(), &engine, turn_id).await

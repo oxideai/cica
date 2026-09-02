@@ -22,6 +22,8 @@ pub async fn run() -> Result<()> {
     }
 
     let config = Config::load()?;
+    let paths = crate::config::paths()?;
+    crate::audit::init(paths.audit_db.clone(), config.audit);
     let channels = config.configured_channels();
 
     if channels.is_empty() {
@@ -30,12 +32,13 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    crate::sandbox::try_default_provider(&config).context("invalid [deployment] configuration")?;
+    crate::sandbox::try_default_provider(&config, &paths)
+        .context("invalid [deployment] configuration")?;
 
     info!("Starting Cica with channels: {}", channels.join(", "));
 
     info!("Preparing runtime...");
-    if let Err(e) = setup::ensure_deps(&config).await {
+    if let Err(e) = setup::ensure_deps(&config, &paths).await {
         warn!("Failed to prepare dependencies: {}", e);
     }
 
@@ -48,7 +51,7 @@ pub async fn run() -> Result<()> {
     if let Some(skills_cfg) = config.skills.clone() {
         match crate::config::paths() {
             Ok(paths) => {
-                let store = match crate::sandbox::state::default_store(&config) {
+                let store = match crate::sandbox::state::default_store(&config, &paths) {
                     Ok(s) => s,
                     Err(e) => {
                         warn!(
@@ -241,7 +244,14 @@ async fn send_slack_message(
 /// mode the per-turn `reindex_user_memories` hook is authoritative (it pulls from
 /// the store first), so the index converges after the first turn either way.
 fn index_all_user_memories() {
-    let store = match PairingStore::load() {
+    let paths = match crate::config::paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            warn!("Failed to resolve paths: {}", error);
+            return;
+        }
+    };
+    let store = match PairingStore::load(&paths) {
         Ok(s) => s,
         Err(e) => {
             warn!("Failed to load pairing store for memory indexing: {}", e);
@@ -249,7 +259,7 @@ fn index_all_user_memories() {
         }
     };
 
-    let mut index = match MemoryIndex::open() {
+    let mut index = match MemoryIndex::open(&paths) {
         Ok(i) => i,
         Err(e) => {
             warn!("Failed to open memory index: {}", e);

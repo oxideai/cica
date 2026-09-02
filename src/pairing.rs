@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use crate::audit;
-use crate::config;
+use crate::config::Paths;
 
 /// How long a pairing code remains valid
 const CODE_TTL: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -38,6 +39,8 @@ pub struct UserProfile {
 /// Storage for all pairing data
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PairingStore {
+    #[serde(skip)]
+    path: PathBuf,
     pub pending: Vec<PendingRequest>,
     pub approved: HashMap<String, Vec<String>>, // channel -> [user_ids]
     #[serde(default)]
@@ -48,32 +51,34 @@ pub struct PairingStore {
 
 impl PairingStore {
     /// Load pairing store from disk
-    pub fn load() -> Result<Self> {
-        let path = config::paths()?.pairing_file;
+    pub fn load(paths: &Paths) -> Result<Self> {
+        let path = paths.pairing_file.clone();
 
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                path,
+                ..Self::default()
+            });
         }
 
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read pairing file: {:?}", path))?;
 
-        let store: Self = serde_json::from_str(&content)
+        let mut store: Self = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse pairing file: {:?}", path))?;
+        store.path = path;
 
         Ok(store)
     }
 
     /// Save pairing store to disk
     pub fn save(&self) -> Result<()> {
-        let paths = config::paths()?;
-
-        if let Some(parent) = paths.pairing_file.parent() {
+        if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&paths.pairing_file, content)?;
+        std::fs::write(&self.path, content)?;
 
         Ok(())
     }

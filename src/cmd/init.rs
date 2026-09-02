@@ -158,6 +158,7 @@ async fn pick_backend(existing_config: Option<Config>) -> Result<()> {
 }
 
 async fn change_model(mut config: Config) -> Result<()> {
+    let paths = config::paths()?;
     let (backend_name, current_model) = match config.backend {
         AiBackend::Claude => ("Claude Code", config.claude.model.as_deref()),
         AiBackend::Cursor => ("Cursor CLI", config.cursor.model.as_deref()),
@@ -185,7 +186,7 @@ async fn change_model(mut config: Config) -> Result<()> {
                 .to_string();
             print!("Fetching available models... ");
             std::io::Write::flush(&mut std::io::stdout())?;
-            let models = cursor::list_models(&api_key).await;
+            let models = cursor::list_models(&paths, &api_key).await;
             println!("OK ({} models)", models.len());
             println!();
             select_model(backend_name, &models, current_model)?
@@ -312,16 +313,17 @@ async fn setup_telegram(existing_config: Option<Config>) -> Result<Config> {
 }
 
 async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
+    let paths = config::paths()?;
     println!();
     println!("Signal Setup");
     println!("────────────");
     println!();
 
-    if setup::find_java().is_none() || setup::find_signal_cli().is_none() {
+    if setup::find_java(&paths).is_none() || setup::find_signal_cli(&paths).is_none() {
         print!("Setting up Signal runtime... ");
         std::io::Write::flush(&mut std::io::stdout())?;
-        setup::ensure_java().await?;
-        setup::ensure_signal_cli().await?;
+        setup::ensure_java(&paths).await?;
+        setup::ensure_signal_cli(&paths).await?;
         println!("done");
         println!();
     }
@@ -360,7 +362,8 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
     let mut captcha: Option<String> = None;
     let mut use_voice = false;
     loop {
-        match signal::register_account(&phone_number, captcha.as_deref(), use_voice).await? {
+        match signal::register_account(&paths, &phone_number, captcha.as_deref(), use_voice).await?
+        {
             signal::RegistrationResult::Success => {
                 println!("Registration successful! SMS verification code sent.");
                 break;
@@ -502,7 +505,7 @@ async fn setup_signal(existing_config: Option<Config>) -> Result<Config> {
     print!("Verifying... ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    match signal::verify_account(&phone_number, &code).await {
+    match signal::verify_account(&paths, &phone_number, &code).await {
         Ok(()) => println!("OK"),
         Err(e) => {
             println!("FAILED");
@@ -525,6 +528,7 @@ async fn setup_signal_with_number(
     existing_config: Option<Config>,
     phone_number: &str,
 ) -> Result<Config> {
+    let paths = config::paths()?;
     if !phone_number.starts_with('+') {
         bail!("Phone number must start with + and country code (e.g., +1 for US)");
     }
@@ -536,7 +540,7 @@ async fn setup_signal_with_number(
     let mut use_voice = false;
 
     loop {
-        match signal::register_account(phone_number, captcha.as_deref(), use_voice).await? {
+        match signal::register_account(&paths, phone_number, captcha.as_deref(), use_voice).await? {
             signal::RegistrationResult::Success => {
                 if use_voice {
                     println!("Registration successful! You should receive a voice call shortly.");
@@ -599,7 +603,7 @@ async fn setup_signal_with_number(
     print!("Verifying... ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    match signal::verify_account(phone_number, &code).await {
+    match signal::verify_account(&paths, phone_number, &code).await {
         Ok(()) => println!("OK"),
         Err(e) => {
             println!("FAILED");
@@ -627,9 +631,9 @@ async fn link_signal_device(existing_config: Option<Config>) -> Result<Config> {
     println!();
 
     let paths = config::paths()?;
-    let java = setup::find_java().ok_or_else(|| anyhow::anyhow!("Java not found"))?;
+    let java = setup::find_java(&paths).ok_or_else(|| anyhow::anyhow!("Java not found"))?;
     let signal_cli =
-        setup::find_signal_cli().ok_or_else(|| anyhow::anyhow!("signal-cli not found"))?;
+        setup::find_signal_cli(&paths).ok_or_else(|| anyhow::anyhow!("signal-cli not found"))?;
 
     std::fs::create_dir_all(&paths.signal_data_dir)?;
 
@@ -845,18 +849,19 @@ async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
 }
 
 async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
+    let paths = config::paths()?;
     println!();
     println!("Claude Setup");
     println!("────────────");
 
-    if setup::find_bun().is_none() || setup::find_claude_code().is_none() {
+    if setup::find_bun(&paths).is_none() || setup::find_claude_code(&paths).is_none() {
         println!();
         print!("Setting up runtime... ");
         std::io::Write::flush(&mut std::io::stdout())?;
 
-        setup::ensure_bun().await?;
-        setup::ensure_claude_code().await?;
-        setup::ensure_embedding_model()?;
+        setup::ensure_bun(&paths).await?;
+        setup::ensure_claude_code(&paths).await?;
+        setup::ensure_embedding_model(&paths)?;
 
         println!("done");
     }
@@ -873,8 +878,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
                 let mut config = existing_config.unwrap_or_default();
                 config.claude.api_key = Some(env_token);
                 config.save()?;
-
-                let paths = config::paths()?;
 
                 println!();
                 println!("Setup complete!");
@@ -911,7 +914,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
     let was_using_cursor = config.backend == AiBackend::Cursor && config.is_cursor_configured();
 
     if provider_selection == 1 {
-        let paths = config::paths()?;
         println!();
         println!("Vertex AI Setup");
         println!("───────────────");
@@ -1087,7 +1089,6 @@ async fn setup_claude(existing_config: Option<Config>) -> Result<()> {
 
     config.save()?;
 
-    let paths = config::paths()?;
     let active = match config.backend {
         AiBackend::Claude => "Claude Code",
         AiBackend::Cursor => "Cursor CLI",
@@ -1177,18 +1178,19 @@ fn select_model<S: AsRef<str>>(
 }
 
 async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
+    let paths = config::paths()?;
     println!();
     println!("Cursor CLI Setup");
     println!("────────────────");
 
-    if setup::find_cursor_cli().is_none() || setup::find_bun().is_none() {
+    if setup::find_cursor_cli(&paths).is_none() || setup::find_bun(&paths).is_none() {
         println!();
         print!("Setting up runtime... ");
         std::io::Write::flush(&mut std::io::stdout())?;
 
-        setup::ensure_bun().await?; // Needed for skills
-        setup::ensure_cursor_cli().await?;
-        setup::ensure_embedding_model()?;
+        setup::ensure_bun(&paths).await?; // Needed for skills
+        setup::ensure_cursor_cli(&paths).await?;
+        setup::ensure_embedding_model(&paths)?;
 
         println!("done");
     }
@@ -1222,7 +1224,7 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
     println!();
     print!("Fetching available models... ");
     std::io::Write::flush(&mut std::io::stdout())?;
-    let cursor_models = cursor::list_models(&api_key).await;
+    let cursor_models = cursor::list_models(&paths, &api_key).await;
     println!("OK ({} models)", cursor_models.len());
     println!();
     let model = select_model("Cursor CLI", &cursor_models, None)?;
@@ -1249,7 +1251,6 @@ async fn setup_cursor(existing_config: Option<Config>) -> Result<()> {
 
     config.save()?;
 
-    let paths = config::paths()?;
     let active = match config.backend {
         AiBackend::Claude => "Claude Code",
         AiBackend::Cursor => "Cursor CLI",

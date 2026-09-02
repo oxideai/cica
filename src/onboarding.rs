@@ -17,7 +17,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-use crate::config;
+use crate::config::{self, ChannelSettings, Config, Paths};
 use crate::memory::MemoryIndex;
 use crate::setup;
 use crate::skills;
@@ -32,53 +32,63 @@ pub enum Phase {
     Complete,
 }
 
-pub fn user_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
-    let dir = config::paths()?
+pub fn user_dir(paths: &Paths, channel: &str, user_id: &str) -> PathBuf {
+    paths
         .base
         .join("users")
-        .join(format!("{}_{}", channel, user_id));
-    Ok(dir)
+        .join(format!("{}_{}", channel, user_id))
 }
 
-pub fn identity_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
-    Ok(user_dir(channel, user_id)?.join("IDENTITY.md"))
+pub fn identity_path_for_user(paths: &Paths, channel: &str, user_id: &str) -> PathBuf {
+    user_dir(paths, channel, user_id).join("IDENTITY.md")
 }
 
-pub fn user_path_for_user(channel: &str, user_id: &str) -> Result<PathBuf> {
-    Ok(user_dir(channel, user_id)?.join("USER.md"))
+pub fn user_path_for_user(paths: &Paths, channel: &str, user_id: &str) -> PathBuf {
+    user_dir(paths, channel, user_id).join("USER.md")
 }
 
-pub fn current_phase_for_user(channel: &str, user_id: &str) -> Result<Phase> {
-    let settings = crate::config::Config::load()
-        .map(|c: crate::config::Config| c.channel_settings(channel))
-        .unwrap_or_default();
-
+pub fn current_phase_for_user(
+    paths: &Paths,
+    settings: &ChannelSettings,
+    channel: &str,
+    user_id: &str,
+) -> Result<Phase> {
     // If shared_identity is enabled, skip identity phase (use PERSONA.md)
-    if !settings.shared_identity && !identity_path_for_user(channel, user_id)?.exists() {
+    if !settings.shared_identity && !identity_path_for_user(paths, channel, user_id).exists() {
         return Ok(Phase::Identity);
     }
 
-    if !user_path_for_user(channel, user_id)?.exists() {
+    if !user_path_for_user(paths, channel, user_id).exists() {
         return Ok(Phase::User);
     }
 
     Ok(Phase::Complete)
 }
 
-pub fn is_complete_for_user(channel: &str, user_id: &str) -> Result<bool> {
-    Ok(current_phase_for_user(channel, user_id)? == Phase::Complete)
+pub fn is_complete_for_user(
+    paths: &Paths,
+    settings: &ChannelSettings,
+    channel: &str,
+    user_id: &str,
+) -> Result<bool> {
+    Ok(current_phase_for_user(paths, settings, channel, user_id)? == Phase::Complete)
 }
 
-pub fn system_prompt_for_user(channel: &str, user_id: &str) -> Result<String> {
-    match current_phase_for_user(channel, user_id)? {
-        Phase::Identity => identity_system_prompt(channel, user_id),
-        Phase::User => user_system_prompt(channel, user_id),
+pub fn system_prompt_for_user(
+    paths: &Paths,
+    settings: &ChannelSettings,
+    channel: &str,
+    user_id: &str,
+) -> Result<String> {
+    match current_phase_for_user(paths, settings, channel, user_id)? {
+        Phase::Identity => identity_system_prompt(paths, channel, user_id),
+        Phase::User => user_system_prompt(paths, settings, channel, user_id),
         Phase::Complete => Ok(String::new()),
     }
 }
 
-fn identity_system_prompt(channel: &str, user_id: &str) -> Result<String> {
-    let path = identity_path_for_user(channel, user_id)?;
+fn identity_system_prompt(paths: &Paths, channel: &str, user_id: &str) -> Result<String> {
+    let path = identity_path_for_user(paths, channel, user_id);
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -120,16 +130,18 @@ IMPORTANT: Do NOT write the file until you have all three answers."#,
 
 const DEFAULT_ONBOARDING_PROMPT: &str = "Tell me about yourself - the more I know about you the better I'll be able to help, so don't be shy!";
 
-fn user_system_prompt(channel: &str, user_id: &str) -> Result<String> {
-    let identity_path = identity_path_for_user(channel, user_id)?;
-    let user_path = user_path_for_user(channel, user_id)?;
+fn user_system_prompt(
+    paths: &Paths,
+    settings: &ChannelSettings,
+    channel: &str,
+    user_id: &str,
+) -> Result<String> {
+    let identity_path = identity_path_for_user(paths, channel, user_id);
+    let user_path = user_path_for_user(paths, channel, user_id);
     let identity = std::fs::read_to_string(&identity_path).unwrap_or_default();
 
-    let settings = config::Config::load()
-        .map(|c| c.channel_settings(channel))
-        .unwrap_or_default();
-
     let onboarding_prompt = settings
+        .clone()
         .onboarding_prompt
         .unwrap_or_else(|| DEFAULT_ONBOARDING_PROMPT.to_string());
 
@@ -165,24 +177,28 @@ IMPORTANT:
     ))
 }
 
-pub fn load_identity_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
-    let path = identity_path_for_user(channel, user_id)?;
+pub fn load_identity_for_user(
+    paths: &Paths,
+    channel: &str,
+    user_id: &str,
+) -> Result<Option<String>> {
+    let path = identity_path_for_user(paths, channel, user_id);
     if !path.exists() {
         return Ok(None);
     }
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-pub fn load_user_for_user(channel: &str, user_id: &str) -> Result<Option<String>> {
-    let path = user_path_for_user(channel, user_id)?;
+pub fn load_user_for_user(paths: &Paths, channel: &str, user_id: &str) -> Result<Option<String>> {
+    let path = user_path_for_user(paths, channel, user_id);
     if !path.exists() {
         return Ok(None);
     }
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-pub fn load_persona() -> Result<Option<String>> {
-    let path = config::paths()?.base.join("PERSONA.md");
+pub fn load_persona(paths: &Paths) -> Result<Option<String>> {
+    let path = paths.base.join("PERSONA.md");
     if !path.exists() {
         return Ok(None);
     }
@@ -201,16 +217,17 @@ fn workspace_relative(path: &Path, base: &Path) -> String {
 /// If `user_message` is provided, it will be used to search for relevant memories
 /// to include in the context.
 pub fn build_context_prompt_for_user(
+    config: &Config,
+    paths: &Paths,
     channel_display: Option<&str>,
     channel_id: Option<&str>,
     user_id: Option<&str>,
     user_message: Option<&str>,
 ) -> Result<String> {
-    let paths = config::paths()?;
     let mut lines = Vec::new();
 
     let identity = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
-        load_identity_for_user(ch, uid)?
+        load_identity_for_user(paths, ch, uid)?
     } else {
         None
     };
@@ -226,7 +243,7 @@ pub fn build_context_prompt_for_user(
         .unwrap_or_else(|| "Cica".to_string());
 
     let user_content = if let (Some(ch), Some(uid)) = (channel_id, user_id) {
-        load_user_for_user(ch, uid)?
+        load_user_for_user(paths, ch, uid)?
     } else {
         None
     };
@@ -319,7 +336,10 @@ pub fn build_context_prompt_for_user(
     lines.push(String::new());
 
     // Discover and list available skills
-    match skills::discover_skills() {
+    match skills::discover_skills(
+        paths,
+        config::prep_skill_deps_locally(config.deployment.provider),
+    ) {
         Ok(discovered) if !discovered.is_empty() => {
             lines.push("### Available Skills".to_string());
             lines.push("To use a skill, read its SKILL.md file at the location shown, then follow its instructions.".to_string());
@@ -397,11 +417,10 @@ pub fn build_context_prompt_for_user(
         lines.push(String::new());
     }
 
-    let cfg = config::Config::load().unwrap_or_default();
     lines.push("## MCP (Model Context Protocol)".to_string());
     lines.push("You can extend your capabilities by adding MCP servers. MCP servers provide additional tools (API access, databases, services, etc.) that become available to you automatically.".to_string());
     lines.push(String::new());
-    match cfg.backend {
+    match config.backend {
         config::AiBackend::Claude => {
             let mcp_config_path = paths.claude_home.join(".claude").join("settings.json");
             lines.push(format!(
@@ -427,7 +446,7 @@ pub fn build_context_prompt_for_user(
         }
         config::AiBackend::Cursor => {
             let mcp_config_path = paths.cursor_home.join(".cursor").join("mcp.json");
-            let cursor_cli = setup::find_cursor_cli()
+            let cursor_cli = setup::find_cursor_cli(paths)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "cursor-agent".to_string());
             lines.push(format!(
@@ -559,7 +578,7 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
         lines.push(String::new());
     }
 
-    if let Some(content) = load_persona()? {
+    if let Some(content) = load_persona(paths)? {
         lines.push("## PERSONA.md".to_string());
         lines.push(content);
         lines.push(String::new());
@@ -586,7 +605,7 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
 
         // Search for relevant memories if we have a user message
         if let Some(query) = user_message {
-            match MemoryIndex::open() {
+            match MemoryIndex::open(paths) {
                 Ok(index) => match index.search(ch, uid, query, 3) {
                     Ok(results) if !results.is_empty() => {
                         lines.push("### Relevant Memories".to_string());
@@ -625,9 +644,16 @@ mod memory_guidance_tests {
 
     #[test]
     fn guidance_emits_token_and_routing_rule() {
-        let prompt =
-            build_context_prompt_for_user(Some("Telegram"), Some("telegram"), Some("1"), None)
-                .expect("prompt builds");
+        let (_temp, paths) = config::test_paths();
+        let prompt = build_context_prompt_for_user(
+            &Config::default(),
+            &paths,
+            Some("Telegram"),
+            Some("telegram"),
+            Some("1"),
+            None,
+        )
+        .expect("prompt builds");
         // Emits the placeholder token, not a router-absolute path.
         assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
         // Routes durable org facts to propose-knowledge, not personal memory.
@@ -636,15 +662,21 @@ mod memory_guidance_tests {
 
     #[test]
     fn prompt_does_not_leak_the_building_machine_paths() {
-        let base = config::paths().expect("paths").base;
-        let prompt =
-            build_context_prompt_for_user(Some("Telegram"), Some("telegram"), Some("1"), None)
-                .expect("prompt builds");
+        let (temp, paths) = config::test_paths();
+        let prompt = build_context_prompt_for_user(
+            &Config::default(),
+            &paths,
+            Some("Telegram"),
+            Some("telegram"),
+            Some("1"),
+            None,
+        )
+        .expect("prompt builds");
 
         assert!(
-            !prompt.contains(&base.display().to_string()),
+            !prompt.contains(&temp.path().display().to_string()),
             "prompt leaks the workspace root {}, which will not exist on a worker",
-            base.display()
+            temp.path().display()
         );
         assert!(prompt.contains("current working directory"));
     }

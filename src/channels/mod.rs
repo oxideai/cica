@@ -105,12 +105,12 @@ pub fn determine_action(
     username: Option<String>,
     display_name: Option<String>,
 ) -> Result<MessageAction> {
+    let config = crate::config::Config::load()?;
+    let paths = crate::config::paths()?;
     let text = text.trim();
 
     if !store.is_approved(channel, user_id) {
-        let settings = crate::config::Config::load()
-            .map(|c: crate::config::Config| c.channel_settings(channel))
-            .unwrap_or_default();
+        let settings = config.channel_settings(channel);
 
         if settings.auto_approve {
             store.auto_approve(channel, user_id, username, display_name)?;
@@ -121,7 +121,9 @@ pub fn determine_action(
         }
     }
 
-    let onboarding_complete = onboarding::is_complete_for_user(channel, user_id)?;
+    let settings = config.channel_settings(channel);
+    let onboarding_complete =
+        onboarding::is_complete_for_user(&paths, &settings, channel, user_id)?;
 
     // Commands work even during onboarding.
     match process_command(store, channel, user_id, text, onboarding_complete)? {
@@ -294,10 +296,26 @@ pub async fn execute_claude_query(
     messages: Vec<String>,
     session_key: Option<String>,
 ) {
+    let config = match crate::config::Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!("Failed to load config: {}", error);
+            return;
+        }
+    };
+    let paths = match crate::config::paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            warn!("Failed to resolve paths: {}", error);
+            return;
+        }
+    };
     let combined_text = messages.join("\n\n");
     let _typing = channel.start_typing();
 
     let context_prompt = match onboarding::build_context_prompt_for_user(
+        &config,
+        &paths,
         Some(channel.display_name()),
         Some(channel.name()),
         Some(user_id),
@@ -313,7 +331,7 @@ pub async fn execute_claude_query(
         }
     };
 
-    let mut store = match PairingStore::load() {
+    let mut store = match PairingStore::load(&paths) {
         Ok(s) => s,
         Err(e) => {
             warn!("Failed to load pairing store: {}", e);
@@ -491,6 +509,8 @@ pub fn process_command(
     text: &str,
     onboarding_complete: bool,
 ) -> Result<CommandResult> {
+    let config = crate::config::Config::load()?;
+    let paths = crate::config::paths()?;
     let text = text.trim();
 
     if text == "/commands" {
@@ -559,7 +579,11 @@ pub fn process_command(
             Some(user_id),
             Some("{\"command\":\"/skills\"}"),
         );
-        let available_skills = skills::discover_skills().unwrap_or_default();
+        let available_skills = skills::discover_skills(
+            &paths,
+            crate::config::prep_skill_deps_locally(config.deployment.provider),
+        )
+        .unwrap_or_default();
         if available_skills.is_empty() {
             return Ok(CommandResult::Response("No skills installed.".to_string()));
         }
@@ -613,13 +637,14 @@ fn extract_target_flag(input: &str) -> (Option<DeliveryTarget>, String) {
 }
 
 fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<CommandResult> {
+    let paths = crate::config::paths()?;
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     let subcommand = parts.first().copied().unwrap_or("help");
     let rest = parts.get(1).copied().unwrap_or("");
 
     match subcommand {
         "list" | "ls" => {
-            let store = CronStore::load()?;
+            let store = CronStore::load(&paths)?;
             let jobs = store.list_for_user(channel, user_id);
 
             if jobs.is_empty() {
@@ -687,7 +712,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
             };
 
             let name = truncate_for_name(&prompt, 30);
-            let mut store = CronStore::load()?;
+            let mut store = CronStore::load(&paths)?;
             let job = cron::CronJob::new(
                 name.clone(),
                 prompt,
@@ -701,7 +726,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
             let next = match &schedule {
                 CronSchedule::At(ts) => format_timestamp(*ts),
                 CronSchedule::Every(_) | CronSchedule::Cron(_) => {
-                    let store = CronStore::load()?;
+                    let store = CronStore::load(&paths)?;
                     store
                         .jobs
                         .get(&id)
@@ -729,7 +754,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 ));
             }
 
-            let mut store = CronStore::load()?;
+            let mut store = CronStore::load(&paths)?;
 
             // Find job by full ID or prefix
             let job_id = find_job_id(&store, channel, user_id, id)?;
@@ -752,7 +777,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 ));
             }
 
-            let store = CronStore::load()?;
+            let store = CronStore::load(&paths)?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
             Ok(CommandResult::CronRun(job_id))
         }
@@ -765,7 +790,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 ));
             }
 
-            let mut store = CronStore::load()?;
+            let mut store = CronStore::load(&paths)?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
 
             let result = if let Some(job) = store.get_mut(&job_id) {
@@ -798,7 +823,7 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
                 ));
             }
 
-            let mut store = CronStore::load()?;
+            let mut store = CronStore::load(&paths)?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
 
             let result = if let Some(job) = store.get_mut(&job_id) {
@@ -854,21 +879,24 @@ fn process_cron_command(channel: &str, user_id: &str, args: &str) -> Result<Comm
 
 /// Execute a cron job manually and return the output.
 pub async fn execute_cron_job(job_id: &str, channel: &str, user_id: &str) -> Result<String> {
-    let store = CronStore::load()?;
+    let config = crate::config::Config::load()?;
+    let paths = crate::config::paths()?;
+    let store = CronStore::load(&paths)?;
     let job = store
         .get(job_id, channel, user_id)
         .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
 
     let channel_display = get_channel_info(channel).map(|c| c.display_name);
     let context_prompt = onboarding::build_context_prompt_for_user(
+        &config,
+        &paths,
         channel_display,
         Some(channel),
         Some(user_id),
         Some(&job.prompt),
     )?;
 
-    let config = crate::config::Config::load()?;
-    let provider = sandbox::default_provider(&config);
+    let provider = sandbox::default_provider(&config, &paths);
 
     let turn = TurnJob {
         session_id: format!("{}:{}", channel, user_id),
@@ -937,7 +965,8 @@ pub async fn query_ai_with_session(
     let existing_session = store.sessions.get(&session_key).cloned();
 
     let config = crate::config::Config::load()?;
-    let provider = sandbox::default_provider(&config);
+    let paths = crate::config::paths()?;
+    let provider = sandbox::default_provider(&config, &paths);
 
     let job = TurnJob {
         session_id: session_key.clone(),
@@ -966,7 +995,10 @@ pub async fn query_ai_with_session(
 
 /// Handle onboarding flow - AI drives the conversation
 pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> Result<String> {
-    let system_prompt = onboarding::system_prompt_for_user(channel, user_id)?;
+    let config = crate::config::Config::load()?;
+    let paths = crate::config::paths()?;
+    let settings = config.channel_settings(channel);
+    let system_prompt = onboarding::system_prompt_for_user(&paths, &settings, channel, user_id)?;
 
     let options = backends::QueryOptions {
         system_prompt: Some(system_prompt),
@@ -974,7 +1006,7 @@ pub async fn handle_onboarding(channel: &str, user_id: &str, message: &str) -> R
         ..Default::default()
     };
 
-    let qr = backends::query_with_options(message, options).await?;
+    let qr = backends::query_with_options(&config, &paths, message, options).await?;
     Ok(qr.response)
 }
 
@@ -998,15 +1030,27 @@ async fn pull_memories_with_store(
 /// If a same-user follow-up message aborts this mid-pull, the local copy may be
 /// transiently incomplete; the next turn's pull re-heals it.
 pub async fn reindex_user_memories(channel: &str, user_id: &str) {
+    let config = match crate::config::Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!("Failed to load config: {}", error);
+            return;
+        }
+    };
+    let paths = match crate::config::paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            warn!("Failed to resolve paths: {}", error);
+            return;
+        }
+    };
     // Cloud mode: S3 is authoritative for memories — pull this user's prefix so
     // the router index reflects what workers wrote. (Hand-edits on the router's
     // disk get clobbered by this pull; route operator edits through a turn or
     // straight to the store.) Single-box: no store → skipped. Best-effort.
-    match crate::config::Config::load()
-        .and_then(|cfg| crate::sandbox::state::default_store(&cfg))
-        .and_then(|store| crate::memory::memories_dir(channel, user_id).map(|dir| (store, dir)))
-    {
-        Ok((store, dest)) => {
+    let dest = crate::memory::memories_dir(&paths, channel, user_id);
+    match crate::sandbox::state::default_store(&config, &paths) {
+        Ok(store) => {
             if let Err(e) = pull_memories_with_store(store.as_ref(), &dest, channel, user_id).await
             {
                 warn!(
@@ -1021,7 +1065,7 @@ pub async fn reindex_user_memories(channel: &str, user_id: &str) {
         ),
     }
 
-    match MemoryIndex::open() {
+    match MemoryIndex::open(&paths) {
         Ok(mut index) => {
             if let Err(e) = index.index_user_memories(channel, user_id) {
                 warn!(

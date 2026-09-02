@@ -6,7 +6,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use crate::config;
+use crate::config::Paths;
 use crate::setup;
 
 /// A discovered skill
@@ -19,21 +19,14 @@ pub struct Skill {
     pub location: PathBuf,
 }
 
-pub fn discover_skills() -> Result<Vec<Skill>> {
-    let skills_dir = config::paths()?.skills_dir;
-
-    if !skills_dir.exists() {
+pub fn discover_skills(paths: &Paths, prep_deps: bool) -> Result<Vec<Skill>> {
+    if !paths.skills_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let prep_deps = config::prep_skill_deps_locally(
-        config::Config::load()
-            .map(|c| c.deployment.provider)
-            .unwrap_or(None),
-    );
-
+    let bun = prep_deps.then(|| setup::find_bun(paths)).flatten();
     let mut skills = Vec::new();
-    collect_skills(&skills_dir, prep_deps, &mut skills)?;
+    collect_skills(&paths.skills_dir, bun.as_deref(), &mut skills)?;
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
 }
@@ -49,12 +42,12 @@ fn is_excluded_dir(name: &str) -> bool {
 
 /// Recursively collect skills. A directory containing a `SKILL.md` is a leaf
 /// entry (a skill or knowledge doc) and is not descended into further.
-fn collect_skills(dir: &Path, prep_deps: bool, out: &mut Vec<Skill>) -> Result<()> {
+fn collect_skills(dir: &Path, bun: Option<&Path>, out: &mut Vec<Skill>) -> Result<()> {
     let skill_file = dir.join("SKILL.md");
     if skill_file.exists() {
         if let Ok(skill) = parse_skill(&skill_file) {
-            if prep_deps {
-                setup::ensure_skill_deps(dir);
+            if let Some(bun) = bun {
+                setup::ensure_skill_deps(bun, dir);
             }
             out.push(skill);
         }
@@ -73,7 +66,7 @@ fn collect_skills(dir: &Path, prep_deps: bool, out: &mut Vec<Skill>) -> Result<(
         if is_excluded_dir(&name.to_string_lossy()) {
             continue;
         }
-        collect_skills(&path, prep_deps, out)?;
+        collect_skills(&path, bun, out)?;
     }
     Ok(())
 }
@@ -313,7 +306,7 @@ mod tests {
         write_skill("knowledge/.hidden-wip/draft", "draft"); // hidden dir excluded too
 
         let mut out = Vec::new();
-        collect_skills(root, false, &mut out).unwrap();
+        collect_skills(root, None, &mut out).unwrap();
         let mut names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["data-model", "root-db-query"]);

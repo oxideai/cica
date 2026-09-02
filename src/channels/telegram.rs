@@ -13,7 +13,7 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::{self, TelegramConfig};
+use crate::config::{self, Paths, TelegramConfig};
 use crate::pairing::PairingStore;
 
 pub struct TelegramChannel {
@@ -125,20 +125,20 @@ fn is_video_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn get_telegram_attachments_dir() -> Result<PathBuf> {
-    let paths = config::paths()?;
+fn get_telegram_attachments_dir(paths: &Paths) -> Result<PathBuf> {
     let dir = paths.internal_dir.join("telegram_attachments");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
 async fn download_photo(bot: &Bot, photo: &PhotoSize) -> Result<PathBuf> {
+    let paths = config::paths()?;
     let file = bot.get_file(&photo.file.id).await?;
     let file_path = file.path;
 
     let extension = file_path.rsplit('.').next().unwrap_or("jpg");
 
-    let attachments_dir = get_telegram_attachments_dir()?;
+    let attachments_dir = get_telegram_attachments_dir(&paths)?;
     let local_path = attachments_dir.join(format!("{}.{}", photo.file.unique_id, extension));
 
     if local_path.exists() {
@@ -199,6 +199,7 @@ async fn handle_message(
     msg: &Message,
     task_manager: Arc<UserTaskManager>,
 ) -> Result<()> {
+    let paths = config::paths()?;
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0.to_string()).unwrap_or_default();
     let username = user.and_then(|u| u.username.clone());
@@ -234,7 +235,7 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(bot.clone(), msg.chat.id));
 
-    let mut store = PairingStore::load()?;
+    let mut store = PairingStore::load(&paths)?;
     let action = determine_action(
         channel.name(),
         &user_id,

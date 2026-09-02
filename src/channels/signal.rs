@@ -20,8 +20,9 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::{self, Paths, SignalConfig};
+use crate::config::{Paths, SignalConfig};
 use crate::pairing::PairingStore;
+use crate::runtime::Runtime;
 use crate::setup;
 
 pub struct SignalChannel {
@@ -328,14 +329,13 @@ struct Attachment {
     id: Option<String>,
 }
 
-pub async fn run(config: SignalConfig) -> Result<()> {
-    let paths = config::paths()?;
+pub async fn run(config: SignalConfig, rt: Arc<Runtime>) -> Result<()> {
     info!("Starting Signal bot for {}...", config.phone_number);
 
     let task_manager = UserTaskManager::new();
 
     loop {
-        let mut daemon = match SignalDaemon::start(&paths, &config.phone_number).await {
+        let mut daemon = match SignalDaemon::start(&rt.paths, &config.phone_number).await {
             Ok(d) => d,
             Err(e) => {
                 error!("Failed to start signal-cli daemon: {:#}", e);
@@ -355,7 +355,7 @@ pub async fn run(config: SignalConfig) -> Result<()> {
 
         info!("Signal bot running. Listening for messages...");
 
-        let needs_restart = run_message_loop(client, Arc::clone(&task_manager)).await;
+        let needs_restart = run_message_loop(client, Arc::clone(&task_manager), rt.clone()).await;
 
         daemon.shutdown().await;
 
@@ -373,7 +373,11 @@ pub async fn run(config: SignalConfig) -> Result<()> {
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
 /// Returns true if daemon should be restarted, false for clean exit.
-async fn run_message_loop(client: Arc<HttpClient>, task_manager: Arc<UserTaskManager>) -> bool {
+async fn run_message_loop(
+    client: Arc<HttpClient>,
+    task_manager: Arc<UserTaskManager>,
+    rt: Arc<Runtime>,
+) -> bool {
     let mut consecutive_failures: u32 = 0;
 
     loop {
@@ -383,7 +387,8 @@ async fn run_message_loop(client: Arc<HttpClient>, task_manager: Arc<UserTaskMan
 
                 for msg in messages {
                     if let Err(e) =
-                        handle_message(client.clone(), msg, Arc::clone(&task_manager)).await
+                        handle_message(client.clone(), msg, Arc::clone(&task_manager), rt.clone())
+                            .await
                     {
                         error!("Error handling message: {}", e);
                     }
@@ -447,8 +452,8 @@ async fn handle_message(
     client: Arc<HttpClient>,
     msg: SignalMessage,
     task_manager: Arc<UserTaskManager>,
+    rt: Arc<Runtime>,
 ) -> Result<()> {
-    let paths = config::paths()?;
     let envelope = match msg.envelope {
         Some(e) => e,
         None => return Ok(()),
@@ -481,7 +486,10 @@ async fn handle_message(
                 .map(|ct| is_image_content_type(ct))
                 .unwrap_or(false)
         })
-        .filter_map(|a| a.id.as_ref().and_then(|id| get_attachment_path(&paths, id)))
+        .filter_map(|a| {
+            a.id.as_ref()
+                .and_then(|id| get_attachment_path(&rt.paths, id))
+        })
         .collect();
 
     if text.is_empty() && image_paths.is_empty() {
@@ -501,8 +509,9 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(SignalChannel::new(client, sender.clone()));
 
-    let mut store = PairingStore::load(&paths)?;
+    let mut store = PairingStore::load(&rt.paths)?;
     let action = determine_action(
+        &rt,
         channel.name(),
         &sender,
         &text,
@@ -512,15 +521,16 @@ async fn handle_message(
         display_name,
     )?;
 
-    if let Some(query_text) = execute_action(channel.as_ref(), &sender, action).await? {
+    if let Some(query_text) = execute_action(&rt, channel.as_ref(), &sender, action).await? {
         let text_with_images = build_text_with_images(&query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), sender);
         let channel_clone = channel.clone();
         let sender_clone = sender.clone();
+        let rt = rt.clone();
 
         task_manager
             .process_message(user_key, text_with_images, move |messages| async move {
-                execute_claude_query(channel_clone, &sender_clone, messages, None).await;
+                execute_claude_query(rt, channel_clone, &sender_clone, messages, None).await;
             })
             .await;
     }

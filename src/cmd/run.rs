@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::cron::{CronConfig, CronService, SystemClock};
 use crate::memory::MemoryIndex;
 use crate::pairing::PairingStore;
+use crate::runtime::Runtime;
 use crate::setup;
 
 pub async fn run() -> Result<()> {
@@ -21,8 +22,8 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let config = Config::load()?;
-    let paths = crate::config::paths()?;
+    let config = Arc::new(Config::load()?);
+    let paths = Arc::new(crate::config::paths()?);
     crate::audit::init(paths.audit_db.clone(), config.audit);
     let channels = config.configured_channels();
 
@@ -32,66 +33,67 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    crate::sandbox::try_default_provider(&config, &paths)
+    let provider = crate::sandbox::try_default_provider(&config, &paths)
         .context("invalid [deployment] configuration")?;
+    let rt = Arc::new(Runtime {
+        config,
+        paths,
+        provider,
+    });
 
     info!("Starting Cica with channels: {}", channels.join(", "));
 
     info!("Preparing runtime...");
-    if let Err(e) = setup::ensure_deps(&config, &paths).await {
+    if let Err(e) = setup::ensure_deps(&rt.config, &rt.paths).await {
         warn!("Failed to prepare dependencies: {}", e);
     }
 
-    index_all_user_memories();
+    index_all_user_memories(&rt.paths);
 
-    let cron_service = start_cron_service(&config)?;
+    let cron_service = start_cron_service(rt.clone())?;
 
     // Skills git-sync (router-side): keep skills_dir + the state store's "skills"
     // prefix fresh from the configured repo. No-op when [skills] is unset.
-    if let Some(skills_cfg) = config.skills.clone() {
-        match crate::config::paths() {
-            Ok(paths) => {
-                let store = match crate::sandbox::state::default_store(&config, &paths) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(
-                            "Failed to build state store for skills sync (continuing local-only): {e}"
-                        );
-                        None
-                    }
-                };
-                tokio::spawn(crate::skills_sync::run_sync_loop(
-                    skills_cfg,
-                    store,
-                    paths.skills_dir,
-                ));
-                info!("Skills sync started");
+    if let Some(skills_cfg) = rt.config.skills.clone() {
+        let store = match crate::sandbox::state::default_store(&rt.config, &rt.paths) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to build state store for skills sync (continuing local-only): {e}");
+                None
             }
-            Err(e) => warn!("Failed to resolve paths for skills sync: {}", e),
-        }
+        };
+        tokio::spawn(crate::skills_sync::run_sync_loop(
+            skills_cfg,
+            store,
+            rt.paths.skills_dir.clone(),
+        ));
+        info!("Skills sync started");
     }
 
     let mut handles = Vec::new();
 
-    if let Some(telegram_config) = config.channels.telegram {
+    if let Some(telegram_config) = rt.config.channels.telegram.clone() {
+        let rt = rt.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = telegram::run(telegram_config).await {
+            if let Err(e) = telegram::run(telegram_config, rt).await {
                 error!("Telegram channel error: {}", e);
             }
         }));
     }
 
-    if let Some(signal_config) = config.channels.signal {
+    if let Some(signal_config) = rt.config.channels.signal.clone() {
+        let rt = rt.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = signal_channel::run(signal_config).await {
+            if let Err(e) = signal_channel::run(signal_config, rt).await {
                 error!("Signal channel error: {}", e);
             }
         }));
     }
 
-    if let Some(slack_config) = config.channels.slack {
+    if let Some(slack_config) = rt.config.channels.slack.clone() {
+        let rt = rt.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = slack::run(slack_config).await {
+            if let Err(e) = slack::run(slack_config, rt).await {
                 error!("Slack channel error: {}", e);
             }
         }));
@@ -116,11 +118,11 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<SystemClock>>>>> {
+fn start_cron_service(rt: Arc<Runtime>) -> Result<Option<Arc<Mutex<CronService<SystemClock>>>>> {
     let clock = SystemClock;
     let cron_config = CronConfig::default();
 
-    let mut service = match CronService::new(clock, cron_config) {
+    let mut service = match CronService::new(clock, cron_config, rt.clone()) {
         Ok(s) => s,
         Err(e) => {
             warn!("Failed to initialize cron service: {}", e);
@@ -128,17 +130,24 @@ fn start_cron_service(config: &Config) -> Result<Option<Arc<Mutex<CronService<Sy
         }
     };
 
-    let telegram_token = config
+    let telegram_token = rt
+        .config
         .channels
         .telegram
         .as_ref()
         .map(|c| c.bot_token.clone());
-    let signal_phone = config
+    let signal_phone = rt
+        .config
         .channels
         .signal
         .as_ref()
         .map(|c| c.phone_number.clone());
-    let slack_bot_token = config.channels.slack.as_ref().map(|c| c.bot_token.clone());
+    let slack_bot_token = rt
+        .config
+        .channels
+        .slack
+        .as_ref()
+        .map(|c| c.bot_token.clone());
 
     let result_sender: crate::cron::ResultSender =
         Arc::new(move |channel, user_id, target, message| {
@@ -243,15 +252,8 @@ async fn send_slack_message(
 /// Startup warm-up: index whatever memories are already on local disk. In cloud
 /// mode the per-turn `reindex_user_memories` hook is authoritative (it pulls from
 /// the store first), so the index converges after the first turn either way.
-fn index_all_user_memories() {
-    let paths = match crate::config::paths() {
-        Ok(paths) => paths,
-        Err(error) => {
-            warn!("Failed to resolve paths: {}", error);
-            return;
-        }
-    };
-    let store = match PairingStore::load(&paths) {
+fn index_all_user_memories(paths: &crate::config::Paths) {
+    let store = match PairingStore::load(paths) {
         Ok(s) => s,
         Err(e) => {
             warn!("Failed to load pairing store for memory indexing: {}", e);
@@ -259,7 +261,7 @@ fn index_all_user_memories() {
         }
     };
 
-    let mut index = match MemoryIndex::open(&paths) {
+    let mut index = match MemoryIndex::open(paths) {
         Ok(i) => i,
         Err(e) => {
             warn!("Failed to open memory index: {}", e);

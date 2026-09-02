@@ -19,9 +19,11 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::audit;
-use crate::backends::{self, QueryOptions, QueryResult};
+use crate::backends::QueryResult;
 use crate::channels::get_channel_info;
 use crate::onboarding;
+use crate::runtime::Runtime;
+use crate::sandbox::{self, TurnJob};
 
 /// Configuration for the cron service.
 #[derive(Clone)]
@@ -56,13 +58,13 @@ pub struct CronService<C: Clock> {
     store: Arc<Mutex<CronStore>>,
     config: CronConfig,
     shutdown_tx: Option<mpsc::Sender<()>>,
+    rt: Arc<Runtime>,
 }
 
 impl<C: Clock> CronService<C> {
     /// Create a new cron service.
-    pub fn new(clock: C, config: CronConfig) -> Result<Self> {
-        let paths = crate::config::paths()?;
-        let mut store = CronStore::load(&paths)?;
+    pub fn new(clock: C, config: CronConfig, rt: Arc<Runtime>) -> Result<Self> {
+        let mut store = CronStore::load(&rt.paths)?;
 
         let recovered = store.recover_stuck_jobs(clock.now_millis());
         if recovered > 0 {
@@ -78,6 +80,7 @@ impl<C: Clock> CronService<C> {
             store: Arc::new(Mutex::new(store)),
             config,
             shutdown_tx: None,
+            rt,
         })
     }
 
@@ -90,6 +93,7 @@ impl<C: Clock> CronService<C> {
         let clock = self.clock.clone();
         let store = Arc::clone(&self.store);
         let tick_interval = self.config.tick_interval;
+        let rt = self.rt.clone();
 
         tokio::spawn(async move {
             info!(
@@ -108,14 +112,7 @@ impl<C: Clock> CronService<C> {
                         // while preserving in-memory state for running jobs
                         {
                             let mut store_guard = store.lock().await;
-                            let paths = match crate::config::paths() {
-                                Ok(paths) => paths,
-                                Err(error) => {
-                                    warn!("Failed to resolve paths: {}", error);
-                                    continue;
-                                }
-                            };
-                            match CronStore::load(&paths) {
+                            match CronStore::load(&rt.paths) {
                                 Ok(fresh) => store_guard.merge_from_disk(fresh),
                                 Err(e) => warn!("Failed to reload cron store: {}", e),
                             }
@@ -138,9 +135,10 @@ impl<C: Clock> CronService<C> {
                             let store = Arc::clone(&store);
                             let result_sender = result_sender.clone();
                             let clock = clock.clone();
+                            let rt = rt.clone();
 
                             tokio::spawn(async move {
-                                execute_job(job, store, result_sender, &clock).await;
+                                execute_job(job, store, result_sender, &clock, &rt).await;
                             });
                         }
                     }
@@ -209,7 +207,7 @@ impl<C: Clock> CronService<C> {
 
         let store = Arc::clone(&self.store);
 
-        execute_job(job, store, result_sender, &self.clock).await;
+        execute_job(job, store, result_sender, &self.clock, &self.rt).await;
 
         Ok(())
     }
@@ -254,21 +252,8 @@ async fn execute_job<C: Clock>(
     store: Arc<Mutex<CronStore>>,
     result_sender: ResultSender,
     clock: &C,
+    rt: &Runtime,
 ) {
-    let config = match crate::config::Config::load() {
-        Ok(config) => config,
-        Err(error) => {
-            warn!("Failed to load config: {}", error);
-            return;
-        }
-    };
-    let paths = match crate::config::paths() {
-        Ok(paths) => paths,
-        Err(error) => {
-            warn!("Failed to resolve paths: {}", error);
-            return;
-        }
-    };
     let job_id = job.id.clone();
     info!("Executing cron job: {} ({})", job.name, job.short_id());
 
@@ -287,8 +272,8 @@ async fn execute_job<C: Clock>(
     // Build context prompt so the job has access to skills, configs, etc.
     let channel_display = get_channel_info(&job.channel).map(|c| c.display_name);
     let context_prompt = onboarding::build_context_prompt_for_user(
-        &config,
-        &paths,
+        &rt.config,
+        &rt.paths,
         channel_display,
         Some(&job.channel),
         Some(&job.user_id),
@@ -297,17 +282,22 @@ async fn execute_job<C: Clock>(
 
     let result = match context_prompt {
         Ok(ctx) => {
-            backends::query_with_options(
-                &config,
-                &paths,
-                &job.prompt,
-                QueryOptions {
-                    system_prompt: Some(ctx),
-                    skip_permissions: true,
-                    ..Default::default()
-                },
-            )
-            .await
+            let turn = TurnJob {
+                session_id: format!("{}:{}", job.channel, job.user_id),
+                channel: job.channel.clone(),
+                user_id: job.user_id.clone(),
+                prompt: job.prompt.clone(),
+                system_prompt: Some(ctx),
+                resume_session: None,
+                cwd: None,
+                skip_permissions: true,
+                backend: rt.config.backend,
+                model: None,
+            };
+            rt.provider
+                .run_turn(turn)
+                .await
+                .map(sandbox::query_result_from_turn)
         }
         Err(e) => Err(e),
     };

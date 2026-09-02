@@ -14,9 +14,7 @@ use crate::memory;
 // ============================================================================
 
 const BUN_VERSION: &str = "1.2.4";
-// Claude Code is pinned as a semver range, not an exact version: `bun add`
-// resolves it at install time and the resolved version is what lands in
-// `.version`. Keep this in sync with the Dockerfile's CLAUDE_CODE_VERSION ARG.
+// Semver range; bun resolves it. Keep in sync with the Dockerfile's CLAUDE_CODE_VERSION ARG.
 const CLAUDE_CODE_VERSION: &str = "^2.1.258";
 
 const VERSION_FILE: &str = ".version";
@@ -37,9 +35,6 @@ fn needs_update(dep_dir: &Path, expected: &str) -> bool {
     read_installed_version(dep_dir).as_deref() != Some(expected)
 }
 
-/// The version recorded in the package's own manifest — the ground truth for
-/// what `bun add` actually resolved, and the fallback when `.version` is
-/// missing (installs baked into the container image write no sentinel).
 fn read_claude_code_manifest_version(dep_dir: &Path) -> Option<String> {
     let manifest = dep_dir.join("node_modules/@anthropic-ai/claude-code/package.json");
     let raw = std::fs::read_to_string(manifest).ok()?;
@@ -47,11 +42,10 @@ fn read_claude_code_manifest_version(dep_dir: &Path) -> Option<String> {
     parsed.get("version")?.as_str().map(str::to_string)
 }
 
-/// The Claude Code version currently on disk, preferring the `.version`
-/// sentinel and falling back to the installed package's manifest.
 fn installed_claude_code_version(dep_dir: &Path) -> Option<Version> {
     read_installed_version(dep_dir)
         .and_then(|v| Version::parse(&v).ok())
+        // Installs baked into the container image write no `.version`.
         .or_else(|| {
             read_claude_code_manifest_version(dep_dir).and_then(|v| Version::parse(&v).ok())
         })
@@ -182,7 +176,6 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
     if let Some(entry) = find_claude_code() {
         match installed_claude_code_version(&paths.claude_code_dir) {
             Some(installed) if req.matches(&installed) => {
-                // Backfill the sentinel so the next start reads it directly.
                 let resolved = installed.to_string();
                 if read_installed_version(&paths.claude_code_dir).as_deref() != Some(&resolved) {
                     let _ = write_installed_version(&paths.claude_code_dir, &resolved);
@@ -219,8 +212,6 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
 
     let entry = find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))?;
 
-    // Record what bun resolved, and refuse an install that missed the range
-    // rather than running an unexpected version.
     let resolved = read_claude_code_manifest_version(&paths.claude_code_dir)
         .ok_or_else(|| anyhow!("Could not read the installed Claude Code version"))?;
     let resolved_version = Version::parse(&resolved)

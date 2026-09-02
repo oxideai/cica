@@ -130,9 +130,9 @@ Absent means no skills sync (skills are read from the local folder only).
 
 These overlay config at load time (env wins over file). The cloud worker uses these so it needs no `config.toml`.
 
-> With `provider = "fargate"`, a worker's config is **only** what these variables carry — the launcher overrides the
-> container command and cannot deliver the router's `config.toml`. A setting with no variable in this table falls back
-> to its default on every worker turn, whatever the router's `config.toml` says.
+> With `provider = "fargate"` a worker's config is only what these variables carry. The launcher overrides the
+> container command and cannot deliver the router's `config.toml`, so a setting with no variable in this table falls
+> back to its default on every worker turn.
 
 | Variable | Overrides | Notes |
 |---|---|---|

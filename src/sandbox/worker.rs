@@ -154,6 +154,7 @@ impl Launcher for SubprocessLauncher {
             .arg("worker")
             .arg("--turn")
             .arg(turn_id)
+            .kill_on_drop(true)
             .status()
             .await
             .context("spawning cica worker")?;
@@ -175,6 +176,28 @@ pub struct DockerLauncher {
     skills_dir: PathBuf,
     state_store_dir: PathBuf,
     env: Vec<(String, String)>,
+}
+
+struct DockerContainerGuard(Option<String>);
+
+impl DockerContainerGuard {
+    fn new(name: String) -> Self {
+        Self(Some(name))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DockerContainerGuard {
+    fn drop(&mut self) {
+        if let Some(name) = self.0.take() {
+            tokio::spawn(async move {
+                let _ = Command::new("docker").args(["kill", &name]).output().await;
+            });
+        }
+    }
 }
 
 impl DockerLauncher {
@@ -204,7 +227,12 @@ impl DockerLauncher {
 
     /// The `docker` argv (without the leading `docker`). Pure, for testing.
     fn run_args(&self, turn_id: &str) -> Vec<String> {
-        let mut args = vec!["run".into(), "--rm".into()];
+        let mut args = vec![
+            "run".into(),
+            "--rm".into(),
+            "--name".into(),
+            format!("cica-turn-{turn_id}"),
+        ];
         for (k, v) in &self.env {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
@@ -235,11 +263,14 @@ impl DockerLauncher {
 #[async_trait]
 impl Launcher for DockerLauncher {
     async fn launch(&self, turn_id: &str) -> Result<()> {
+        let mut guard = DockerContainerGuard::new(format!("cica-turn-{turn_id}"));
         let status = Command::new("docker")
             .args(self.run_args(turn_id))
+            .kill_on_drop(true)
             .status()
-            .await
-            .context("running `docker run` for cica worker")?;
+            .await;
+        guard.disarm();
+        let status = status.context("running `docker run` for cica worker")?;
         if !status.success() {
             anyhow::bail!("worker container exited with status {status}");
         }
@@ -358,13 +389,17 @@ mod tests {
             std::path::PathBuf::from("/host/state-store"),
         );
         let args = l.run_args("turn-123");
-        assert_eq!(args[0], "run");
-        assert!(args.contains(&"--rm".to_string()));
+        assert_eq!(&args[..4], ["run", "--rm", "--name", "cica-turn-turn-123"]);
         assert!(args.contains(&"/host/config.toml:/data/cica/config.toml:ro".to_string()));
         assert!(args.contains(&"/host/skills:/data/cica/skills:ro".to_string()));
         assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
+    }
+
+    #[tokio::test]
+    async fn docker_container_guard_drop_while_armed_does_not_panic() {
+        drop(DockerContainerGuard::new("cica-turn-test".into()));
     }
 
     #[test]

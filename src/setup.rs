@@ -1,6 +1,7 @@
 //! Setup utilities for downloading and configuring Bun, Claude Code, Java, signal-cli, and embedding models.
 
 use anyhow::{Context, Result, anyhow, bail};
+use semver::{Version, VersionReq};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tracing::{info, warn};
@@ -13,7 +14,10 @@ use crate::memory;
 // ============================================================================
 
 const BUN_VERSION: &str = "1.2.4";
-const CLAUDE_CODE_VERSION: &str = "2.1.32";
+// Claude Code is pinned as a semver range, not an exact version: `bun add`
+// resolves it at install time and the resolved version is what lands in
+// `.version`. Keep this in sync with the Dockerfile's CLAUDE_CODE_VERSION ARG.
+const CLAUDE_CODE_VERSION: &str = "^2.1.258";
 
 const VERSION_FILE: &str = ".version";
 
@@ -31,6 +35,26 @@ fn write_installed_version(dep_dir: &Path, version: &str) -> Result<()> {
 
 fn needs_update(dep_dir: &Path, expected: &str) -> bool {
     read_installed_version(dep_dir).as_deref() != Some(expected)
+}
+
+/// The version recorded in the package's own manifest — the ground truth for
+/// what `bun add` actually resolved, and the fallback when `.version` is
+/// missing (installs baked into the container image write no sentinel).
+fn read_claude_code_manifest_version(dep_dir: &Path) -> Option<String> {
+    let manifest = dep_dir.join("node_modules/@anthropic-ai/claude-code/package.json");
+    let raw = std::fs::read_to_string(manifest).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.get("version")?.as_str().map(str::to_string)
+}
+
+/// The Claude Code version currently on disk, preferring the `.version`
+/// sentinel and falling back to the installed package's manifest.
+fn installed_claude_code_version(dep_dir: &Path) -> Option<Version> {
+    read_installed_version(dep_dir)
+        .and_then(|v| Version::parse(&v).ok())
+        .or_else(|| {
+            read_claude_code_manifest_version(dep_dir).and_then(|v| Version::parse(&v).ok())
+        })
 }
 
 // ============================================================================
@@ -147,16 +171,31 @@ pub fn find_claude_code() -> Option<PathBuf> {
 }
 
 pub async fn ensure_claude_code() -> Result<PathBuf> {
-    if find_claude_code().is_some()
-        && !needs_update(&config::paths()?.claude_code_dir, CLAUDE_CODE_VERSION)
-    {
-        return find_claude_code().ok_or_else(|| anyhow!("Claude Code not found"));
-    }
-
     let paths = config::paths()?;
+    let req = VersionReq::parse(CLAUDE_CODE_VERSION).with_context(|| {
+        format!(
+            "Invalid Claude Code version requirement: {}",
+            CLAUDE_CODE_VERSION
+        )
+    })?;
 
-    if needs_update(&paths.claude_code_dir, CLAUDE_CODE_VERSION) {
-        info!("Updating Claude Code to v{}...", CLAUDE_CODE_VERSION);
+    if let Some(entry) = find_claude_code() {
+        match installed_claude_code_version(&paths.claude_code_dir) {
+            Some(installed) if req.matches(&installed) => {
+                // Backfill the sentinel so the next start reads it directly.
+                let resolved = installed.to_string();
+                if read_installed_version(&paths.claude_code_dir).as_deref() != Some(&resolved) {
+                    let _ = write_installed_version(&paths.claude_code_dir, &resolved);
+                }
+                return Ok(entry);
+            }
+            Some(installed) => info!(
+                "Claude Code v{} no longer satisfies {} - reinstalling...",
+                installed, CLAUDE_CODE_VERSION
+            ),
+            None => info!("Claude Code version could not be determined - reinstalling..."),
+        }
+
         let _ = std::fs::remove_dir_all(&paths.claude_code_dir);
     }
 
@@ -164,6 +203,8 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
 
     let bun = find_bun().ok_or_else(|| anyhow!("Bun not found - run ensure_bun first"))?;
     let pkg = format!("@anthropic-ai/claude-code@{}", CLAUDE_CODE_VERSION);
+
+    info!("Installing Claude Code {}...", CLAUDE_CODE_VERSION);
 
     let status = tokio::process::Command::new(&bun)
         .args(["add", &pkg])
@@ -176,8 +217,26 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
         bail!("Failed to install Claude Code");
     }
 
-    write_installed_version(&paths.claude_code_dir, CLAUDE_CODE_VERSION)?;
-    find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))
+    let entry = find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))?;
+
+    // Record what bun resolved, and refuse an install that missed the range
+    // rather than running an unexpected version.
+    let resolved = read_claude_code_manifest_version(&paths.claude_code_dir)
+        .ok_or_else(|| anyhow!("Could not read the installed Claude Code version"))?;
+    let resolved_version = Version::parse(&resolved)
+        .with_context(|| format!("Claude Code reported an unparseable version: {}", resolved))?;
+
+    if !req.matches(&resolved_version) {
+        bail!(
+            "bun installed Claude Code v{} which does not satisfy {}",
+            resolved,
+            CLAUDE_CODE_VERSION
+        );
+    }
+
+    info!("Claude Code v{} installed", resolved);
+    write_installed_version(&paths.claude_code_dir, &resolved)?;
+    Ok(entry)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

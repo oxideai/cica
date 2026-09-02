@@ -24,15 +24,11 @@ struct ClaudeResponse {
     session_id: Option<String>,
     duration_ms: Option<u64>,
     total_cost_usd: Option<f64>,
-    /// Per-model usage, keyed by the concrete model ID the CLI actually served
-    /// (e.g. "claude-opus-4-6"). The only place a turn reports what an alias
-    /// like "opus" resolved to, so it is worth logging. More than one key can
-    /// appear — a turn may use a small model for side work.
+    /// Keyed by the concrete model ID served; the only place an alias like "opus" resolves.
     #[serde(rename = "modelUsage", default)]
     model_usage: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// Concrete model IDs a turn billed, comma-separated, for logging.
 fn served_models(usage: &Option<serde_json::Map<String, serde_json::Value>>) -> Option<String> {
     let usage = usage.as_ref()?;
     if usage.is_empty() {
@@ -53,9 +49,7 @@ pub struct QueryOptions {
     pub model: Option<String>,
 }
 
-/// Matches Claude Code's "No conversation found with session ID: <uuid>".
-/// Kept narrow: a broader match would drop a live session's history on
-/// unrelated errors.
+// Claude Code's wording: "No conversation found with session ID: <uuid>".
 fn is_missing_conversation(stderr: &str) -> bool {
     stderr.to_lowercase().contains("no conversation found")
 }
@@ -177,7 +171,6 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
         cmd
     };
 
-    // At most one retry: `resume` is cleared before looping.
     let mut resume = options.resume_session.clone();
     let output = loop {
         let output = build_command(resume.as_deref())
@@ -250,8 +243,6 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
 mod tests {
     use super::{ClaudeResponse, is_missing_conversation, served_models};
 
-    /// The CLI's `--output-format json` result envelope, trimmed to the fields
-    /// cica reads. `modelUsage` is keyed by the concrete model ID served.
     const RESULT_ENVELOPE: &str = r#"{"type":"result","subtype":"success","result":"ok",
         "session_id":"s-1","duration_ms":5840,"total_cost_usd":0.0417,
         "modelUsage":{"claude-opus-4-6":{"inputTokens":12,"outputTokens":3}}}"#;
@@ -271,7 +262,6 @@ mod tests {
             r#"{"type":"result","modelUsage":{"claude-opus-4-6":{},"claude-haiku-4-5":{}}}"#,
         )
         .unwrap();
-        // Sorted, so the line is stable across runs.
         assert_eq!(
             served_models(&parsed.model_usage).as_deref(),
             Some("claude-haiku-4-5, claude-opus-4-6")
@@ -280,7 +270,6 @@ mod tests {
 
     #[test]
     fn a_response_without_model_usage_still_parses() {
-        // Older CLIs omit modelUsage; the turn must not fail over a log field.
         let parsed: ClaudeResponse =
             serde_json::from_str(r#"{"type":"result","result":"ok","session_id":"s-1"}"#).unwrap();
         assert_eq!(parsed.result.as_deref(), Some("ok"));

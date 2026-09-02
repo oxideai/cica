@@ -122,13 +122,8 @@ pub fn markdown_to_mrkdwn(text: &str) -> String {
     result
 }
 
-/// How often the "thinking" status is re-asserted while a turn runs. Short
-/// because Slack re-applies its own default status after ours; this is the
-/// window in which the user sees Slack's text instead of the turn's progress.
 const STATUS_REFRESH: Duration = Duration::from_secs(10);
 
-/// Status text for a turn that has been running for `elapsed`. The minute count
-/// is what distinguishes a slow turn from a dead one.
 fn thinking_status(elapsed: Duration) -> String {
     match elapsed.as_secs() / 60 {
         0 => "is thinking...".to_string(),
@@ -303,8 +298,7 @@ impl Channel for SlackChannel {
 
             let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
 
-            // Refresh rather than set once: a status frozen at "is thinking..."
-            // for several minutes is indistinguishable from a crashed turn.
+            // Re-asserted with elapsed minutes so a long turn reads as running, not crashed.
             tokio::spawn(async move {
                 let session = client.open_session(&token);
                 let started = Instant::now();
@@ -325,9 +319,10 @@ impl Channel for SlackChannel {
                             status = thinking_status(started.elapsed());
                         }
                         _ = &mut cancel_rx => {
-                            status = String::new();
                             let request = SlackApiAssistantThreadsSetStatusRequest::new(
-                                channel_id, status, thread_ts,
+                                channel_id,
+                                String::new(),
+                                thread_ts,
                             );
                             let _ = session.assistant_threads_set_status(&request).await;
                             break;

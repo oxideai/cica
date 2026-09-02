@@ -255,18 +255,14 @@ fn index_all_user_memories() {
         }
     };
 
-    for key in store.approved.keys() {
-        let parts: Vec<&str> = key.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let (channel, user_id) = (parts[0], parts[1]);
-
-        if let Err(e) = index.index_user_memories(channel, user_id) {
-            warn!(
-                "Failed to index memories for {}:{}: {}",
-                channel, user_id, e
-            );
+    for (channel, user_ids) in &store.approved {
+        for user_id in user_ids {
+            if let Err(e) = index.index_user_memories(channel, user_id) {
+                warn!(
+                    "Failed to index memories for {}:{}: {}",
+                    channel, user_id, e
+                );
+            }
         }
     }
 

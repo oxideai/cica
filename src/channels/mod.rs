@@ -111,14 +111,19 @@ pub fn determine_action(
     let text = text.trim();
 
     if !store.is_approved(channel, user_id) {
-        let settings = rt.config.channel_settings(channel);
+        store.reload()?;
+        if !store.is_approved(channel, user_id) {
+            let settings = rt.config.channel_settings(channel);
 
-        if settings.auto_approve {
-            store.auto_approve(channel, user_id, username, display_name)?;
-        } else {
-            let (code, _is_new) =
-                store.get_or_create_pending(channel, user_id, username, display_name)?;
-            return Ok(MessageAction::NeedsPairing { code });
+            if settings.auto_approve {
+                store
+                    .modify(|store| store.auto_approve(channel, user_id, username, display_name))?;
+            } else {
+                let (code, _is_new) = store.modify(|store| {
+                    store.get_or_create_pending(channel, user_id, username, display_name)
+                })?;
+                return Ok(MessageAction::NeedsPairing { code });
+            }
         }
     }
 
@@ -517,8 +522,7 @@ pub fn process_command(
             ));
         }
         let session_key = format!("{}:{}", channel, user_id);
-        let old_session_id = store.sessions.remove(&session_key);
-        store.save()?;
+        let old_session_id = store.modify(|store| Ok(store.sessions.remove(&session_key)))?;
 
         let detail = old_session_id
             .as_ref()
@@ -714,7 +718,7 @@ fn process_cron_command(
                 user_id.to_string(),
                 target,
             );
-            let id = store.add(job)?;
+            let id = store.modify(|store| store.add(job))?;
 
             let next = match &schedule {
                 CronSchedule::At(ts) => format_timestamp(*ts),
@@ -752,7 +756,7 @@ fn process_cron_command(
             // Find job by full ID or prefix
             let job_id = find_job_id(&store, channel, user_id, id)?;
 
-            match store.remove(&job_id, channel, user_id)? {
+            match store.modify(|store| store.remove(&job_id, channel, user_id))? {
                 Some(job) => Ok(CommandResult::Response(format!(
                     "Removed job [{}] \"{}\"",
                     job.short_id(),
@@ -786,19 +790,20 @@ fn process_cron_command(
             let mut store = CronStore::load(paths)?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
 
-            let result = if let Some(job) = store.get_mut(&job_id) {
-                if job.channel != channel || job.user_id != user_id {
-                    return Ok(CommandResult::Response("Job not found".to_string()));
-                }
-                job.enabled = false;
-                job.state.next_run_at = None;
-                Some((job.short_id().to_string(), job.name.clone()))
-            } else {
-                None
-            };
+            let result = store.modify(|store| {
+                Ok(if let Some(job) = store.get_mut(&job_id) {
+                    if job.channel != channel || job.user_id != user_id {
+                        return Ok(None);
+                    }
+                    job.enabled = false;
+                    job.state.next_run_at = None;
+                    Some((job.short_id().to_string(), job.name.clone()))
+                } else {
+                    None
+                })
+            })?;
 
             if let Some((short_id, name)) = result {
-                store.save()?;
                 Ok(CommandResult::Response(format!(
                     "Paused job [{}] \"{}\"",
                     short_id, name
@@ -819,24 +824,25 @@ fn process_cron_command(
             let mut store = CronStore::load(paths)?;
             let job_id = find_job_id(&store, channel, user_id, id)?;
 
-            let result = if let Some(job) = store.get_mut(&job_id) {
-                if job.channel != channel || job.user_id != user_id {
-                    return Ok(CommandResult::Response("Job not found".to_string()));
-                }
-                job.enabled = true;
-                job.update_next_run(cron::store::now_millis());
-                let next = job
-                    .state
-                    .next_run_at
-                    .map(format_timestamp)
-                    .unwrap_or_else(|| "soon".to_string());
-                Some((job.short_id().to_string(), job.name.clone(), next))
-            } else {
-                None
-            };
+            let result = store.modify(|store| {
+                Ok(if let Some(job) = store.get_mut(&job_id) {
+                    if job.channel != channel || job.user_id != user_id {
+                        return Ok(None);
+                    }
+                    job.enabled = true;
+                    job.update_next_run(cron::store::now_millis());
+                    let next = job
+                        .state
+                        .next_run_at
+                        .map(format_timestamp)
+                        .unwrap_or_else(|| "soon".to_string());
+                    Some((job.short_id().to_string(), job.name.clone(), next))
+                } else {
+                    None
+                })
+            })?;
 
             if let Some((short_id, name, next)) = result {
-                store.save()?;
                 Ok(CommandResult::Response(format!(
                     "Resumed job [{}] \"{}\"\nNext run: {}",
                     short_id, name, next
@@ -965,7 +971,7 @@ pub async fn query_ai_with_session(
         user_id: user_id.to_string(),
         prompt: text.to_string(),
         system_prompt: Some(context_prompt),
-        resume_session: existing_session,
+        resume_session: existing_session.clone(),
         cwd: None,
         skip_permissions: true,
         backend: rt.config.backend,
@@ -974,11 +980,16 @@ pub async fn query_ai_with_session(
 
     let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
 
-    if !qr.session_id.is_empty()
-        && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&qr.session_id)
-    {
-        store.sessions.insert(session_key, qr.session_id.clone());
-        store.save()?;
+    if !qr.session_id.is_empty() {
+        let written = store.modify(|store| {
+            Ok(store.set_session_if(&session_key, existing_session.as_deref(), &qr.session_id))
+        })?;
+        if !written {
+            warn!(
+                "Session for {} changed during the turn; not overwriting",
+                session_key
+            );
+        }
     }
 
     Ok(qr)

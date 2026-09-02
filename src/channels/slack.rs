@@ -740,22 +740,27 @@ async fn handle_app_mention_event(
     let mut store = PairingStore::load(&state.rt.paths)?;
 
     if !store.is_approved("slack", &user_id_str) {
-        let settings = state.rt.config.channel_settings("slack");
+        store.reload()?;
+        if !store.is_approved("slack", &user_id_str) {
+            let settings = state.rt.config.channel_settings("slack");
 
-        if !settings.auto_approve {
-            send_ephemeral_message(
-                &client,
-                &state.bot_token,
-                &channel_id,
-                &user_id,
-                "Hi! I don't recognize you yet. Please send me a direct message to get started.",
-            )
-            .await;
-            return Ok(());
+            if !settings.auto_approve {
+                send_ephemeral_message(
+                    &client,
+                    &state.bot_token,
+                    &channel_id,
+                    &user_id,
+                    "Hi! I don't recognize you yet. Please send me a direct message to get started.",
+                )
+                .await;
+                return Ok(());
+            }
+
+            let (username, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
+            store.modify(|store| {
+                store.auto_approve("slack", &user_id_str, username, display_name)
+            })?;
         }
-
-        let (username, display_name) = get_user_info(&client, &state.bot_token, &user_id).await;
-        store.auto_approve("slack", &user_id_str, username, display_name)?;
     }
 
     let settings = state.rt.config.channel_settings("slack");

@@ -14,7 +14,7 @@ pub fn run(code: &str) -> Result<()> {
     );
     let mut store = PairingStore::load(&paths)?;
 
-    let request = store.approve(code)?;
+    let request = store.modify(|store| store.approve(code))?;
 
     let channel_display = channels::get_channel_info(&request.channel)
         .map(|c| c.display_name)

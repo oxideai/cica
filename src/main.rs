@@ -1,3 +1,4 @@
+mod atomic;
 mod audit;
 mod backends;
 mod channels;

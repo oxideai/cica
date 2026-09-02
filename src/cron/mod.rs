@@ -72,7 +72,10 @@ impl<C: Clock> CronService<C> {
                 "Recovered {} stuck cron job(s) from previous run",
                 recovered
             );
-            let _ = store.save();
+            store.modify(|store| {
+                store.recover_stuck_jobs(clock.now_millis());
+                Ok(())
+            })?;
         }
 
         Ok(Self {
@@ -108,13 +111,10 @@ impl<C: Clock> CronService<C> {
                         break;
                     }
                     _ = clock.sleep(tick_interval) => {
-                        // Merge disk changes (e.g., agent modifying cron.json)
-                        // while preserving in-memory state for running jobs
                         {
                             let mut store_guard = store.lock().await;
-                            match CronStore::load(&rt.paths) {
-                                Ok(fresh) => store_guard.merge_from_disk(fresh),
-                                Err(e) => warn!("Failed to reload cron store: {}", e),
+                            if let Err(e) = store_guard.reload() {
+                                warn!("Failed to reload cron store: {}", e);
                             }
                         }
 
@@ -167,14 +167,14 @@ impl<C: Clock> CronService<C> {
     ) -> Result<JobId> {
         let job = CronJob::new(name, prompt, schedule, channel, user_id, target);
         let mut store = self.store.lock().await;
-        store.add(job)
+        store.modify(|store| store.add(job))
     }
 
     /// Remove a job.
     #[allow(dead_code)]
     pub async fn remove(&self, id: &str, channel: &str, user_id: &str) -> Result<Option<CronJob>> {
         let mut store = self.store.lock().await;
-        store.remove(id, channel, user_id)
+        store.modify(|store| store.remove(id, channel, user_id))
     }
 
     /// List jobs for a user.
@@ -223,26 +223,20 @@ impl<C: Clock> CronService<C> {
     #[allow(dead_code)]
     pub async fn toggle(&self, id: &str, channel: &str, user_id: &str) -> Result<bool> {
         let mut store = self.store.lock().await;
-
-        // Verify ownership first
-        let job = store
-            .get(id, channel, user_id)
-            .ok_or_else(|| anyhow::anyhow!("Job not found: {}", id))?;
-
-        let new_state = !job.enabled;
-
-        // Now update
-        if let Some(job) = store.get_mut(id) {
+        store.modify(|store| {
+            let job = store
+                .get(id, channel, user_id)
+                .ok_or_else(|| anyhow::anyhow!("Job not found: {}", id))?;
+            let new_state = !job.enabled;
+            let job = store.jobs.get_mut(id).expect("job was just found");
             job.enabled = new_state;
             if new_state {
                 job.update_next_run(self.clock.now_millis());
             } else {
                 job.state.next_run_at = None;
             }
-        }
-
-        store.save()?;
-        Ok(new_state)
+            Ok(new_state)
+        })
     }
 }
 
@@ -262,11 +256,12 @@ async fn execute_job<C: Clock>(
     // Mark as running and clear next_run_at to prevent duplicate execution
     {
         let mut store = store.lock().await;
-        if let Some(job) = store.get_mut(&job_id) {
+        if let Err(e) = store.update_job(&job_id, |job| {
             job.state.last_status = JobStatus::Running;
-            job.state.next_run_at = None; // Prevent re-triggering while running
+            job.state.next_run_at = None;
+        }) {
+            warn!("Failed to mark cron job {} running: {}", job_id, e);
         }
-        let _ = store.save();
     }
 
     // Build context prompt so the job has access to skills, configs, etc.
@@ -318,7 +313,7 @@ async fn execute_job<C: Clock>(
 
     {
         let mut store = store.lock().await;
-        if let Some(stored_job) = store.get_mut(&job_id) {
+        if let Err(e) = store.update_job(&job_id, |stored_job| {
             stored_job.state.last_run_at = Some(end_time);
             stored_job.state.last_duration_ms = Some(duration_ms);
 
@@ -340,8 +335,9 @@ async fn execute_job<C: Clock>(
                 stored_job.enabled = false;
                 stored_job.state.next_run_at = None;
             }
+        }) {
+            warn!("Failed to update completed cron job {}: {}", job_id, e);
         }
-        let _ = store.save();
     }
 
     if job.notify {

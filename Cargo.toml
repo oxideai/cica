@@ -44,6 +44,9 @@ zip = "2"
 # Command lookup
 which = "7"
 
+# Semver ranges for pinned dependency versions
+semver = "1"
+
 # JSON-RPC client (for signal-cli)
 jsonrpsee = { version = "0.24", features = ["async-client", "http-client"] }
 

@@ -87,7 +87,7 @@ RUN curl -fsSL \
  && rm /tmp/cursor-agent.tar.gz
 
 # -- Claude Code --
-ARG CLAUDE_CODE_VERSION=2.1.32
+ARG CLAUDE_CODE_VERSION=^2.1.258
 RUN cd /data/cica/internal/deps/claude-code \
  && bun add "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 

@@ -14,7 +14,7 @@
 //! - SKILLS.md - capabilities
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::config;
@@ -203,6 +203,23 @@ pub fn load_persona() -> Result<Option<String>> {
 ///
 /// If `user_message` is provided, it will be used to search for relevant memories
 /// to include in the context.
+/// Render a path inside the workspace relative to the workspace root.
+///
+/// The context prompt is assembled wherever the router runs, but the turn it
+/// describes may execute somewhere else entirely — a container or a remote
+/// sandbox — whose layout differs. An absolute path from the building machine is
+/// then wrong at the point of use, and the agent has to go looking: in practice
+/// it guesses an XDG default, misses, globs relatively, misses, and falls back to
+/// `find /` before locating the real directory. Cica sets the process working
+/// directory to the workspace root on whichever machine runs the turn, so a
+/// relative path is correct in both places.
+fn workspace_relative(path: &Path, base: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 pub fn build_context_prompt_for_user(
     channel_display: Option<&str>,
     channel_id: Option<&str>,
@@ -355,8 +372,8 @@ pub fn build_context_prompt_for_user(
     lines.push("2. **index.ts** - The implementation (TypeScript/Bun preferred)".to_string());
     lines.push(String::new());
     lines.push(format!(
-        "Use the bundled Bun at: {}",
-        paths.bun_dir.join("bun").display()
+        "Use the bundled Bun at: {} (relative to your workspace)",
+        workspace_relative(&paths.bun_dir.join("bun"), &paths.base)
     ));
     lines.push(String::new());
 
@@ -384,10 +401,16 @@ pub fn build_context_prompt_for_user(
     lines.push(String::new());
 
     lines.push("## Workspace".to_string());
-    lines.push(format!(
-        "Your workspace directory is: {}",
-        paths.base.display()
-    ));
+    // Deliberately not an absolute path. This prompt is built wherever the
+    // router runs but may be executed somewhere else entirely — a container, a
+    // remote sandbox — whose filesystem layout differs. Cica sets the process
+    // working directory to the workspace root on whichever machine runs the
+    // turn, so describing paths relative to it is correct in both places.
+    lines.push(
+        "Your workspace is the current working directory. Paths shown below, including \
+         skill locations, are relative to it."
+            .to_string(),
+    );
     lines.push(String::new());
 
     if let (Some(ch), Some(uid)) = (channel_id, user_id) {
@@ -406,7 +429,7 @@ pub fn build_context_prompt_for_user(
             let mcp_config_path = paths.claude_home.join(".claude").join("settings.json");
             lines.push(format!(
                 "To add an MCP server, edit: {}",
-                mcp_config_path.display()
+                workspace_relative(&mcp_config_path, &paths.base)
             ));
             lines.push(String::new());
             lines.push("The file uses this format:".to_string());
@@ -432,7 +455,7 @@ pub fn build_context_prompt_for_user(
                 .unwrap_or_else(|| "cursor-agent".to_string());
             lines.push(format!(
                 "To add an MCP server, edit: {}",
-                mcp_config_path.display()
+                workspace_relative(&mcp_config_path, &paths.base)
             ));
             lines.push(String::new());
             lines.push("The file uses this format:".to_string());
@@ -453,7 +476,7 @@ pub fn build_context_prompt_for_user(
             lines.push(String::new());
             lines.push(format!(
                 "After adding the config, enable the server by running: HOME={} {} mcp enable <server-name>",
-                paths.cursor_home.display(),
+                workspace_relative(&paths.cursor_home, &paths.base),
                 cursor_cli,
             ));
         }
@@ -469,7 +492,7 @@ pub fn build_context_prompt_for_user(
     );
     lines.push(format!(
         "The cron store is a JSON file at: {}",
-        paths.base.join("cron.json").display()
+        workspace_relative(&paths.base.join("cron.json"), &paths.base)
     ));
     lines.push(String::new());
     lines.push(
@@ -632,5 +655,23 @@ mod memory_guidance_tests {
         assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
         // Routes durable org facts to propose-knowledge, not personal memory.
         assert!(prompt.contains("propose-knowledge"));
+    }
+
+    #[test]
+    fn prompt_does_not_leak_the_building_machine_paths() {
+        let base = config::paths().expect("paths").base;
+        let prompt =
+            build_context_prompt_for_user(Some("Telegram"), Some("telegram"), Some("1"), None)
+                .expect("prompt builds");
+
+        // The prompt is built where the router runs and may be executed on a
+        // different filesystem, so it must describe paths relative to the
+        // working directory rather than naming this machine's workspace root.
+        assert!(
+            !prompt.contains(&base.display().to_string()),
+            "prompt leaks the workspace root {}, which will not exist on a worker",
+            base.display()
+        );
+        assert!(prompt.contains("current working directory"));
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::audit;
@@ -52,7 +52,11 @@ pub struct PairingStore {
 impl PairingStore {
     /// Load pairing store from disk
     pub fn load(paths: &Paths) -> Result<Self> {
-        let path = paths.pairing_file.clone();
+        Self::load_from(&paths.pairing_file)
+    }
+
+    fn load_from(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
 
         if !path.exists() {
             return Ok(Self {
@@ -66,6 +70,10 @@ impl PairingStore {
 
         let mut store: Self = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse pairing file: {:?}", path))?;
+        for ids in store.approved.values_mut() {
+            let mut seen = HashSet::new();
+            ids.retain(|id| seen.insert(id.clone()));
+        }
         store.path = path;
 
         Ok(store)
@@ -73,14 +81,36 @@ impl PairingStore {
 
     /// Save pairing store to disk
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&self.path, content)?;
+        crate::atomic::write(&self.path, content.as_bytes())?;
 
         Ok(())
+    }
+
+    /// Re-read the file into `self`, keeping `self.path`. Fails closed on a parse error.
+    pub fn reload(&mut self) -> Result<()> {
+        let fresh = Self::load_from(&self.path)?;
+        self.pending = fresh.pending;
+        self.approved = fresh.approved;
+        self.sessions = fresh.sessions;
+        self.user_profiles = fresh.user_profiles;
+        Ok(())
+    }
+
+    /// reload → f → atomic save. The only way a mutation reaches disk.
+    pub fn modify<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.reload()?;
+        let output = f(self)?;
+        self.save()?;
+        Ok(output)
+    }
+
+    pub fn set_session_if(&mut self, key: &str, expected: Option<&str>, new: &str) -> bool {
+        if self.sessions.get(key).map(String::as_str) != expected {
+            return false;
+        }
+        self.sessions.insert(key.to_string(), new.to_string());
+        true
     }
 
     /// Remove expired pending requests
@@ -131,7 +161,6 @@ impl PairingStore {
         };
 
         self.pending.push(request);
-        self.save()?;
 
         audit::log_event(
             "pairing_requested",
@@ -158,12 +187,11 @@ impl PairingStore {
 
         let request = self.pending.remove(idx);
 
-        self.approved
-            .entry(request.channel.clone())
-            .or_default()
-            .push(request.user_id.clone());
-
-        self.save()?;
+        let ids = self.approved.entry(request.channel.clone()).or_default();
+        if ids.iter().any(|id| id == &request.user_id) {
+            return Ok(request);
+        }
+        ids.push(request.user_id.clone());
 
         let detail = format!(
             "{{\"code\":\"{}\",\"username\":{}}}",
@@ -192,11 +220,11 @@ impl PairingStore {
         username: Option<String>,
         _display_name: Option<String>,
     ) -> Result<()> {
-        self.approved
-            .entry(channel.to_string())
-            .or_default()
-            .push(user_id.to_string());
-        self.save()?;
+        let ids = self.approved.entry(channel.to_string()).or_default();
+        if ids.iter().any(|id| id == user_id) {
+            return Ok(());
+        }
+        ids.push(user_id.to_string());
 
         let detail = username
             .as_deref()
@@ -272,4 +300,70 @@ fn now_timestamp() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modify_fails_closed() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut store = PairingStore::load(&paths).unwrap();
+        store.save().unwrap();
+        std::fs::write(&paths.pairing_file, b"{\"pending\": ").unwrap();
+
+        assert!(
+            store
+                .modify(|store| {
+                    store.sessions.insert("key".into(), "value".into());
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(store.sessions.is_empty());
+        assert_eq!(
+            std::fs::read(&paths.pairing_file).unwrap(),
+            b"{\"pending\": "
+        );
+    }
+
+    #[test]
+    fn reload_sees_out_of_process_approval() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut first = PairingStore::load(&paths).unwrap();
+        first
+            .modify(|store| store.get_or_create_pending("telegram", "1", None, None))
+            .unwrap();
+        let code = first.pending[0].code.clone();
+        let mut second = PairingStore::load(&paths).unwrap();
+        second.modify(|store| store.approve(&code)).unwrap();
+
+        assert!(!first.is_approved("telegram", "1"));
+        first.reload().unwrap();
+        assert!(first.is_approved("telegram", "1"));
+    }
+
+    #[test]
+    fn auto_approve_is_idempotent() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut store = PairingStore::load(&paths).unwrap();
+        store.auto_approve("telegram", "1", None, None).unwrap();
+        store.auto_approve("telegram", "1", None, None).unwrap();
+
+        assert_eq!(store.approved["telegram"], ["1"]);
+    }
+
+    #[test]
+    fn load_dedups_approved() {
+        let (_temp, paths) = crate::config::test_paths();
+        std::fs::write(
+            &paths.pairing_file,
+            r#"{"pending":[],"approved":{"telegram":["1","1","2"]}}"#,
+        )
+        .unwrap();
+
+        let store = PairingStore::load(&paths).unwrap();
+        assert_eq!(store.approved["telegram"], ["1", "2"]);
+    }
 }

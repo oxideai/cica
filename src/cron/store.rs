@@ -1,7 +1,7 @@
 //! Persistent storage for cron jobs.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -172,7 +172,11 @@ pub struct CronStore {
 impl CronStore {
     /// Load cron store from disk.
     pub fn load(paths: &Paths) -> Result<Self> {
-        let path = paths.base.join("cron.json");
+        Self::load_from(&paths.base.join("cron.json"))
+    }
+
+    fn load_from(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
 
         if !path.exists() {
             return Ok(Self {
@@ -194,16 +198,43 @@ impl CronStore {
     /// Save cron store to disk.
     pub fn save(&self) -> Result<()> {
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&self.path, content)?;
+        crate::atomic::write(&self.path, content.as_bytes())?;
 
         Ok(())
+    }
+
+    /// Re-read the file into `self`, keeping `self.path`. Fails closed on a parse error.
+    pub fn reload(&mut self) -> Result<()> {
+        let fresh = Self::load_from(&self.path)?;
+        self.jobs = fresh.jobs;
+        Ok(())
+    }
+
+    /// reload → f → atomic save. The only way a mutation reaches disk.
+    pub fn modify<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.reload()?;
+        let output = f(self)?;
+        self.save()?;
+        Ok(output)
+    }
+
+    /// reload → patch one job → atomic save. Returns false if the job no longer exists.
+    pub fn update_job(&mut self, id: &str, f: impl FnOnce(&mut CronJob)) -> Result<bool> {
+        self.modify(|store| {
+            Ok(match store.jobs.get_mut(id) {
+                Some(job) => {
+                    f(job);
+                    true
+                }
+                None => false,
+            })
+        })
     }
 
     /// Add a new job.
     pub fn add(&mut self, job: CronJob) -> Result<JobId> {
         let id = job.id.clone();
         self.jobs.insert(id.clone(), job);
-        self.save()?;
 
         Ok(id)
     }
@@ -217,12 +248,7 @@ impl CronStore {
             anyhow::bail!("You don't own this job");
         }
 
-        let removed = self.jobs.remove(id);
-        if removed.is_some() {
-            self.save()?;
-        }
-
-        Ok(removed)
+        Ok(self.jobs.remove(id))
     }
 
     /// List jobs for a specific user.
@@ -270,30 +296,6 @@ impl CronStore {
 
         count
     }
-
-    /// Merge disk state into the current store, preserving in-flight job states.
-    /// Jobs currently marked as Running in memory keep their in-memory state
-    /// to avoid losing completion updates from concurrent tasks.
-    pub fn merge_from_disk(&mut self, disk: CronStore) {
-        let running_ids: std::collections::HashSet<String> = self
-            .jobs
-            .values()
-            .filter(|j| j.state.last_status == JobStatus::Running)
-            .map(|j| j.id.clone())
-            .collect();
-
-        let disk_ids: std::collections::HashSet<String> = disk.jobs.keys().cloned().collect();
-
-        for (id, disk_job) in disk.jobs {
-            if running_ids.contains(&id) {
-                continue;
-            }
-            self.jobs.insert(id, disk_job);
-        }
-
-        self.jobs
-            .retain(|id, _| disk_ids.contains(id) || running_ids.contains(id));
-    }
 }
 
 /// Generate a unique job ID.
@@ -312,6 +314,79 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(name: &str) -> CronJob {
+        CronJob::new(
+            name.to_string(),
+            "prompt".to_string(),
+            CronSchedule::Every(60_000),
+            "telegram".to_string(),
+            "1".to_string(),
+            None,
+        )
+    }
+
+    #[test]
+    fn modify_fails_closed() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut store = CronStore::load(&paths).unwrap();
+        store.save().unwrap();
+        let path = paths.base.join("cron.json");
+        std::fs::write(&path, b"{\"jobs\": ").unwrap();
+
+        assert!(store.modify(|store| store.add(job("new"))).is_err());
+        assert!(store.jobs.is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), b"{\"jobs\": ");
+    }
+
+    #[test]
+    fn agent_edit_between_ticks_is_picked_up() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut store = CronStore::load(&paths).unwrap();
+        store.save().unwrap();
+        let added = job("agent");
+        let mut external = CronStore::load(&paths).unwrap();
+        external.jobs.insert(added.id.clone(), added.clone());
+        std::fs::write(
+            paths.base.join("cron.json"),
+            serde_json::to_vec_pretty(&external).unwrap(),
+        )
+        .unwrap();
+
+        store.reload().unwrap();
+        assert_eq!(store.jobs[&added.id].name, "agent");
+    }
+
+    #[test]
+    fn update_job_completion_preserves_concurrent_add() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut store = CronStore::load(&paths).unwrap();
+        let running = job("running");
+        let running_id = running.id.clone();
+        store.modify(|store| store.add(running)).unwrap();
+        store
+            .update_job(&running_id, |job| {
+                job.state.last_status = JobStatus::Running
+            })
+            .unwrap();
+
+        let added = job("added");
+        let added_id = added.id.clone();
+        let mut external = CronStore::load(&paths).unwrap();
+        external.modify(|store| store.add(added)).unwrap();
+        store
+            .update_job(&running_id, |job| {
+                job.state.last_status = JobStatus::Success
+            })
+            .unwrap();
+
+        let stored = CronStore::load(&paths).unwrap();
+        assert_eq!(
+            stored.jobs[&running_id].state.last_status,
+            JobStatus::Success
+        );
+        assert!(stored.jobs.contains_key(&added_id));
+    }
 
     #[test]
     fn test_job_creation() {

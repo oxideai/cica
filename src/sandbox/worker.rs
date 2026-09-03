@@ -30,6 +30,17 @@ fn attachment_key(path: &str) -> String {
     format!("attachments/{path}")
 }
 
+/// Files the agent produced during a turn, scoped to that turn: unlike inbound
+/// attachments they are not worth sharing by name, and they are cleaned up with
+/// the rest of the turn's blobs.
+fn produced_key(turn_id: &str) -> String {
+    format!("turns/{turn_id}/out")
+}
+
+/// Beyond this, a "file the agent produced" is more likely a mistake than
+/// something a colleague wants in a chat message.
+const MAX_PRODUCED_BYTES: u64 = 100 * 1024 * 1024;
+
 fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "cica-turn-{turn_id}-{kind}-{}",
@@ -67,6 +78,116 @@ async fn push_attachments(store: &dyn StateStore, base: &std::path::Path, job: &
         }
         let _ = std::fs::remove_dir_all(&staging);
     }
+}
+
+/// Copy files the agent named with `[attachment:...]` into the store, so the
+/// router can attach them to its reply.
+///
+/// A worker runs in a container that is gone by the time the router formats the
+/// message, so a marker naming a worker-local path resolves to nothing and gets
+/// printed to the user verbatim. That is the whole bug this exists to close.
+///
+/// Best-effort, like `push_attachments`: losing a file costs an attachment and
+/// leaves the text, which is worth more than failing the turn. Names are
+/// flattened to the file name so a marker cannot write outside the destination
+/// directory on the far side.
+async fn push_produced_files(store: &dyn StateStore, turn_id: &str, result: &mut TurnResult) {
+    let markers = crate::sandbox::attachment_markers(&result.response);
+    if markers.is_empty() {
+        return;
+    }
+
+    let staging = std::env::temp_dir().join(format!("cica-produced-{}", Uuid::new_v4()));
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        warn!("failed to stage produced files: {e}");
+        return;
+    }
+
+    let mut names = Vec::new();
+    for marker in markers {
+        let src = std::path::Path::new(&marker);
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if names.iter().any(|n| n == name) {
+            warn!("two produced files share the name {name}; keeping the first");
+            continue;
+        }
+        match std::fs::metadata(src) {
+            Ok(meta) if !meta.is_file() => continue,
+            Ok(meta) if meta.len() > MAX_PRODUCED_BYTES => {
+                warn!(
+                    "produced file {name} is {} bytes, over the {MAX_PRODUCED_BYTES} limit; not sending it",
+                    meta.len()
+                );
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("produced file {marker} is not readable: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::copy(src, staging.join(name)) {
+            warn!("failed to stage produced file {name}: {e}");
+            continue;
+        }
+        names.push(name.to_string());
+    }
+
+    if !names.is_empty() {
+        match store.push(&staging, &produced_key(turn_id)).await {
+            Ok(()) => result.produced_files = names,
+            Err(e) => warn!("failed to push produced files to the store: {e}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
+/// Bring the worker's produced files onto this machine and point the markers at
+/// them, so the channel's existing `path.exists()` check passes.
+///
+/// Per-turn directory: file names come from the agent, and two turns naming the
+/// same file must not overwrite each other mid-send.
+async fn pull_produced_files(
+    store: &dyn StateStore,
+    turn_id: &str,
+    dest_root: &std::path::Path,
+    result: &mut TurnResult,
+) {
+    if result.produced_files.is_empty() {
+        return;
+    }
+    let dest = dest_root.join(turn_id);
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        warn!("failed to create {dest:?} for produced files: {e}");
+        return;
+    }
+    match store.pull(&produced_key(turn_id), &dest).await {
+        Ok(true) => result.response = rewrite_markers(&result.response, &dest),
+        Ok(false) => warn!("worker reported produced files but the store had none"),
+        Err(e) => warn!("failed to pull produced files: {e}"),
+    }
+}
+
+/// Repoint each `[attachment:...]` marker at `dir/<file name>` when that file
+/// landed. A marker whose file is missing is left alone: the channel drops it
+/// for not existing, which is the pre-existing behaviour.
+fn rewrite_markers(response: &str, dir: &std::path::Path) -> String {
+    let mut out = response.to_string();
+    for marker in crate::sandbox::attachment_markers(response) {
+        let Some(name) = std::path::Path::new(&marker).file_name() else {
+            continue;
+        };
+        let local = dir.join(name);
+        if local.is_file() {
+            out = out.replace(
+                &format!("[attachment:{marker}]"),
+                &format!("[attachment:{}]", local.display()),
+            );
+        }
+    }
+    out
 }
 
 async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
@@ -116,7 +237,8 @@ pub async fn run_worker_turn(
     turn_id: &str,
 ) -> Result<()> {
     let job = pull_job(store, turn_id).await?;
-    let result = engine.run_turn(job).await?;
+    let mut result = engine.run_turn(job).await?;
+    push_produced_files(store, turn_id, &mut result).await;
     push_result(store, turn_id, &result).await?;
     Ok(())
 }
@@ -144,6 +266,14 @@ impl LaunchedWorkerProvider {
             base,
         }
     }
+
+    /// Where produced files land on this machine. A subdirectory of the
+    /// attachments dir because it is the same thing from the channel's point of
+    /// view -- a local file to attach -- and keeping it separate stops an
+    /// outbound file from overwriting an inbound one of the same name.
+    fn produced_dir(&self) -> PathBuf {
+        self.attachments_dir.join("outbound")
+    }
 }
 
 #[async_trait]
@@ -160,6 +290,21 @@ impl SandboxProvider for LaunchedWorkerProvider {
         }
 
         let result = pull_result(self.store.as_ref(), &turn_id).await;
+
+        // Before cleanup: it deletes the whole turn prefix, produced files included.
+        let result = match result {
+            Ok(Some(mut result)) => {
+                pull_produced_files(
+                    self.store.as_ref(),
+                    &turn_id,
+                    &self.produced_dir(),
+                    &mut result,
+                )
+                .await;
+                Ok(Some(result))
+            }
+            other => other,
+        };
         cleanup(self.store.as_ref(), &turn_id).await;
 
         result?.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
@@ -326,6 +471,102 @@ mod tests {
         }
     }
 
+    fn sample_result(response: &str) -> TurnResult {
+        TurnResult {
+            response: response.into(),
+            backend_session_id: "s1".into(),
+            cost_usd: None,
+            duration_ms: None,
+            produced_files: Vec::new(),
+        }
+    }
+
+    /// The bug: a worker writes a file inside its container and names it with a
+    /// marker. The router has no such path, the channel's existence check fails,
+    /// and the marker is printed to the user as text.
+    #[tokio::test]
+    async fn a_file_the_worker_wrote_reaches_the_router() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+
+        // Worker side: a file only this machine can see.
+        let worker_dir = tempfile::tempdir().unwrap();
+        let produced = worker_dir.path().join("cft_input.json");
+        std::fs::write(&produced, br#"{"herd": 120}"#).unwrap();
+        let mut result = sample_result(&format!(
+            "[attachment:{}]\n\nHere is the CFT input.",
+            produced.display()
+        ));
+
+        push_produced_files(&store, "t-out", &mut result).await;
+        assert_eq!(result.produced_files, vec!["cft_input.json".to_string()]);
+
+        // Router side: a different directory, and the worker's path is gone.
+        std::fs::remove_dir_all(worker_dir.path()).unwrap();
+        let router_root = tempfile::tempdir().unwrap();
+        pull_produced_files(&store, "t-out", router_root.path(), &mut result).await;
+
+        let landed = router_root.path().join("t-out").join("cft_input.json");
+        assert!(landed.is_file(), "the file did not reach the router");
+        assert_eq!(std::fs::read(&landed).unwrap(), br#"{"herd": 120}"#);
+        assert!(
+            result
+                .response
+                .contains(&format!("[attachment:{}]", landed.display())),
+            "the marker still points at the worker path: {}",
+            result.response
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_marker_ships_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        let mut result = sample_result("Just an answer, no files.");
+        push_produced_files(&store, "t-none", &mut result).await;
+        assert!(result.produced_files.is_empty());
+    }
+
+    /// A marker naming a path that is not there must not break the turn: the
+    /// text still goes out, just without an attachment.
+    #[tokio::test]
+    async fn a_marker_for_a_missing_file_is_survivable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        let mut result = sample_result("[attachment:/nope/gone.json]\n\nText survives.");
+        push_produced_files(&store, "t-missing", &mut result).await;
+        assert!(result.produced_files.is_empty());
+        assert!(result.response.contains("Text survives."));
+    }
+
+    /// Names come from the agent, so a marker must not be able to write outside
+    /// the destination directory on the router.
+    #[tokio::test]
+    async fn a_traversing_name_is_flattened() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        let evil = dir.path().join("passwd");
+        std::fs::write(&evil, b"x").unwrap();
+
+        let mut result = sample_result(&format!("[attachment:{}]", evil.display()));
+        push_produced_files(&store, "t-evil", &mut result).await;
+        assert_eq!(result.produced_files, vec!["passwd".to_string()]);
+        assert!(
+            !result.produced_files.iter().any(|n| n.contains('/')),
+            "a stored name kept a path separator"
+        );
+    }
+
+    /// An older worker's result has no `produced_files` field at all.
+    #[test]
+    fn a_result_without_produced_files_still_deserializes() {
+        let json =
+            r#"{"response":"hi","backend_session_id":"s","cost_usd":null,"duration_ms":null}"#;
+        let r: TurnResult = serde_json::from_str(json).unwrap();
+        assert!(r.produced_files.is_empty());
+    }
+
     #[tokio::test]
     async fn job_push_pull_round_trips() {
         let root = tempfile::tempdir().unwrap();
@@ -352,6 +593,7 @@ mod tests {
             backend_session_id: "sess".into(),
             cost_usd: None,
             duration_ms: None,
+            produced_files: Vec::new(),
         };
         push_result(&store, "t2", &result).await.unwrap();
         let back = pull_result(&store, "t2").await.unwrap().unwrap();
@@ -375,6 +617,7 @@ mod tests {
                     backend_session_id: "sess".into(),
                     cost_usd: None,
                     duration_ms: None,
+                    produced_files: Vec::new(),
                 })
             }
         }
@@ -472,6 +715,7 @@ mod tests {
                     backend_session_id: "sess-w".into(),
                     cost_usd: None,
                     duration_ms: None,
+                    produced_files: Vec::new(),
                 })
             }
         }

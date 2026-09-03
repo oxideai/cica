@@ -65,6 +65,9 @@ pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
         backend_session_id: qr.session_id,
         cost_usd: qr.cost_usd,
         duration_ms: qr.duration_ms,
+        // Nothing to ship: a local run already wrote its files where the
+        // channel can read them.
+        produced_files: Vec::new(),
     }
 }
 
@@ -130,6 +133,7 @@ mod tests {
             backend_session_id: "sess-3".into(),
             cost_usd: None,
             duration_ms: None,
+            produced_files: Vec::new(),
         };
         let qr = query_result_from_turn(tr);
         assert_eq!(qr.response, "yo");

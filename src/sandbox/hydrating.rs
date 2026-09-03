@@ -185,6 +185,7 @@ mod tests {
                 backend_session_id: self.session_id.clone(),
                 cost_usd: None,
                 duration_ms: None,
+                produced_files: Vec::new(),
             })
         }
     }

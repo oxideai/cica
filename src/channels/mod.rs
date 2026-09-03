@@ -261,14 +261,10 @@ pub async fn execute_action(
 fn extract_media_attachments(response: &str) -> Vec<PathBuf> {
     let mut attachments = Vec::new();
 
-    for cap in response.match_indices("[attachment:") {
-        let start = cap.0 + "[attachment:".len();
-        if let Some(end) = response[start..].find(']') {
-            let path_str = response[start..start + end].trim();
-            let path = PathBuf::from(path_str);
-            if path.exists() && !attachments.contains(&path) {
-                attachments.push(path);
-            }
+    for marker in crate::sandbox::attachment_markers(response) {
+        let path = PathBuf::from(marker);
+        if path.exists() && !attachments.contains(&path) {
+            attachments.push(path);
         }
     }
 
@@ -1118,6 +1114,7 @@ mod runtime_store_tests {
                 backend_session_id: "sess-1".into(),
                 cost_usd: None,
                 duration_ms: None,
+                produced_files: Vec::new(),
             })
         }
     }

@@ -13,8 +13,9 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::{self, Paths, TelegramConfig};
+use crate::config::{Paths, TelegramConfig};
 use crate::pairing::PairingStore;
+use crate::runtime::Runtime;
 
 pub struct TelegramChannel {
     bot: Bot,
@@ -131,14 +132,13 @@ fn get_telegram_attachments_dir(paths: &Paths) -> Result<PathBuf> {
     Ok(dir)
 }
 
-async fn download_photo(bot: &Bot, photo: &PhotoSize) -> Result<PathBuf> {
-    let paths = config::paths()?;
+async fn download_photo(bot: &Bot, photo: &PhotoSize, paths: &Paths) -> Result<PathBuf> {
     let file = bot.get_file(&photo.file.id).await?;
     let file_path = file.path;
 
     let extension = file_path.rsplit('.').next().unwrap_or("jpg");
 
-    let attachments_dir = get_telegram_attachments_dir(&paths)?;
+    let attachments_dir = get_telegram_attachments_dir(paths)?;
     let local_path = attachments_dir.join(format!("{}.{}", photo.file.unique_id, extension));
 
     if local_path.exists() {
@@ -164,7 +164,7 @@ pub async fn validate_token(token: &str) -> Result<String> {
     Ok(me.username().to_string())
 }
 
-pub async fn run(config: TelegramConfig) -> Result<()> {
+pub async fn run(config: TelegramConfig, rt: Arc<Runtime>) -> Result<()> {
     let bot = Bot::new(&config.bot_token);
 
     info!("Starting Telegram bot...");
@@ -182,8 +182,9 @@ pub async fn run(config: TelegramConfig) -> Result<()> {
 
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let task_manager = Arc::clone(&task_manager);
+        let rt = rt.clone();
         async move {
-            if let Err(e) = handle_message(&bot, &msg, task_manager).await {
+            if let Err(e) = handle_message(&bot, &msg, task_manager, rt).await {
                 warn!("Error handling message: {}", e);
             }
             Ok(())
@@ -198,8 +199,8 @@ async fn handle_message(
     bot: &Bot,
     msg: &Message,
     task_manager: Arc<UserTaskManager>,
+    rt: Arc<Runtime>,
 ) -> Result<()> {
-    let paths = config::paths()?;
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0.to_string()).unwrap_or_default();
     let username = user.and_then(|u| u.username.clone());
@@ -214,7 +215,7 @@ async fn handle_message(
     if let Some(photos) = msg.photo()
         && let Some(largest) = get_largest_photo(photos)
     {
-        match download_photo(bot, largest).await {
+        match download_photo(bot, largest, &rt.paths).await {
             Ok(path) => image_paths.push(path),
             Err(e) => warn!("Failed to download photo: {}", e),
         }
@@ -235,8 +236,9 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(bot.clone(), msg.chat.id));
 
-    let mut store = PairingStore::load(&paths)?;
+    let mut store = PairingStore::load(&rt.paths)?;
     let action = determine_action(
+        &rt,
         channel.name(),
         &user_id,
         text,
@@ -246,15 +248,16 @@ async fn handle_message(
         display_name,
     )?;
 
-    if let Some(query_text) = execute_action(channel.as_ref(), &user_id, action).await? {
+    if let Some(query_text) = execute_action(&rt, channel.as_ref(), &user_id, action).await? {
         let text_with_images = build_text_with_images(&query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), user_id);
         let channel_clone = channel.clone();
         let user_id_clone = user_id.clone();
+        let rt = rt.clone();
 
         task_manager
             .process_message(user_key, text_with_images, move |messages| async move {
-                execute_claude_query(channel_clone, &user_id_clone, messages, None).await;
+                execute_claude_query(rt, channel_clone, &user_id_clone, messages, None).await;
             })
             .await;
     }

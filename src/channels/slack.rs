@@ -14,6 +14,7 @@ use super::{
 };
 use crate::config::{self, Paths, SlackConfig};
 use crate::pairing::PairingStore;
+use crate::runtime::Runtime;
 use crate::skills;
 
 fn get_slack_attachments_dir(paths: &Paths) -> Result<PathBuf> {
@@ -22,8 +23,7 @@ fn get_slack_attachments_dir(paths: &Paths) -> Result<PathBuf> {
     Ok(dir)
 }
 
-async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBuf> {
-    let paths = config::paths()?;
+async fn download_slack_file(paths: &Paths, file: &SlackFile, bot_token: &str) -> Result<PathBuf> {
     let url = file
         .url_private_download
         .as_ref()
@@ -33,7 +33,7 @@ async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBu
     let file_name = file.name.as_deref().unwrap_or("unknown");
     let file_id = &file.id;
 
-    let attachments_dir = get_slack_attachments_dir(&paths)?;
+    let attachments_dir = get_slack_attachments_dir(paths)?;
     let local_path = attachments_dir.join(format!("{}_{}", file_id, file_name));
 
     if local_path.exists() {
@@ -71,21 +71,9 @@ async fn set_suggested_prompts(
     token: &SlackApiToken,
     channel_id: &SlackChannelId,
     thread_ts: &SlackTs,
+    paths: &Paths,
+    prep_deps: bool,
 ) {
-    let config = match config::Config::load() {
-        Ok(config) => config,
-        Err(error) => {
-            warn!("Failed to load config: {}", error);
-            return;
-        }
-    };
-    let paths = match config::paths() {
-        Ok(paths) => paths,
-        Err(error) => {
-            warn!("Failed to resolve paths: {}", error);
-            return;
-        }
-    };
     let session = client.open_session(token);
 
     // Build prompts from available skills (up to 4, Slack's limit).
@@ -96,10 +84,7 @@ async fn set_suggested_prompts(
         "What can you help me with?".to_string(),
     ));
 
-    if let Ok(available_skills) = skills::discover_skills(
-        &paths,
-        config::prep_skill_deps_locally(config.deployment.provider),
-    ) {
+    if let Ok(available_skills) = skills::discover_skills(paths, prep_deps) {
         for skill in available_skills.iter().take(3) {
             prompts.push(SlackAssistantPrompt::new(
                 skill.description.clone(),
@@ -358,6 +343,7 @@ impl Channel for SlackChannel {
 /// State passed to socket mode event handlers.
 #[derive(Clone)]
 struct SlackUserState {
+    rt: Arc<Runtime>,
     bot_token: SlackApiToken,
     /// Raw bot token string for file downloads (requires auth header)
     bot_token_str: String,
@@ -391,7 +377,7 @@ pub async fn validate_credentials(bot_token: &str, app_token: &str) -> Result<St
 }
 
 /// Run the Slack bot using Socket Mode.
-pub async fn run(config: SlackConfig) -> Result<()> {
+pub async fn run(config: SlackConfig, rt: Arc<Runtime>) -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     info!("Starting Slack bot...");
@@ -408,6 +394,7 @@ pub async fn run(config: SlackConfig) -> Result<()> {
     let task_manager = UserTaskManager::new();
 
     let user_state = SlackUserState {
+        rt,
         bot_token: bot_token.clone(),
         bot_token_str: config.bot_token.clone(),
         bot_user_id,
@@ -469,9 +456,13 @@ async fn handle_push_events(
             let token = user_state.bot_token.clone();
             let channel_id = thread_event.assistant_thread.channel_id.clone();
             let thread_ts = thread_event.assistant_thread.thread_ts.clone();
+            let paths = user_state.rt.paths.clone();
+            let prep_deps =
+                config::prep_skill_deps_locally(user_state.rt.config.deployment.provider);
 
             tokio::spawn(async move {
-                set_suggested_prompts(&client, &token, &channel_id, &thread_ts).await;
+                set_suggested_prompts(&client, &token, &channel_id, &thread_ts, &paths, prep_deps)
+                    .await;
             });
         }
         SlackEventCallbackBody::AppMention(mention_event) => {
@@ -500,7 +491,6 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     state: SlackUserState,
 ) -> Result<()> {
-    let paths = config::paths()?;
     if event.sender.bot_id.is_some() {
         return Ok(());
     }
@@ -538,7 +528,7 @@ async fn handle_message_event(
     {
         for file in files {
             if is_image_file(file) {
-                match download_slack_file(file, &state.bot_token_str).await {
+                match download_slack_file(&state.rt.paths, file, &state.bot_token_str).await {
                     Ok(path) => image_paths.push(path),
                     Err(e) => warn!("Failed to download Slack file: {}", e),
                 }
@@ -608,9 +598,10 @@ async fn handle_message_event(
         None => format!("{}:{}", channel.name(), user_id),
     };
 
-    let mut store = PairingStore::load(&paths)?;
+    let mut store = PairingStore::load(&state.rt.paths)?;
 
     let action = determine_action(
+        &state.rt,
         channel.name(),
         &user_id_str,
         &text,
@@ -620,17 +611,26 @@ async fn handle_message_event(
         display_name,
     )?;
 
-    if let Some(query_text) = execute_action(channel.as_ref(), &user_id_str, action).await? {
+    if let Some(query_text) =
+        execute_action(&state.rt, channel.as_ref(), &user_id_str, action).await?
+    {
         let text_with_images = build_text_with_images(&query_text, &image_paths);
         let channel_clone = channel.clone();
         let user_id_clone = user_id_str.clone();
         let session_key_clone = session_key.clone();
+        let rt = state.rt.clone();
 
         state
             .task_manager
             .process_message(debounce_id, text_with_images, move |messages| async move {
-                execute_claude_query(channel_clone, &user_id_clone, messages, session_key_clone)
-                    .await;
+                execute_claude_query(
+                    rt,
+                    channel_clone,
+                    &user_id_clone,
+                    messages,
+                    session_key_clone,
+                )
+                .await;
             })
             .await;
     }
@@ -709,8 +709,6 @@ async fn handle_app_mention_event(
     client: Arc<SlackHyperClient>,
     state: SlackUserState,
 ) -> Result<()> {
-    let config = config::Config::load()?;
-    let paths = config::paths()?;
     let user_id = event.user.clone();
     let channel_id = event.channel.clone();
 
@@ -739,10 +737,10 @@ async fn handle_app_mention_event(
     );
 
     let user_id_str = user_id.to_string();
-    let mut store = PairingStore::load(&paths)?;
+    let mut store = PairingStore::load(&state.rt.paths)?;
 
     if !store.is_approved("slack", &user_id_str) {
-        let settings = config.channel_settings("slack");
+        let settings = state.rt.config.channel_settings("slack");
 
         if !settings.auto_approve {
             send_ephemeral_message(
@@ -760,9 +758,9 @@ async fn handle_app_mention_event(
         store.auto_approve("slack", &user_id_str, username, display_name)?;
     }
 
-    let settings = config.channel_settings("slack");
+    let settings = state.rt.config.channel_settings("slack");
     let onboarding_complete =
-        crate::onboarding::is_complete_for_user(&paths, &settings, "slack", &user_id_str)?;
+        crate::onboarding::is_complete_for_user(&state.rt.paths, &settings, "slack", &user_id_str)?;
     if !onboarding_complete {
         send_ephemeral_message(
             &client,
@@ -791,7 +789,7 @@ async fn handle_app_mention_event(
     if let Some(files) = &event.content.files {
         for file in files {
             if is_image_file(file) {
-                match download_slack_file(file, &state.bot_token_str).await {
+                match download_slack_file(&state.rt.paths, file, &state.bot_token_str).await {
                     Ok(path) => image_paths.push(path),
                     Err(e) => warn!("Failed to download Slack file: {}", e),
                 }
@@ -842,11 +840,12 @@ async fn handle_app_mention_event(
     let channel_clone = channel.clone();
     let user_id_clone = user_id_str.clone();
     let session_key = Some(shared_session_key);
+    let rt = state.rt.clone();
 
     state
         .task_manager
         .process_message(user_key, text_with_images, move |messages| async move {
-            execute_claude_query(channel_clone, &user_id_clone, messages, session_key).await;
+            execute_claude_query(rt, channel_clone, &user_id_clone, messages, session_key).await;
         })
         .await;
 

@@ -129,31 +129,9 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
     }
 }
 
-/// Infallible wrapper used by call sites that cannot recover. On a
-/// configuration error it logs and falls back to the in-process provider so
-/// the router still starts (per the spec's "router-still-starts" choice).
-/// Note the trade-off: a misconfigured `provider = subprocess` (e.g. missing
-/// store) silently runs in-process instead of dispatching to a worker.
-pub fn default_provider(config: &Config, paths: &Paths) -> Box<dyn SandboxProvider> {
-    match try_default_provider(config, paths) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("invalid provider configuration ({e}); using in-process provider");
-            Box::new(LocalProcessProvider::new(config.clone(), paths.clone()))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_provider_is_constructible() {
-        let (_temp, paths) = crate::config::test_paths();
-        let cfg = Config::default();
-        let _p = default_provider(&cfg, &paths);
-    }
 
     #[test]
     fn subprocess_provider_requires_a_store() {

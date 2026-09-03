@@ -81,10 +81,15 @@ pub async fn query_with_options(
     debug!("Using claude_code: {:?}", claude_code);
 
     let build_command = |resume_session: Option<&str>| {
-        let mut cmd = Command::new(&bun);
-        cmd.arg("run")
-            .arg(&claude_code)
-            .args(["-p", "--output-format", "json"])
+        let mut cmd = match &claude_code {
+            setup::ClaudeCode::Native(exe) => Command::new(exe),
+            setup::ClaudeCode::Script(js) => {
+                let mut c = Command::new(&bun);
+                c.arg("run").arg(js);
+                c
+            }
+        };
+        cmd.args(["-p", "--output-format", "json"])
             .env("HOME", &paths.claude_home);
 
         if options.skip_permissions {

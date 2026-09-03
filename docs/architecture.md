@@ -75,6 +75,7 @@ A three-method trait (`StateStore`): `pull(key, dest) → bool`, `push(src, key)
 - **S3** — keys are object prefixes in a bucket (behind the `s3` feature). Credentials come from the standard AWS provider chain (env / instance role), **never** from config.
 
 S3 stores each tree as immutable objects under `<prefix>/<key>/gen/<uuid>/<relative-path>` and commits it by writing a JSON manifest at `<prefix>/<key>/current` last. Pulls follow that manifest, so readers see either the complete previous generation or the complete new one. Legacy flat objects under `<prefix>/<key>/` remain readable until the next push migrates and prunes them.
+Old generations are pruned only once they are an hour old, so concurrent pushes cannot delete each other's live tree.
 
 ### Key layout
 

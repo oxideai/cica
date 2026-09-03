@@ -16,6 +16,7 @@ pub struct Paths {
     pub memory_dir: PathBuf,
     pub skills_dir: PathBuf,
     pub internal_dir: PathBuf,
+    pub models_dir: PathBuf,
     pub deps_dir: PathBuf,
     pub bun_dir: PathBuf,
     pub java_dir: PathBuf,
@@ -47,6 +48,7 @@ impl Paths {
             memory_dir: base.join("memory"),
             skills_dir: base.join("skills"),
             internal_dir: internal_dir.clone(),
+            models_dir: internal_dir.join("models"),
             deps_dir: deps_dir.clone(),
             bun_dir: deps_dir.join("bun"),
             java_dir: deps_dir.join("java"),
@@ -58,6 +60,30 @@ impl Paths {
             cursor_home: internal_dir.join("cursor-home"),
             audit_db: base.join("audit.db"),
             base,
+        }
+    }
+
+    /// Builds isolated mutable paths for a worker while retaining router-owned inputs.
+    pub fn for_worker(base: PathBuf, router: &Paths) -> Self {
+        let internal_dir = base.join("internal");
+        Self {
+            base: base.clone(),
+            config_file: router.config_file.clone(),
+            pairing_file: base.join("pairing.json"),
+            memory_dir: base.join("memory"),
+            skills_dir: router.skills_dir.clone(),
+            internal_dir: internal_dir.clone(),
+            models_dir: router.models_dir.clone(),
+            deps_dir: router.deps_dir.clone(),
+            bun_dir: router.bun_dir.clone(),
+            java_dir: router.java_dir.clone(),
+            signal_cli_dir: router.signal_cli_dir.clone(),
+            claude_code_dir: router.claude_code_dir.clone(),
+            claude_home: internal_dir.join("claude-home"),
+            signal_data_dir: internal_dir.join("signal-data"),
+            cursor_cli_dir: router.cursor_cli_dir.clone(),
+            cursor_home: internal_dir.join("cursor-home"),
+            audit_db: base.join("audit.db"),
         }
     }
 
@@ -444,7 +470,12 @@ pub struct CursorConfig {
 impl Config {
     pub fn load() -> Result<Self> {
         let path = paths()?.config_file;
-        let mut config: Config = match std::fs::read_to_string(&path) {
+        Self::load_from(&path)
+    }
+
+    /// Loads configuration from an explicit file and then applies the environment overlay.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        let mut config: Config = match std::fs::read_to_string(path) {
             Ok(content) => toml::from_str(&content)
                 .with_context(|| format!("Could not parse config file: {path:?}"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -578,6 +609,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_paths_isolate_mutable_state_and_share_inputs() {
+        let router = Paths::for_base(PathBuf::from("/router"));
+        let worker = Paths::for_worker(PathBuf::from("/worker"), &router);
+
+        assert_eq!(worker.base, PathBuf::from("/worker"));
+        assert_eq!(worker.config_file, router.config_file);
+        assert_eq!(worker.pairing_file, PathBuf::from("/worker/pairing.json"));
+        assert_eq!(worker.memory_dir, PathBuf::from("/worker/memory"));
+        assert_eq!(worker.skills_dir, router.skills_dir);
+        assert_eq!(worker.internal_dir, PathBuf::from("/worker/internal"));
+        assert_eq!(worker.models_dir, router.models_dir);
+        assert_eq!(worker.deps_dir, router.deps_dir);
+        assert_eq!(worker.bun_dir, router.bun_dir);
+        assert_eq!(worker.java_dir, router.java_dir);
+        assert_eq!(worker.signal_cli_dir, router.signal_cli_dir);
+        assert_eq!(worker.claude_code_dir, router.claude_code_dir);
+        assert_eq!(
+            worker.claude_home,
+            PathBuf::from("/worker/internal/claude-home")
+        );
+        assert_eq!(
+            worker.signal_data_dir,
+            PathBuf::from("/worker/internal/signal-data")
+        );
+        assert_eq!(worker.cursor_cli_dir, router.cursor_cli_dir);
+        assert_eq!(
+            worker.cursor_home,
+            PathBuf::from("/worker/internal/cursor-home")
+        );
+        assert_eq!(worker.audit_db, PathBuf::from("/worker/audit.db"));
+    }
 
     #[test]
     fn deployment_defaults_to_no_store() {

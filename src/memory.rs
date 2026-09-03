@@ -65,7 +65,7 @@ pub fn memories_dir(paths: &Paths, channel: &str, user_id: &str) -> PathBuf {
 
 /// Ensure the embedding model is downloaded (called during setup)
 pub fn ensure_model_downloaded(paths: &Paths) -> Result<()> {
-    with_embedding_model(&paths.internal_dir.join("models"), |_| Ok(()))
+    with_embedding_model(&paths.models_dir, |_| Ok(()))
 }
 
 /// Memory search result
@@ -235,12 +235,11 @@ impl MemoryIndex {
 
             let chunks = chunk_text(&content);
             let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-            let embeddings =
-                with_embedding_model(&self.paths.internal_dir.join("models"), |model| {
-                    model
-                        .embed(chunk_texts.clone(), None)
-                        .context("Failed to generate embeddings")
-                })?;
+            let embeddings = with_embedding_model(&self.paths.models_dir, |model| {
+                model
+                    .embed(chunk_texts.clone(), None)
+                    .context("Failed to generate embeddings")
+            })?;
 
             for (i, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
                 self.db.execute(
@@ -271,7 +270,7 @@ impl MemoryIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        let query_bytes = with_embedding_model(&self.paths.internal_dir.join("models"), |model| {
+        let query_bytes = with_embedding_model(&self.paths.models_dir, |model| {
             let embeddings = model
                 .embed(vec![query.to_string()], None)
                 .context("Failed to generate query embedding")?;

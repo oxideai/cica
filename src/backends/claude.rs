@@ -46,6 +46,15 @@ fn is_missing_conversation(stderr: &str) -> bool {
     stderr.to_lowercase().contains("no conversation found")
 }
 
+fn config_relative_path(paths: &Paths, value: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(value);
+    if path.is_relative() {
+        paths.config_file.parent().unwrap_or(&paths.base).join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 pub async fn query_with_options(
     claude: &ClaudeConfig,
     paths: &Paths,
@@ -131,12 +140,7 @@ pub async fn query_with_options(
             );
             // Long-lived auth: service account key file (recommended for servers; no gcloud expiry)
             if let Some(ref cred_path) = claude.vertex_credentials_path {
-                let path = std::path::Path::new(cred_path);
-                let abs = if path.is_relative() {
-                    paths.base.join(cred_path)
-                } else {
-                    path.to_path_buf()
-                };
+                let abs = config_relative_path(paths, cred_path);
                 if abs.exists() {
                     cmd.env("GOOGLE_APPLICATION_CREDENTIALS", &abs);
                 }
@@ -231,7 +235,17 @@ pub async fn query_with_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeResponse, is_missing_conversation, served_models};
+    use super::{ClaudeResponse, config_relative_path, is_missing_conversation, served_models};
+
+    #[test]
+    fn vertex_credentials_resolve_from_config_directory() {
+        let mut paths = crate::config::Paths::for_base(std::path::PathBuf::from("/worker"));
+        paths.config_file = std::path::PathBuf::from("/router/config.toml");
+        assert_eq!(
+            config_relative_path(&paths, "credentials.json"),
+            std::path::PathBuf::from("/router/credentials.json")
+        );
+    }
 
     const RESULT_ENVELOPE: &str = r#"{"type":"result","subtype":"success","result":"ok",
         "session_id":"s-1","duration_ms":5840,"total_cost_usd":0.0417,

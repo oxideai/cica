@@ -23,6 +23,12 @@ use crate::config::{Config, Paths, StoreKind};
 /// Keys may contain `/` to namespace entries (e.g. `session/<id>`).
 #[async_trait]
 pub trait StateStore: Send + Sync {
+    /// Read one small record without listing or tree traversal.
+    async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    /// Unconditionally replace one small record.
+    async fn put_record(&self, key: &str, bytes: &[u8]) -> Result<()>;
+    /// Delete one small record; absence is successful.
+    async fn delete_record(&self, key: &str) -> Result<()>;
     /// Replace `dest` with the tree stored under `key`, as a whole. On error, or when
     /// `key` is absent (`Ok(false)`), `dest` is untouched.
     async fn pull(&self, key: &str, dest: &Path) -> Result<bool>;
@@ -172,6 +178,37 @@ pub(crate) mod contract {
 
     pub async fn delete_absent_key_is_ok(store: &dyn StateStore, key: &str) -> Result<()> {
         store.delete(key).await
+    }
+
+    pub async fn record_round_trip(store: &dyn StateStore, key: &str) -> Result<()> {
+        store.put_record(key, b"record bytes").await?;
+        assert_eq!(store.get_record(key).await?, Some(b"record bytes".to_vec()));
+        Ok(())
+    }
+
+    pub async fn record_absent_is_none(store: &dyn StateStore, key: &str) -> Result<()> {
+        assert_eq!(store.get_record(key).await?, None);
+        Ok(())
+    }
+
+    pub async fn record_overwrite_replaces(store: &dyn StateStore, key: &str) -> Result<()> {
+        store.put_record(key, b"first").await?;
+        store.put_record(key, b"second").await?;
+        assert_eq!(store.get_record(key).await?, Some(b"second".to_vec()));
+        Ok(())
+    }
+
+    pub async fn record_delete_makes_absent(store: &dyn StateStore, key: &str) -> Result<()> {
+        store.put_record(key, b"value").await?;
+        store.delete_record(key).await?;
+        assert_eq!(store.get_record(key).await?, None);
+        Ok(())
+    }
+
+    pub async fn record_delete_absent_is_ok(store: &dyn StateStore, key: &str) -> Result<()> {
+        store.delete_record(key).await?;
+        assert_eq!(store.get_record(key).await?, None);
+        Ok(())
     }
 }
 

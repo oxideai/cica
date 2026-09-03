@@ -11,7 +11,7 @@ use tracing::warn;
 use crate::config::AiBackend;
 use crate::sandbox::artifacts::{ClaudeSessionArtifacts, CursorSessionArtifacts, SessionArtifacts};
 use crate::sandbox::state::StateStore;
-use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
+use crate::sandbox::{SandboxProvider, SessionPersistence, TurnJob, TurnResult};
 
 /// Wraps an inner provider: pull session + memories → run → capture + push.
 pub struct HydratingProvider<P: SandboxProvider> {
@@ -55,6 +55,7 @@ impl<P: SandboxProvider> HydratingProvider<P> {
 #[async_trait]
 impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
+        let persist_session = job.session_persistence == SessionPersistence::Resume;
         let mem_key = format!("mem/{}_{}", job.channel, job.user_id);
         let mem_dir = self.memories_dir(&job.channel, &job.user_id);
 
@@ -100,7 +101,7 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
             let _ = std::fs::remove_dir_all(&staging);
         }
 
-        if let Some(bid) = &job.resume_session {
+        if persist_session && let Some(bid) = &job.resume_session {
             let staging = self.staging();
             match self.store.pull(&format!("session/{bid}"), &staging).await {
                 Ok(true) => {
@@ -137,7 +138,7 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         // returns `result` to the router *after* this, so a failed push here
         // (e.g. a slow S3 upload timing out) would otherwise lose the answer
         // entirely. Log and continue; the worst case is a degraded resume.
-        if !result.backend_session_id.is_empty() {
+        if persist_session && !result.backend_session_id.is_empty() {
             let bid = &result.backend_session_id;
             let staging = self.staging();
             match artifacts.capture(home, bid, &staging) {
@@ -194,6 +195,11 @@ mod tests {
         TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
+            affinity: crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            session_persistence: SessionPersistence::Resume,
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: resume.map(|s| s.to_string()),
@@ -215,6 +221,15 @@ mod tests {
 
     #[async_trait]
     impl StateStore for FailingPushStore {
+        async fn get_record(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn put_record(&self, _key: &str, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_record(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
         async fn pull(&self, _key: &str, _dest: &Path) -> Result<bool> {
             Ok(false)
         }
@@ -233,6 +248,15 @@ mod tests {
 
     #[async_trait]
     impl StateStore for FailingPullStore {
+        async fn get_record(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn put_record(&self, _key: &str, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_record(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
         async fn pull(&self, key: &str, _dest: &Path) -> Result<bool> {
             if key.starts_with(self.prefix) {
                 anyhow::bail!("simulated pull failure")
@@ -421,6 +445,49 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dest.path().join("transcript.jsonl")).unwrap(),
             "turn1\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_job_pushes_no_session_key() {
+        let store_root = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let cursor_home = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
+        let id = "cron-session";
+        let slug = crate::sandbox::artifacts::claude_project_slug(base.path());
+        write(
+            &claude_home
+                .path()
+                .join(".claude/projects")
+                .join(slug)
+                .join(format!("{id}.jsonl")),
+            "cron\n",
+        );
+        let hp = HydratingProvider::new(
+            StubProvider {
+                session_id: id.into(),
+                seen: Mutex::new(None),
+            },
+            store.clone(),
+            claude_home.path().to_path_buf(),
+            cursor_home.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
+        let mut cron_job = job(None);
+        cron_job.affinity = crate::sandbox::Affinity::Cron {
+            job_id: "job-1".into(),
+        };
+        cron_job.session_persistence = SessionPersistence::None;
+
+        hp.run_turn(cron_job).await.unwrap();
+
+        assert!(
+            !store
+                .pull(&format!("session/{id}"), &base.path().join("pulled"))
+                .await
+                .unwrap()
         );
     }
 

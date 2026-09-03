@@ -22,6 +22,27 @@ impl FilesystemStateStore {
 
 #[async_trait]
 impl StateStore for FilesystemStateStore {
+    async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let path = safe_join(&self.root, key)?;
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn put_record(&self, key: &str, bytes: &[u8]) -> Result<()> {
+        crate::atomic::write(&safe_join(&self.root, key)?, bytes)?;
+        Ok(())
+    }
+
+    async fn delete_record(&self, key: &str) -> Result<()> {
+        match fs::remove_file(safe_join(&self.root, key)?) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => Ok(result?),
+        }
+    }
+
     async fn pull(&self, key: &str, dest: &Path) -> Result<bool> {
         let src = safe_join(&self.root, key)?;
         if !src.exists() {
@@ -149,4 +170,23 @@ mod tests {
         assert_eq!(fs::read_to_string(dest.join("good.txt")).unwrap(), "good");
         assert!(!dest.join("new.txt").exists());
     }
+
+    macro_rules! record_contract_test {
+        ($name:ident) => {
+            #[tokio::test]
+            async fn $name() {
+                let root = tempfile::tempdir().unwrap();
+                let store = FilesystemStateStore::new(root.path().to_path_buf());
+                contract::$name(&store, concat!("records/", stringify!($name)))
+                    .await
+                    .unwrap();
+            }
+        };
+    }
+
+    record_contract_test!(record_round_trip);
+    record_contract_test!(record_absent_is_none);
+    record_contract_test!(record_overwrite_replaces);
+    record_contract_test!(record_delete_makes_absent);
+    record_contract_test!(record_delete_absent_is_ok);
 }

@@ -2,7 +2,8 @@
 //!
 //! Mirrors `FilesystemStateStore` semantics over S3 objects keyed
 //! `<prefix>/<key>/<relative-file-path>`. The AWS client is built lazily on
-//! first use so `default_store` can stay synchronous.
+//! first use so `default_store` can stay synchronous. Point records use the
+//! single object `<prefix>/<key>`, without a generation or manifest.
 
 use std::fs;
 use std::path::Path;
@@ -85,6 +86,61 @@ async fn build_client(cfg: &S3Config) -> Result<aws_sdk_s3::Client> {
 
 #[async_trait]
 impl StateStore for S3StateStore {
+    async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let result = self
+            .client()
+            .await?
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(object_key(&self.prefix, key, ""))
+            .send()
+            .await;
+        match result {
+            Ok(response) => Ok(Some(
+                response
+                    .body
+                    .collect()
+                    .await
+                    .context("s3 record body collect")?
+                    .into_bytes()
+                    .to_vec(),
+            )),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.is_no_such_key()) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error).context("s3 get record"),
+        }
+    }
+
+    async fn put_record(&self, key: &str, bytes: &[u8]) -> Result<()> {
+        self.client()
+            .await?
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(object_key(&self.prefix, key, ""))
+            .body(ByteStream::from(bytes.to_vec()))
+            .send()
+            .await
+            .context("s3 put record")?;
+        Ok(())
+    }
+
+    async fn delete_record(&self, key: &str) -> Result<()> {
+        self.client()
+            .await?
+            .delete_object()
+            .bucket(&self.config.bucket)
+            .key(object_key(&self.prefix, key, ""))
+            .send()
+            .await
+            .context("s3 delete record")?;
+        Ok(())
+    }
+
     async fn pull(&self, key: &str, dest: &Path) -> Result<bool> {
         let client = self.client().await?;
         let bucket = &self.config.bucket;
@@ -625,6 +681,11 @@ mod it_tests {
     );
     contract_test!(delete_makes_key_absent, delete_makes_key_absent);
     contract_test!(delete_absent_key_is_ok, delete_absent_key_is_ok);
+    contract_test!(record_round_trip, record_round_trip);
+    contract_test!(record_absent_is_none, record_absent_is_none);
+    contract_test!(record_overwrite_replaces, record_overwrite_replaces);
+    contract_test!(record_delete_makes_absent, record_delete_makes_absent);
+    contract_test!(record_delete_absent_is_ok, record_delete_absent_is_ok);
 
     #[tokio::test]
     async fn pull_failure_leaves_prior_local_contents() {

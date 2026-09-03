@@ -14,6 +14,7 @@ use super::{
 };
 use crate::config::{self, Paths, SlackConfig};
 use crate::runtime::Runtime;
+use crate::sandbox::Affinity;
 use crate::skills;
 
 fn get_slack_attachments_dir(paths: &Paths) -> Result<PathBuf> {
@@ -605,6 +606,7 @@ async fn handle_message_event(
         &image_paths,
         username,
         display_name,
+        session_key.as_deref(),
     )?;
 
     if let Some(query_text) =
@@ -615,6 +617,10 @@ async fn handle_message_event(
         let channel_clone = channel.clone();
         let user_id_clone = user_id_str.clone();
         let session_key_clone = session_key.clone();
+        let affinity = Affinity::Chat {
+            channel: channel.name().to_string(),
+            user: user_id_str.clone(),
+        };
         let rt = state.rt.clone();
 
         state
@@ -624,6 +630,7 @@ async fn handle_message_event(
                     rt,
                     channel_clone,
                     &user_id_clone,
+                    affinity,
                     messages,
                     session_key_clone,
                     attachment_names,
@@ -831,8 +838,22 @@ async fn handle_app_mention_event(
 
     // All users in the same public thread share one Claude session so context
     // carries across speakers.
-    let shared_session_key = format!("slack:thread:{}", thread_ts);
+    let shared_session_key = format!("slack:thread:{}:{}", channel_id, thread_ts);
     let user_id_str = user_id.to_string();
+
+    if text == "/new"
+        && let super::CommandResult::Response(response) = super::process_command(
+            &state.rt,
+            channel.name(),
+            &user_id_str,
+            &text,
+            onboarding_complete,
+            Some(&shared_session_key),
+        )?
+    {
+        channel.send_message(&response).await?;
+        return Ok(());
+    }
 
     let current_msg = format!("[{}]: {}", speaker_name, text);
     let full_text = if unseen_context.is_empty() {
@@ -852,6 +873,10 @@ async fn handle_app_mention_event(
     let channel_clone = channel.clone();
     let user_id_clone = user_id_str.clone();
     let session_key = Some(shared_session_key);
+    let affinity = Affinity::SlackThread {
+        channel_id: channel_id.to_string(),
+        thread_ts: thread_ts.to_string(),
+    };
     let rt = state.rt.clone();
 
     state
@@ -861,6 +886,7 @@ async fn handle_app_mention_event(
                 rt,
                 channel_clone,
                 &user_id_clone,
+                affinity,
                 messages,
                 session_key,
                 attachment_names,

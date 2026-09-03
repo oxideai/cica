@@ -22,6 +22,7 @@ use super::{
 };
 use crate::config::{Paths, SignalConfig};
 use crate::runtime::Runtime;
+use crate::sandbox::Affinity;
 use crate::setup;
 
 pub struct SignalChannel {
@@ -516,6 +517,7 @@ async fn handle_message(
         &image_paths,
         None, // Signal has no usernames
         display_name,
+        None,
     )?;
 
     if let Some(query_text) = execute_action(&rt, channel.as_ref(), &sender, action).await? {
@@ -524,6 +526,10 @@ async fn handle_message(
         let user_key = format!("{}:{}", channel.name(), sender);
         let channel_clone = channel.clone();
         let sender_clone = sender.clone();
+        let affinity = Affinity::Chat {
+            channel: channel.name().to_string(),
+            user: sender.clone(),
+        };
         let rt = rt.clone();
 
         task_manager
@@ -532,6 +538,7 @@ async fn handle_message(
                     rt,
                     channel_clone,
                     &sender_clone,
+                    affinity,
                     messages,
                     None,
                     attachment_names,

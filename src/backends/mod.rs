@@ -7,6 +7,42 @@ use anyhow::Result;
 
 use crate::config::{AiBackend, Config, Paths};
 
+type Killer = fn(i32, i32) -> i32;
+
+pub(crate) struct ProcessGroupGuard {
+    pid: Option<i32>,
+    killer: Killer,
+}
+
+impl ProcessGroupGuard {
+    pub(crate) fn new(pid: u32) -> Self {
+        Self {
+            pid: Some(pid as i32),
+            killer: |pid, signal| unsafe { libc::kill(pid, signal) },
+        }
+    }
+
+    #[cfg(test)]
+    fn with_killer(pid: u32, killer: Killer) -> Self {
+        Self {
+            pid: Some(pid as i32),
+            killer,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            (self.killer)(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct QueryOptions {
     pub system_prompt: Option<String>,
@@ -73,6 +109,21 @@ fn effective_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static KILLED_PID: AtomicI32 = AtomicI32::new(0);
+
+    fn record_kill(pid: i32, _signal: i32) -> i32 {
+        KILLED_PID.store(pid, Ordering::SeqCst);
+        0
+    }
+
+    #[test]
+    fn process_group_guard_signals_negative_pid() {
+        KILLED_PID.store(0, Ordering::SeqCst);
+        drop(ProcessGroupGuard::with_killer(42, record_kill));
+        assert_eq!(KILLED_PID.load(Ordering::SeqCst), -42);
+    }
 
     #[test]
     fn fake_result_echoes_prompt() {

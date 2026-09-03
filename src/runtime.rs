@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::config::{Config, Paths};
@@ -10,6 +11,8 @@ pub struct Runtime {
     pub paths: Arc<Paths>,
     pub provider: Arc<dyn SandboxProvider>,
     pub pairing: Mutex<PairingStore>,
+    pub session_locks: crate::channels::SessionLocks,
+    pub session_ticket: AtomicU64,
     pub cron: CronService<SystemClock>,
 }
 

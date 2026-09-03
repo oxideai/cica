@@ -18,15 +18,15 @@ The same code runs both ways. Cloud mode is what the rest of this document expla
 - Runs the **cron scheduler** for scheduled jobs.
 - Dispatches each turn to a worker and returns the reply to the channel.
 
-**Worker (hands).** A one-shot process (`cica worker --turn <id>`). It:
+**Worker (hands).** A session-affine process (`cica worker --session <affinity_id> ...`). It:
 
 - Reads a `TurnJob` from the store.
 - **Hydrates** the session, memory, and skills it needs from the store.
-- Runs exactly one agent turn in a sandbox (the agent can run commands, read/write files, use tools).
+- Runs assigned agent turns serially in a sandbox.
 - **Dehydrates** — writes the updated session and memory back to the store.
-- Writes a `TurnResult` to the store and exits.
+- Writes each `TurnResult` to the store, then waits for another assignment until it drains.
 
-Workers hold no durable state. Anything that must survive a turn travels through the store.
+Workers cache skills and owned backend sessions, but hold no durable state. Anything that must survive a worker exit travels through the store.
 
 ## A turn, end to end
 
@@ -37,22 +37,23 @@ Workers hold no durable state. Anything that must survive a turn travels through
    │              │ build system prompt           │                         │
    │              │ (identity/user/persona/        │                        │
    │              │  skills + memory search)      │                         │
-   │              │── write TurnJob ─────────────▶│ turns/<id>/job          │
-   │              │── launch worker (turn=<id>) ──────────────────────────▶ │
+   │              │── owner launch intent ───────▶│ sessions/<a>/owner      │
+   │              │── start worker if needed ─────────────────────────────▶ │
+   │              │── write job + inbox ─────────▶│ turns/<id>/job          │
    │              │                               │◀── pull session/<sid> ──│  hydrate
    │              │                               │◀── pull mem/<ch>_<uid> ─│
-   │              │                               │◀── pull skills ─────────│
+   │              │                               │◀── pull changed skills ─│
    │              │                               │                         │  run agent turn
    │              │                               │── push session/<sid> ──▶│  dehydrate
    │              │                               │── push mem/<ch>_<uid> ─▶│
    │              │                               │ turns/<id>/result ◀─────│  write result
-   │              │◀── poll TurnResult ───────────│                         │  exit
+   │              │◀── poll result + heartbeat ───│                         │  wait
    │◀── reply ────│                               │                         │
    │              │ pull mem/<ch>_<uid>,          │                         │
    │              │ reindex memory (post-turn)    │                         │
 ```
 
-The router writes the job, launches the worker, and polls for the result. The worker does the hydrate → run → dehydrate cycle. After the reply is sent, the router pulls the (possibly updated) memory and re-indexes it so it's searchable next turn.
+The router reuses a live worker for the affinity or launches one after recording its intent. The worker does the hydrate → run → dehydrate cycle for each assignment. After the reply is sent, the router pulls the updated memory and re-indexes it so it is searchable next turn.
 
 ## Providers — where a turn executes
 
@@ -61,13 +62,15 @@ The router selects an execution **provider** via `[deployment].provider`:
 | Provider | Where the turn runs | Needs a store? | Notes |
 |---|---|---|---|
 | `local` (default) | In-process | Optional | Single-box. With a store, it's wrapped so sessions/memory persist; without one, pure local. |
-| `subprocess` | A forked `cica worker` child process | Yes | Same machine, separate process per turn. |
-| `docker` | A Docker container per turn | Yes | Image from `docker_image` (default `cica-worker:latest`). |
-| `fargate` | An ECS Fargate task per turn | Yes | Build with `--features fargate`. Settings under `[deployment.fargate]`. |
+| `subprocess` | A forked `cica worker` child process | Yes | Same machine, one warm process per active affinity. |
+| `docker` | A Docker container | Yes | One warm container per active affinity. |
+| `fargate` | An ECS Fargate task | Yes | One warm task per active affinity. Build with `--features fargate`. |
 
-`subprocess`, `docker`, and `fargate` all use the same dispatch pattern: serialize a `TurnJob` to the store, launch `cica worker --turn <id>`, poll for the `TurnResult`. They differ only in *how* the worker process is launched. If the configured provider can't be built, the router logs the error and falls back to in-process so it still starts.
+`subprocess`, `docker`, and `fargate` use the same warm lifecycle. The router records launch intent before starting a worker, assigns turns through its inbox, and polls point records for results and heartbeat sequence changes. A worker drains after the idle or maximum-age limit. A vanished worker fails its assigned turn; the router never redispatches it automatically.
 
 Deploy the worker image before the router so the router never targets an older worker command contract.
+
+Owner and heartbeat records carry the protocol version and timing-policy hash. Missing or mismatched values make a worker incompatible: the router stops it before launching a replacement. Dropping a dispatch writes `turns/<turn_id>/cancel`; the worker aborts that turn, discards its local backend session artifacts, and remains ready for the next turn.
 
 ## The state store
 
@@ -84,14 +87,21 @@ Old generations are pruned only once they are an hour old, so concurrent pushes 
 | Key | Written by | Read by | Contents |
 |---|---|---|---|
 | `turns/<turn_id>/job` | Router | Worker | The serialized `TurnJob` (prompt, user, backend, resume id). |
-| `turns/<turn_id>/result` | Worker | Router | The serialized `TurnResult` (reply, session id, cost). |
+| `turns/<turn_id>/result` | Worker | Router | The versioned result or error envelope. |
+| `sessions/<affinity_id>/owner` | Router | Router | Launch phase, worker identity, platform handle, policy and affinity. |
+| `sessions/<affinity_id>/inbox` | Router | Worker | The current turn and addressed worker. |
+| `sessions/<affinity_id>/workers/<worker_id>` | Worker | Router | Sequence heartbeat, lifecycle phase and current/last turn. |
+| `turns/<turn_id>/cancel` | Router | Worker | Per-turn cancellation marker. |
+| `skills/head` | Skills sync | Worker | Version changed after each successful skills swap. |
 | `session/<backend_session_id>` | Worker | Worker | The agent's session transcript/artifacts, for resuming a conversation. |
 | `mem/<channel>_<user_id>` | Worker | Worker + Router | A user's memory markdown files. |
 | `skills` | Router (sync loop) | Worker | The published skills tree, mirrored from the skills repo. |
 
+Cloud Run support remains gated until its GCS store passes the state-store contract suite and its launcher implements start, status, stop-and-wait, and reconciliation with one task and no automatic retries. Its platform timeout must exceed `worker_max_age_secs + turn_timeout_secs + 30` seconds.
+
 ## Hydrate / dehydrate
 
-`HydratingProvider` wraps any inner provider and runs on the worker. Per turn:
+Local mode keeps `HydratingProvider` and its per-turn pull behavior. Warm workers use `WarmHydratingProvider`: skills are pulled only when `skills/head` changes, a backend session already produced by that worker stays local, and user memories are pulled every turn because they are shared across affinities.
 
 1. **Hydrate** — if the job names a `resume_session`, pull `session/<id>` and restore it into the backend's home (e.g. `.claude/projects/<slug>/<id>.jsonl`). Then pull `mem/<channel>_<user_id>` (the user's memories) and `skills` (the published corpus) into the working directory.
 2. **Run** — delegate to the inner provider (the actual agent invocation).

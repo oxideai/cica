@@ -1,15 +1,14 @@
 //! Worker dispatch: run a turn in a one-shot `cica worker` child process,
 //! exchanging the job and result through the `StateStore` keyed by a turn id.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(test)]
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
-#[cfg(test)]
 use tokio::time::{Instant, sleep};
 use tracing::warn;
 use uuid::Uuid;
@@ -25,10 +24,6 @@ fn job_key(turn_id: &str) -> String {
 
 fn result_key(turn_id: &str) -> String {
     format!("turns/{turn_id}/result")
-}
-
-fn turn_prefix(turn_id: &str) -> String {
-    format!("turns/{turn_id}")
 }
 
 /// Attachments are keyed by path, so one upload serves every turn that names it.
@@ -49,15 +44,6 @@ fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
         "cica-turn-{turn_id}-{kind}-{}",
         uuid::Uuid::new_v4()
     ))
-}
-
-async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Result<()> {
-    let dir = scratch_dir(turn_id, "job");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("job.json"), serde_json::to_vec_pretty(job)?)?;
-    store.push(&dir, &job_key(turn_id)).await?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
 }
 
 async fn push_attachments(store: &dyn StateStore, base: &std::path::Path, job: &TurnJob) {
@@ -187,6 +173,16 @@ async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
     result
 }
 
+#[cfg(test)]
+async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Result<()> {
+    let dir = scratch_dir(turn_id, "job");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("job.json"), serde_json::to_vec(job)?)?;
+    store.push(&dir, &job_key(turn_id)).await?;
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 async fn push_result(store: &dyn StateStore, envelope: &TurnEnvelope) -> Result<()> {
     store
         .put_record(
@@ -203,12 +199,6 @@ async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<Tur
         .await?
         .map(|bytes| serde_json::from_slice(&bytes).context("deserializing TurnEnvelope"))
         .transpose()
-}
-
-/// Best-effort removal of a turn's blobs after the router has the result.
-async fn cleanup(store: &dyn StateStore, turn_id: &str) {
-    let _ = store.delete_record(&result_key(turn_id)).await;
-    let _ = store.delete(&turn_prefix(turn_id)).await;
 }
 
 pub async fn run_worker_turn(
@@ -242,7 +232,6 @@ pub async fn run_worker_turn(
 
 /// Configuration passed to a persistent worker process.
 #[derive(Debug, Clone)]
-#[cfg(test)]
 pub struct WorkerSpec {
     pub session: String,
     pub worker_id: String,
@@ -250,9 +239,9 @@ pub struct WorkerSpec {
     pub idle: Duration,
     pub turn_timeout: Duration,
     pub start_timeout: Duration,
+    pub policy_hash: String,
 }
 
-#[cfg(test)]
 impl WorkerSpec {
     /// Returns the stable worker command-line contract.
     pub fn args(&self) -> Vec<String> {
@@ -266,13 +255,14 @@ impl WorkerSpec {
             self.idle.as_secs().to_string(),
             "--turn-timeout-secs".into(),
             self.turn_timeout.as_secs().to_string(),
+            "--policy-hash".into(),
+            self.policy_hash.clone(),
         ]
     }
 }
 
 /// Platform used to create a worker handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg(test)]
 pub enum LauncherKind {
     Subprocess,
     Docker,
@@ -281,7 +271,6 @@ pub enum LauncherKind {
 
 /// Serializable identity of a worker on its launch platform.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg(test)]
 pub struct Handle {
     pub kind: LauncherKind,
     pub id: String,
@@ -289,7 +278,7 @@ pub struct Handle {
 
 /// Observed worker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
+#[allow(dead_code)]
 pub enum Status {
     Running,
     Stopped,
@@ -299,54 +288,145 @@ pub enum Status {
 
 /// Result of waiting for a worker to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
 pub enum StopOutcome {
     Terminated,
     NotFound,
     Unknown,
 }
 
-/// Creates, observes, and stops workers while retaining one-shot dispatch.
+/// Creates, observes, reconciles, and stops persistent workers.
 #[async_trait]
 pub trait Launcher: Send + Sync {
     /// Starts a worker and returns only after the platform reports it running.
-    #[cfg(test)]
-    async fn start(&self, _spec: &WorkerSpec) -> Result<Handle> {
-        anyhow::bail!("persistent workers are not supported by this launcher")
-    }
+    async fn start(&self, spec: &WorkerSpec) -> Result<Handle>;
     /// Reads the current platform state for a worker handle.
-    #[cfg(test)]
-    async fn status(&self, _handle: &Handle) -> Result<Status> {
-        Ok(Status::Unknown)
-    }
+    #[allow(dead_code)]
+    async fn status(&self, handle: &Handle) -> Result<Status>;
     /// Requests termination and waits no longer than `deadline`.
-    #[cfg(test)]
-    async fn stop_and_wait(&self, _handle: &Handle, _deadline: Duration) -> Result<StopOutcome> {
-        Ok(StopOutcome::Unknown)
-    }
+    async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome>;
     /// Finds a worker previously started with the spec's launch token.
-    #[cfg(test)]
-    async fn reconcile(&self, _spec: &WorkerSpec) -> Result<Option<Handle>> {
-        Ok(None)
-    }
-    /// Runs a one-shot worker turn to completion.
-    async fn launch(&self, turn_id: &str) -> Result<()>;
+    async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>>;
 }
 
-/// Router-side provider: store-mediated dispatch, delegating the run-to-exit
-/// step to a `Launcher` (subprocess, docker, …).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum OwnerPhase {
+    Launching,
+    Running,
+}
+
+/// Router-written identity and launch state for one affinity worker.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnerRecord {
+    #[serde(default)]
+    pub protocol_version: u32,
+    pub phase: OwnerPhase,
+    pub worker_id: String,
+    pub launch_token: String,
+    pub handle: Option<Handle>,
+    pub launched_at_unix: u64,
+    #[serde(default)]
+    pub router_protocol_version: u32,
+    pub policy_hash: String,
+    pub affinity: crate::sandbox::Affinity,
+}
+
+/// Router-written pointer to the only assigned turn for an affinity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InboxRecord {
+    pub protocol_version: u32,
+    pub turn_id: String,
+    pub worker_id: String,
+    pub enqueued_at_unix: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum WorkerPhase {
+    Booting,
+    Ready,
+    Running,
+    Draining,
+}
+
+/// Worker-written liveness and current-turn state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HeartbeatRecord {
+    pub seq: u64,
+    pub phase: WorkerPhase,
+    pub current_turn: Option<String>,
+    pub last_turn: Option<String>,
+    pub protocol_version: u32,
+    pub policy_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Timing {
+    pub inbox_poll: Duration,
+    pub heartbeat: Duration,
+    pub stale_after: Duration,
+    pub liveness_check: Duration,
+    pub start_timeout: Duration,
+    pub idle: Duration,
+    pub turn_timeout: Duration,
+    pub max_age: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            inbox_poll: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(10),
+            stale_after: Duration::from_secs(30),
+            liveness_check: Duration::from_secs(5),
+            start_timeout: Duration::from_secs(180),
+            idle: Duration::from_secs(600),
+            turn_timeout: Duration::from_secs(900),
+            max_age: Duration::from_secs(86_400),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedOwner {
+    record: OwnerRecord,
+    last_dispatch: Instant,
+}
+
+struct SeenHeartbeat {
+    seq: u64,
+    seen_at: Instant,
+}
+
 pub struct LaunchedWorkerProvider {
     store: Arc<dyn StateStore>,
     launcher: Box<dyn Launcher>,
     base: PathBuf,
+    timing: Timing,
+    policy_hash: String,
+    worker_cap: usize,
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    owners: tokio::sync::Mutex<HashMap<String, CachedOwner>>,
+    seen: Mutex<HashMap<String, SeenHeartbeat>>,
 }
 
 impl LaunchedWorkerProvider {
-    pub fn new(store: Arc<dyn StateStore>, launcher: Box<dyn Launcher>, base: PathBuf) -> Self {
+    pub fn new(
+        store: Arc<dyn StateStore>,
+        launcher: Box<dyn Launcher>,
+        base: PathBuf,
+        timing: Timing,
+        policy_hash: String,
+        worker_cap: usize,
+    ) -> Self {
         Self {
             store,
             launcher,
             base,
+            timing,
+            policy_hash,
+            worker_cap,
+            locks: Mutex::new(HashMap::new()),
+            owners: tokio::sync::Mutex::new(HashMap::new()),
+            seen: Mutex::new(HashMap::new()),
         }
     }
 
@@ -354,49 +434,329 @@ impl LaunchedWorkerProvider {
     fn produced_dir(&self) -> PathBuf {
         self.base.join("internal/attachments/outbound")
     }
+
+    fn owner_key(id: &str) -> String {
+        format!("sessions/{id}/owner")
+    }
+    fn inbox_key(id: &str) -> String {
+        format!("sessions/{id}/inbox")
+    }
+    fn heartbeat_key(id: &str, worker: &str) -> String {
+        format!("sessions/{id}/workers/{worker}")
+    }
+
+    fn spec(&self, affinity_id: &str, worker_id: String, launch_token: String) -> WorkerSpec {
+        WorkerSpec {
+            session: affinity_id.into(),
+            worker_id,
+            launch_token,
+            idle: self.timing.idle,
+            turn_timeout: self.timing.turn_timeout,
+            start_timeout: self.timing.start_timeout,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+
+    async fn read_record<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        self.store
+            .get_record(key)
+            .await?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+            .transpose()
+    }
+
+    async fn liveness(&self, affinity_id: &str, owner: &OwnerRecord) -> Result<Liveness> {
+        let heartbeat_key = Self::heartbeat_key(affinity_id, &owner.worker_id);
+        let read = || self.read_record::<HeartbeatRecord>(&heartbeat_key);
+        let first = read().await?;
+        if let Some(heartbeat) = first {
+            if heartbeat.protocol_version != PROTOCOL_VERSION
+                || heartbeat.policy_hash != self.policy_hash
+                || heartbeat.phase == WorkerPhase::Draining
+            {
+                return Ok(Liveness::Gone);
+            }
+            let fresh = {
+                let mut seen = self.seen.lock().unwrap();
+                let entry = seen
+                    .entry(owner.worker_id.clone())
+                    .or_insert(SeenHeartbeat {
+                        seq: heartbeat.seq,
+                        seen_at: Instant::now(),
+                    });
+                if entry.seq != heartbeat.seq {
+                    entry.seq = heartbeat.seq;
+                    entry.seen_at = Instant::now();
+                }
+                entry.seen_at.elapsed() <= self.timing.stale_after
+            };
+            if fresh {
+                return Ok(Liveness::Live);
+            }
+            sleep(Duration::from_millis(100)).await;
+            return Ok(match read().await? {
+                Some(next) if next.seq != heartbeat.seq => Liveness::Live,
+                _ => Liveness::Gone,
+            });
+        }
+        if owner.phase == OwnerPhase::Launching
+            && unix_now().saturating_sub(owner.launched_at_unix)
+                < self.timing.start_timeout.as_secs()
+        {
+            return Ok(Liveness::Booting);
+        }
+        sleep(Duration::from_millis(100)).await;
+        Ok(if read().await?.is_some() {
+            Liveness::Live
+        } else {
+            Liveness::Gone
+        })
+    }
+
+    async fn launch_worker(
+        &self,
+        affinity: &crate::sandbox::Affinity,
+        affinity_id: &str,
+    ) -> Result<OwnerRecord> {
+        let worker_id = Uuid::new_v4().to_string();
+        let launch_token = Uuid::new_v4().to_string();
+        let spec = self.spec(affinity_id, worker_id.clone(), launch_token.clone());
+        let mut owner = OwnerRecord {
+            protocol_version: PROTOCOL_VERSION,
+            phase: OwnerPhase::Launching,
+            worker_id,
+            launch_token,
+            handle: None,
+            launched_at_unix: unix_now(),
+            router_protocol_version: PROTOCOL_VERSION,
+            policy_hash: self.policy_hash.clone(),
+            affinity: affinity.clone(),
+        };
+        self.store
+            .put_record(&Self::owner_key(affinity_id), &serde_json::to_vec(&owner)?)
+            .await?;
+        let handle = self.launcher.start(&spec).await?;
+        owner.phase = OwnerPhase::Running;
+        owner.handle = Some(handle);
+        self.store
+            .put_record(&Self::owner_key(affinity_id), &serde_json::to_vec(&owner)?)
+            .await?;
+        Ok(owner)
+    }
+
+    async fn ensure_worker(&self, affinity: &crate::sandbox::Affinity) -> Result<OwnerRecord> {
+        let id = affinity.id();
+        let cached = self.owners.lock().await.get(&id).cloned().map(|c| c.record);
+        let mut owner = match cached {
+            Some(owner) => Some(owner),
+            None => self.read_record(&Self::owner_key(&id)).await?,
+        };
+        if let Some(current) = owner.as_mut() {
+            if current.protocol_version != PROTOCOL_VERSION
+                || current.router_protocol_version != PROTOCOL_VERSION
+                || current.policy_hash != self.policy_hash
+                || current.affinity != *affinity
+            {
+                if let Some(handle) = &current.handle {
+                    match self
+                        .launcher
+                        .stop_and_wait(handle, Duration::from_secs(30))
+                        .await?
+                    {
+                        StopOutcome::Terminated | StopOutcome::NotFound => owner = None,
+                        StopOutcome::Unknown => {
+                            anyhow::bail!("worker state unknown for session {id}")
+                        }
+                    }
+                } else {
+                    owner = None;
+                }
+            } else if current.phase == OwnerPhase::Launching {
+                let spec = self.spec(&id, current.worker_id.clone(), current.launch_token.clone());
+                if let Some(handle) = self.launcher.reconcile(&spec).await? {
+                    current.handle = Some(handle);
+                    current.phase = OwnerPhase::Running;
+                    self.store
+                        .put_record(&Self::owner_key(&id), &serde_json::to_vec(current)?)
+                        .await?;
+                }
+            }
+        }
+        if let Some(current) = &owner {
+            match self.liveness(&id, current).await {
+                Err(_) => anyhow::bail!("worker state unknown for session {id}"),
+                Ok(Liveness::Live | Liveness::Booting) => {}
+                Ok(Liveness::Gone) => {
+                    if let Some(handle) = &current.handle {
+                        match self
+                            .launcher
+                            .stop_and_wait(handle, Duration::from_secs(30))
+                            .await?
+                        {
+                            StopOutcome::Terminated | StopOutcome::NotFound => owner = None,
+                            StopOutcome::Unknown => {
+                                anyhow::bail!("worker state unknown for session {id}")
+                            }
+                        }
+                    } else {
+                        owner = None;
+                    }
+                }
+            }
+        }
+        if owner.is_none() {
+            let mut owners = self.owners.lock().await;
+            owners.remove(&id);
+            if owners.len() >= self.worker_cap {
+                let candidates = owners
+                    .iter()
+                    .map(|(id, cached)| (id.clone(), cached.clone()))
+                    .collect::<Vec<_>>();
+                let mut idle = Vec::new();
+                for (candidate_id, cached) in candidates {
+                    let key = Self::heartbeat_key(&candidate_id, &cached.record.worker_id);
+                    if let Some(heartbeat) = self.read_record::<HeartbeatRecord>(&key).await?
+                        && heartbeat.phase == WorkerPhase::Ready
+                        && heartbeat.current_turn.is_none()
+                    {
+                        idle.push((candidate_id, cached));
+                    }
+                }
+                let victim = idle
+                    .into_iter()
+                    .min_by_key(|(_, cached)| cached.last_dispatch)
+                    .map(|(id, cached)| (id, cached.record));
+                let Some((victim_id, victim)) = victim else {
+                    anyhow::bail!("all workers busy")
+                };
+                let Some(handle) = victim.handle else {
+                    anyhow::bail!("all workers busy")
+                };
+                match self
+                    .launcher
+                    .stop_and_wait(&handle, Duration::from_secs(30))
+                    .await?
+                {
+                    StopOutcome::Terminated | StopOutcome::NotFound => {
+                        owners.remove(&victim_id);
+                    }
+                    StopOutcome::Unknown => {
+                        anyhow::bail!("worker state unknown for session {victim_id}")
+                    }
+                }
+            }
+            drop(owners);
+            owner = Some(self.launch_worker(affinity, &id).await?);
+        }
+        let owner = owner.unwrap();
+        self.owners.lock().await.insert(
+            id,
+            CachedOwner {
+                record: owner.clone(),
+                last_dispatch: Instant::now(),
+            },
+        );
+        Ok(owner)
+    }
+}
+
+enum Liveness {
+    Live,
+    Booting,
+    Gone,
+}
+
+struct CancelGuard {
+    store: Arc<dyn StateStore>,
+    turn_id: String,
+    armed: bool,
+}
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let store = self.store.clone();
+            let key = format!("turns/{}/cancel", self.turn_id);
+            tokio::spawn(async move {
+                if let Err(error) = store.put_record(&key, b"{}").await {
+                    warn!(
+                        "failed to publish turn cancellation; worker watcher will also observe the inbox change: {error}"
+                    );
+                }
+            });
+        }
+    }
 }
 
 #[async_trait]
 impl SandboxProvider for LaunchedWorkerProvider {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
+        let affinity_id = job.affinity.id();
+        let lock = {
+            let mut locks = self.locks.lock().unwrap();
+            locks
+                .entry(affinity_id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        let owner = self.ensure_worker(&job.affinity).await?;
         let turn_id = Uuid::new_v4().to_string();
-
         push_attachments(self.store.as_ref(), &self.base, &job).await;
-        push_job(self.store.as_ref(), &turn_id, &job).await?;
-
-        if let Err(e) = self.launcher.launch(&turn_id).await {
-            cleanup(self.store.as_ref(), &turn_id).await;
-            return Err(e);
-        }
-
-        let expected_affinity = job.affinity.id();
-        let result = pull_result(self.store.as_ref(), &turn_id).await;
-
-        // cleanup deletes the whole turn prefix, produced files included.
-        let result = match result {
-            Ok(Some(envelope)) => {
-                if envelope.turn_id != turn_id || envelope.affinity_id != expected_affinity {
-                    cleanup(self.store.as_ref(), &turn_id).await;
-                    anyhow::bail!(
-                        "worker result identity mismatch: turn_id expected {turn_id}, got {}; affinity_id expected {expected_affinity}, got {}",
-                        envelope.turn_id,
-                        envelope.affinity_id
-                    );
-                }
-                if envelope.protocol_version != PROTOCOL_VERSION {
-                    cleanup(self.store.as_ref(), &turn_id).await;
-                    anyhow::bail!(
-                        "unsupported worker protocol version {}",
-                        envelope.protocol_version
-                    );
-                }
-                let mut result = match envelope.outcome {
-                    TurnOutcome::Result(result) => result,
-                    TurnOutcome::Error(error) => {
-                        cleanup(self.store.as_ref(), &turn_id).await;
-                        return Err(anyhow::anyhow!(error));
+        self.store
+            .put_record(&job_key(&turn_id), &serde_json::to_vec(&job)?)
+            .await?;
+        let inbox = InboxRecord {
+            protocol_version: PROTOCOL_VERSION,
+            turn_id: turn_id.clone(),
+            worker_id: owner.worker_id.clone(),
+            enqueued_at_unix: unix_now(),
+        };
+        self.store
+            .put_record(&Self::inbox_key(&affinity_id), &serde_json::to_vec(&inbox)?)
+            .await?;
+        let mut cancel = CancelGuard {
+            store: self.store.clone(),
+            turn_id: turn_id.clone(),
+            armed: true,
+        };
+        let deadline = Instant::now() + self.timing.turn_timeout + Duration::from_secs(60);
+        let mut liveness = Instant::now() + self.timing.liveness_check;
+        let envelope = loop {
+            match pull_result(self.store.as_ref(), &turn_id).await {
+                Ok(Some(envelope)) => break envelope,
+                Ok(None) => {}
+                Err(error) => warn!(
+                    "failed to poll turn result; retrying while the worker may still finish: {error}"
+                ),
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "no result after {}s",
+                    (self.timing.turn_timeout + Duration::from_secs(60)).as_secs()
+                );
+            }
+            if Instant::now() >= liveness {
+                match self.liveness(&affinity_id, &owner).await {
+                    Ok(Liveness::Gone) => anyhow::bail!("worker vanished during turn"),
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!("failed to check worker liveness; state remains unknown: {error}")
                     }
-                };
+                }
+                liveness = Instant::now() + self.timing.liveness_check;
+            }
+            sleep(self.timing.inbox_poll).await;
+        };
+        if envelope.turn_id != turn_id
+            || envelope.affinity_id != affinity_id
+            || envelope.worker_id != owner.worker_id
+            || envelope.protocol_version != PROTOCOL_VERSION
+        {
+            anyhow::bail!("worker result identity mismatch")
+        }
+        cancel.armed = false;
+        let outcome = match envelope.outcome {
+            TurnOutcome::Result(mut result) => {
                 pull_produced_files(
                     self.store.as_ref(),
                     &turn_id,
@@ -404,15 +764,264 @@ impl SandboxProvider for LaunchedWorkerProvider {
                     &mut result,
                 )
                 .await;
-                Ok(Some(result))
+                Ok(result)
             }
-            Ok(None) => Ok(None),
-            Err(error) => Err(error),
+            TurnOutcome::Error(error) => Err(anyhow::anyhow!(error)),
         };
-        cleanup(self.store.as_ref(), &turn_id).await;
-
-        result?.ok_or_else(|| anyhow::anyhow!("worker produced no result for turn {turn_id}"))
+        if let Err(error) = self
+            .store
+            .delete_record(&Self::inbox_key(&affinity_id))
+            .await
+        {
+            warn!("failed to delete the session inbox; replay suppression keeps it inert: {error}");
+        }
+        if let Err(error) = self.store.delete(&format!("turns/{turn_id}")).await {
+            warn!(
+                "failed to delete completed turn {turn_id}; replay suppression keeps it inert: {error}"
+            );
+        }
+        outcome
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn put_json<T: serde::Serialize>(store: &dyn StateStore, key: &str, value: &T) -> Result<()> {
+    store.put_record(key, &serde_json::to_vec(value)?).await
+}
+
+async fn still_owner(store: &dyn StateStore, session: &str, worker_id: &str) -> Result<bool> {
+    let Some(bytes) = store
+        .get_record(&LaunchedWorkerProvider::owner_key(session))
+        .await?
+    else {
+        return Ok(false);
+    };
+    let owner: OwnerRecord = serde_json::from_slice(&bytes)?;
+    Ok(owner.worker_id == worker_id)
+}
+
+async fn watch_abort(
+    store: &dyn StateStore,
+    session: &str,
+    turn_id: &str,
+    worker_id: &str,
+    poll: Duration,
+) {
+    loop {
+        if matches!(
+            store.get_record(&format!("turns/{turn_id}/cancel")).await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        if let Ok(Some(bytes)) = store
+            .get_record(&LaunchedWorkerProvider::inbox_key(session))
+            .await
+            && serde_json::from_slice::<InboxRecord>(&bytes).map_or(true, |inbox| {
+                inbox.turn_id != turn_id || inbox.worker_id != worker_id
+            })
+        {
+            return;
+        }
+        sleep(poll).await;
+    }
+}
+
+pub async fn run_worker_loop<P: SandboxProvider>(
+    store: Arc<dyn StateStore>,
+    engine: &crate::sandbox::warm::WarmHydratingProvider<P>,
+    spec: WorkerSpec,
+    timing: Timing,
+) -> Result<()> {
+    let heartbeat_key = LaunchedWorkerProvider::heartbeat_key(&spec.session, &spec.worker_id);
+    let heartbeat = Arc::new(tokio::sync::Mutex::new(HeartbeatRecord {
+        seq: 1,
+        phase: WorkerPhase::Booting,
+        current_turn: None,
+        last_turn: None,
+        protocol_version: PROTOCOL_VERSION,
+        policy_hash: spec.policy_hash.clone(),
+    }));
+    put_json(store.as_ref(), &heartbeat_key, &*heartbeat.lock().await).await?;
+    {
+        let mut hb = heartbeat.lock().await;
+        hb.phase = WorkerPhase::Ready;
+        hb.seq += 1;
+        put_json(store.as_ref(), &heartbeat_key, &*hb).await?;
+    }
+    let ticker_store = store.clone();
+    let ticker_key = heartbeat_key.clone();
+    let ticker_hb = heartbeat.clone();
+    let heartbeat_every = timing.heartbeat;
+    let ticker = tokio::spawn(async move {
+        loop {
+            sleep(heartbeat_every).await;
+            let mut hb = ticker_hb.lock().await;
+            hb.seq += 1;
+            if let Err(error) = put_json(ticker_store.as_ref(), &ticker_key, &*hb).await {
+                warn!("failed to write worker heartbeat; retrying next tick: {error}");
+            }
+        }
+    });
+    let started = Instant::now();
+    let mut last_activity = Instant::now();
+    let mut consumed = HashSet::new();
+    let mut draining = false;
+    loop {
+        let age_expired = started.elapsed() >= timing.max_age;
+        let idle_expired = last_activity.elapsed() >= timing.idle;
+        if age_expired || idle_expired {
+            if !draining {
+                draining = true;
+                let mut hb = heartbeat.lock().await;
+                hb.phase = WorkerPhase::Draining;
+                hb.seq += 1;
+                if let Err(error) = put_json(store.as_ref(), &heartbeat_key, &*hb).await {
+                    warn!(
+                        "failed to announce worker drain; final inbox read still prevents a silent loss: {error}"
+                    );
+                }
+            } else {
+                break;
+            }
+        }
+        let inbox = match store
+            .get_record(&LaunchedWorkerProvider::inbox_key(&spec.session))
+            .await
+        {
+            Ok(Some(bytes)) => match serde_json::from_slice::<InboxRecord>(&bytes) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    warn!("failed to decode inbox; retrying next poll: {error}");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(error) => {
+                warn!("failed to poll worker inbox; retrying next poll: {error}");
+                None
+            }
+        };
+        let Some(inbox) = inbox.filter(|value| {
+            value.worker_id == spec.worker_id && !consumed.contains(&value.turn_id)
+        }) else {
+            if draining {
+                break;
+            }
+            let poll = if last_activity.elapsed() >= Duration::from_secs(60) {
+                Duration::from_secs(5)
+            } else {
+                timing.inbox_poll
+            };
+            sleep(poll).await;
+            continue;
+        };
+        consumed.insert(inbox.turn_id.clone());
+        let job = match store.get_record(&job_key(&inbox.turn_id)).await {
+            Ok(Some(bytes)) => match serde_json::from_slice::<TurnJob>(&bytes) {
+                Ok(job) => job,
+                Err(error) => {
+                    warn!(
+                        "failed to decode turn job; leaving it consumed to prevent replay: {error}"
+                    );
+                    continue;
+                }
+            },
+            Ok(None) => {
+                warn!("inbox named a turn without a job; leaving it consumed to prevent replay");
+                continue;
+            }
+            Err(error) => {
+                warn!("failed to read turn job; retrying store on the next loop: {error}");
+                consumed.remove(&inbox.turn_id);
+                continue;
+            }
+        };
+        {
+            let mut hb = heartbeat.lock().await;
+            hb.phase = WorkerPhase::Running;
+            hb.current_turn = Some(inbox.turn_id.clone());
+            hb.seq += 1;
+            if let Err(error) = put_json(store.as_ref(), &heartbeat_key, &*hb).await {
+                warn!(
+                    "failed to acknowledge turn pickup; executing because the inbox assignment is authoritative: {error}"
+                );
+            }
+        }
+        let turn_id = inbox.turn_id.clone();
+        let run = engine.run_turn(job.clone());
+        tokio::pin!(run);
+        let timeout = sleep(timing.turn_timeout);
+        tokio::pin!(timeout);
+        let outcome = tokio::select! {
+            result = &mut run => Some(result.map(TurnOutcome::Result).unwrap_or_else(|error| TurnOutcome::Error(error.to_string()))),
+            _ = &mut timeout => { engine.abandon(&job); Some(TurnOutcome::Error("turn timed out".into())) },
+            _ = watch_abort(store.as_ref(), &spec.session, &turn_id, &spec.worker_id, timing.inbox_poll) => { engine.abandon(&job); None },
+        };
+        let timed_out =
+            matches!(&outcome, Some(TurnOutcome::Error(error)) if error == "turn timed out");
+        if let Some(outcome) = outcome {
+            match still_owner(store.as_ref(), &spec.session, &spec.worker_id).await {
+                Ok(true) => {
+                    let envelope = TurnEnvelope {
+                        protocol_version: PROTOCOL_VERSION,
+                        affinity_id: spec.session.clone(),
+                        turn_id: turn_id.clone(),
+                        worker_id: spec.worker_id.clone(),
+                        outcome,
+                    };
+                    if let Err(error) = push_result(store.as_ref(), &envelope).await {
+                        warn!(
+                            "failed to write turn result; router will keep polling and liveness remains authoritative: {error}"
+                        );
+                    }
+                }
+                Ok(false) => engine.abandon(&job),
+                Err(error) => {
+                    engine.abandon(&job);
+                    warn!(
+                        "failed to verify worker ownership; skipping result to avoid a stale worker becoming canonical: {error}"
+                    );
+                }
+            }
+        }
+        {
+            let mut hb = heartbeat.lock().await;
+            hb.phase = if draining {
+                WorkerPhase::Draining
+            } else {
+                WorkerPhase::Ready
+            };
+            hb.current_turn = None;
+            hb.last_turn = Some(turn_id);
+            hb.seq += 1;
+            if let Err(error) = put_json(store.as_ref(), &heartbeat_key, &*hb).await {
+                warn!(
+                    "failed to write turn completion heartbeat; retrying on the heartbeat tick: {error}"
+                );
+            }
+        }
+        last_activity = Instant::now();
+        if timed_out {
+            break;
+        }
+        if age_expired {
+            draining = true;
+        }
+    }
+    ticker.abort();
+    if let Err(error) = store.delete_record(&heartbeat_key).await {
+        warn!(
+            "failed to delete heartbeat on clean exit; its unchanged sequence will become stale: {error}"
+        );
+    }
+    Ok(())
 }
 
 /// Launcher that spawns `cica worker --turn <id>` as a local child process.
@@ -450,7 +1059,6 @@ impl SubprocessLauncher {
     }
 }
 
-#[cfg(test)]
 async fn process_start_time(pid: u32) -> Result<Option<String>> {
     #[cfg(target_os = "macos")]
     {
@@ -504,7 +1112,6 @@ async fn process_start_time(pid: u32) -> Result<Option<String>> {
     }
 }
 
-#[cfg(test)]
 fn read_pid_file(path: &Path) -> Result<(u32, String)> {
     let value = std::fs::read_to_string(path)
         .with_context(|| format!("reading subprocess handle {}", path.display()))?;
@@ -518,7 +1125,6 @@ fn read_pid_file(path: &Path) -> Result<(u32, String)> {
     ))
 }
 
-#[cfg(test)]
 fn signal_process(pid: u32, signal: i32) -> std::io::Result<()> {
     let result = unsafe { libc::kill(pid as i32, signal) };
     if result == 0 {
@@ -528,7 +1134,6 @@ fn signal_process(pid: u32, signal: i32) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
 async fn subprocess_matches(path: &Path) -> Result<Option<u32>> {
     let (pid, expected) = match read_pid_file(path) {
         Ok(value) => value,
@@ -549,8 +1154,8 @@ async fn subprocess_matches(path: &Path) -> Result<Option<u32>> {
 
 #[async_trait]
 impl Launcher for SubprocessLauncher {
-    #[cfg(test)]
     async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
+        let _ = spec.start_timeout;
         let home = self.worker_home(&spec.worker_id);
         std::fs::create_dir_all(&home)?;
         let mut args = spec.args();
@@ -576,7 +1181,6 @@ impl Launcher for SubprocessLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn status(&self, handle: &Handle) -> Result<Status> {
         Ok(
             if subprocess_matches(Path::new(&handle.id)).await?.is_some() {
@@ -587,7 +1191,6 @@ impl Launcher for SubprocessLauncher {
         )
     }
 
-    #[cfg(test)]
     async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
         let path = Path::new(&handle.id);
         let Some(pid) = subprocess_matches(path).await? else {
@@ -612,7 +1215,6 @@ impl Launcher for SubprocessLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
         let path = self
             .worker_home(&spec.worker_id)
@@ -621,26 +1223,6 @@ impl Launcher for SubprocessLauncher {
             kind: LauncherKind::Subprocess,
             id: path.display().to_string(),
         }))
-    }
-
-    async fn launch(&self, turn_id: &str) -> Result<()> {
-        let home = self.worker_home(&Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&home)?;
-        let status = Command::new(&self.self_exe)
-            .arg("worker")
-            .arg("--turn")
-            .arg(turn_id)
-            .args(self.isolation_args(&home))
-            .kill_on_drop(true)
-            .status()
-            .await
-            .context("spawning cica worker");
-        let _ = std::fs::remove_dir_all(&home);
-        let status = status?;
-        if !status.success() {
-            anyhow::bail!("worker exited with status {status}");
-        }
-        Ok(())
     }
 }
 
@@ -655,28 +1237,6 @@ pub struct DockerLauncher {
     skills_dir: Option<PathBuf>,
     state_store_dir: PathBuf,
     env: Vec<(String, String)>,
-}
-
-struct DockerContainerGuard(Option<String>);
-
-impl DockerContainerGuard {
-    fn new(name: String) -> Self {
-        Self(Some(name))
-    }
-
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for DockerContainerGuard {
-    fn drop(&mut self) {
-        if let Some(name) = self.0.take() {
-            tokio::spawn(async move {
-                let _ = Command::new("docker").args(["kill", &name]).output().await;
-            });
-        }
-    }
 }
 
 impl DockerLauncher {
@@ -696,55 +1256,18 @@ impl DockerLauncher {
         }
     }
 
-    /// Extra `-e KEY=VALUE` env vars to pass into the container.
     #[cfg(test)]
-    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+    fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self
     }
 
     /// The `docker` argv (without the leading `docker`). Pure, for testing.
-    fn run_args(&self, turn_id: &str) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            format!("cica-turn-{turn_id}"),
-            "-e".into(),
-            "CICA_STATE_PATH=/data/cica/internal/state-store".into(),
-        ];
-        for (k, v) in &self.env {
-            args.push("-e".into());
-            args.push(format!("{k}={v}"));
-        }
-        args.push("-v".into());
-        args.push(format!(
-            "{}:/data/cica/config.toml:ro",
-            self.config_file.display()
-        ));
-        if let Some(skills_dir) = &self.skills_dir {
-            args.push("-v".into());
-            args.push(format!("{}:/data/cica/skills:ro", skills_dir.display()));
-        }
-        args.push("-v".into());
-        args.push(format!(
-            "{}:/data/cica/internal/state-store",
-            self.state_store_dir.display()
-        ));
-        args.push(self.image.clone());
-        args.push("worker".into());
-        args.push("--turn".into());
-        args.push(turn_id.into());
-        args
-    }
-
-    #[cfg(test)]
     fn worker_name(spec: &WorkerSpec) -> String {
         let slug = spec.session.chars().take(24).collect::<String>();
         format!("cica-{slug}-{}", spec.launch_token)
     }
 
-    #[cfg(test)]
     fn worker_run_args(&self, spec: &WorkerSpec) -> Vec<String> {
         let name = Self::worker_name(spec);
         let mut args = vec![
@@ -785,7 +1308,6 @@ impl DockerLauncher {
         args
     }
 
-    #[cfg(test)]
     async fn inspect_running(name: &str) -> Result<Option<bool>> {
         let output = Command::new("docker")
             .args(["inspect", "-f", "{{.State.Running}}", name])
@@ -803,7 +1325,6 @@ impl DockerLauncher {
 
 #[async_trait]
 impl Launcher for DockerLauncher {
-    #[cfg(test)]
     async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
         let name = Self::worker_name(spec);
         let output = Command::new("docker")
@@ -827,7 +1348,6 @@ impl Launcher for DockerLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn status(&self, handle: &Handle) -> Result<Status> {
         Ok(match Self::inspect_running(&handle.id).await? {
             Some(true) => Status::Running,
@@ -836,7 +1356,6 @@ impl Launcher for DockerLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
         if Self::inspect_running(&handle.id).await?.is_none() {
             return Ok(StopOutcome::NotFound);
@@ -855,7 +1374,6 @@ impl Launcher for DockerLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
         let output = Command::new("docker")
             .args([
@@ -875,21 +1393,6 @@ impl Launcher for DockerLauncher {
             kind: LauncherKind::Docker,
             id: name,
         }))
-    }
-
-    async fn launch(&self, turn_id: &str) -> Result<()> {
-        let mut guard = DockerContainerGuard::new(format!("cica-turn-{turn_id}"));
-        let status = Command::new("docker")
-            .args(self.run_args(turn_id))
-            .kill_on_drop(true)
-            .status()
-            .await;
-        guard.disarm();
-        let status = status.context("running `docker run` for cica worker")?;
-        if !status.success() {
-            anyhow::bail!("worker container exited with status {status}");
-        }
-        Ok(())
     }
 }
 
@@ -936,6 +1439,7 @@ mod tests {
             idle: Duration::from_secs(600),
             turn_timeout: Duration::from_secs(900),
             start_timeout: Duration::from_secs(180),
+            policy_hash: "policy".into(),
         }
     }
 
@@ -953,7 +1457,9 @@ mod tests {
                 "--idle-secs",
                 "600",
                 "--turn-timeout-secs",
-                "900"
+                "900",
+                "--policy-hash",
+                "policy"
             ]
         );
     }
@@ -1005,80 +1511,6 @@ mod tests {
         let _ = signal_process(pid, libc::SIGKILL);
     }
 
-    #[tokio::test]
-    async fn subprocess_turns_use_distinct_worker_homes() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let Some(binary) = std::env::var_os("CICA_BIN") else {
-            return;
-        };
-        let root = tempfile::tempdir().unwrap();
-        let router = Paths::for_base(root.path().join("router"));
-        std::fs::create_dir_all(&router.base).unwrap();
-        let state = router.internal_dir.join("state-store");
-        std::fs::write(
-            &router.config_file,
-            format!(
-                "backend = \"cursor\"\n[deployment]\nstore = \"filesystem\"\nstate_path = {:?}\n",
-                state.display().to_string()
-            ),
-        )
-        .unwrap();
-        let wrapper = root.path().join("cica-test-worker");
-        std::fs::write(
-            &wrapper,
-            format!(
-                "#!/bin/sh\nCICA_FAKE_BACKEND=1 exec {:?} \"$@\"\n",
-                PathBuf::from(binary).display().to_string()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let store = Arc::new(FilesystemStateStore::new(state));
-        push_job(store.as_ref(), "turn-a", &sample_job())
-            .await
-            .unwrap();
-        push_job(store.as_ref(), "turn-b", &sample_job())
-            .await
-            .unwrap();
-        let launcher = Arc::new(SubprocessLauncher::new(wrapper, router.clone()));
-        let first = {
-            let launcher = launcher.clone();
-            tokio::spawn(async move { launcher.launch("turn-a").await })
-        };
-        let second = {
-            let launcher = launcher.clone();
-            tokio::spawn(async move { launcher.launch("turn-b").await })
-        };
-        let workers = router.internal_dir.join("workers");
-        let mut distinct = false;
-        while !first.is_finished() || !second.is_finished() {
-            distinct = std::fs::read_dir(&workers)
-                .map(|entries| entries.filter_map(|entry| entry.ok()).count() >= 2)
-                .unwrap_or(false);
-            if distinct {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-
-        assert!(distinct);
-        assert!(
-            pull_result(store.as_ref(), "turn-a")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            pull_result(store.as_ref(), "turn-b")
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-
     #[test]
     fn docker_worker_run_args_carry_identity_and_contract() {
         let launcher = DockerLauncher::new(
@@ -1092,7 +1524,8 @@ mod tests {
         assert!(args.contains(&"cica.session=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".into()));
         assert!(args.contains(&"cica.launch_token=token-1".into()));
         assert!(args.contains(&"cica-abcdefghijklmnopqrstuvwx-token-1".into()));
-        assert_eq!(&args[args.len() - 9..], worker_spec().args());
+        let worker_args = worker_spec().args();
+        assert_eq!(&args[args.len() - worker_args.len()..], worker_args);
     }
 
     #[tokio::test]
@@ -1219,184 +1652,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launched_provider_dispatches_via_launcher() {
-        let root = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
-
-        struct FakeLauncher {
-            store: std::sync::Arc<FilesystemStateStore>,
-        }
-        struct DispatchStubEngine;
-        #[async_trait]
-        impl SandboxProvider for DispatchStubEngine {
-            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
-                Ok(TurnResult {
-                    response: "ok".into(),
-                    backend_session_id: "sess".into(),
-                    cost_usd: None,
-                    duration_ms: None,
-                    produced_files: Vec::new(),
-                })
-            }
-        }
-        #[async_trait]
-        impl Launcher for FakeLauncher {
-            async fn launch(&self, turn_id: &str) -> Result<()> {
-                run_worker_turn(self.store.as_ref(), &DispatchStubEngine, turn_id).await
-            }
-        }
-
-        let provider = LaunchedWorkerProvider::new(
-            store.clone(),
-            Box::new(FakeLauncher {
-                store: store.clone(),
-            }),
-            root.path().join("base"),
-        );
-        let job = TurnJob {
-            channel: "telegram".into(),
-            user_id: "1".into(),
-            affinity: crate::sandbox::Affinity::Chat {
-                channel: "telegram".into(),
-                user: "1".into(),
-            },
-            session_persistence: crate::sandbox::SessionPersistence::Resume,
-            prompt: "hi".into(),
-            system_prompt: None,
-            resume_session: None,
-            skip_permissions: true,
-            backend: AiBackend::Claude,
-            model: None,
-            attachments: Vec::new(),
-        };
-        let result = provider.run_turn(job).await.unwrap();
-        assert_eq!(result.backend_session_id, "sess");
-    }
-
-    #[tokio::test]
-    async fn launched_provider_maps_error_envelope_to_error() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
-        struct FailingEngine;
-        #[async_trait]
-        impl SandboxProvider for FailingEngine {
-            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
-                anyhow::bail!("backend failed")
-            }
-        }
-        struct Fake {
-            store: Arc<FilesystemStateStore>,
-        }
-        #[async_trait]
-        impl Launcher for Fake {
-            async fn launch(&self, turn_id: &str) -> Result<()> {
-                run_worker_turn(self.store.as_ref(), &FailingEngine, turn_id).await
-            }
-        }
-        let provider = LaunchedWorkerProvider::new(
-            store.clone(),
-            Box::new(Fake { store }),
-            root.path().join("base"),
-        );
-        assert!(
-            provider
-                .run_turn(sample_job())
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("backend failed")
-        );
-    }
-
-    #[tokio::test]
-    async fn launched_provider_rejects_result_identity_mismatch() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
-        struct Fake {
-            store: Arc<FilesystemStateStore>,
-        }
-        #[async_trait]
-        impl Launcher for Fake {
-            async fn launch(&self, turn_id: &str) -> Result<()> {
-                let envelope = TurnEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
-                    affinity_id: "wrong-affinity".into(),
-                    turn_id: format!("wrong-{turn_id}"),
-                    worker_id: "w1".into(),
-                    outcome: TurnOutcome::Result(sample_result("ok")),
-                };
-                self.store
-                    .put_record(&result_key(turn_id), &serde_json::to_vec(&envelope)?)
-                    .await
-            }
-        }
-        let provider = LaunchedWorkerProvider::new(
-            store.clone(),
-            Box::new(Fake { store }),
-            root.path().join("base"),
-        );
-        let error = provider
-            .run_turn(sample_job())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("turn_id expected") && error.contains("affinity_id expected"));
-    }
-
-    #[test]
-    fn docker_launcher_builds_run_args_with_skills_mount() {
-        let l = DockerLauncher::new(
-            "cica-worker:latest".into(),
-            std::path::PathBuf::from("/host/config.toml"),
-            Some(std::path::PathBuf::from("/host/skills")),
-            std::path::PathBuf::from("/host/state-store"),
-        );
-        let args = l.run_args("turn-123");
-        assert_eq!(&args[..4], ["run", "--rm", "--name", "cica-turn-turn-123"]);
-        assert!(args.contains(&"/host/config.toml:/data/cica/config.toml:ro".to_string()));
-        assert!(args.contains(&"/host/skills:/data/cica/skills:ro".to_string()));
-        assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
-        assert!(args.contains(&"CICA_STATE_PATH=/data/cica/internal/state-store".to_string()));
-        let tail = &args[args.len() - 4..];
-        assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
-    }
-
-    #[test]
-    fn docker_launcher_builds_run_args_without_skills_mount() {
-        let l = DockerLauncher::new(
-            "cica-worker:latest".into(),
-            std::path::PathBuf::from("/host/config.toml"),
-            None,
-            std::path::PathBuf::from("/host/state-store"),
-        );
-        let args = l.run_args("turn-123");
-        assert!(!args.iter().any(|arg| arg.contains(":/data/cica/skills")));
-    }
-
-    #[tokio::test]
-    async fn docker_container_guard_drop_while_armed_does_not_panic() {
-        drop(DockerContainerGuard::new("cica-turn-test".into()));
-    }
-
-    #[test]
-    fn docker_launcher_passes_env() {
-        let l = DockerLauncher::new(
-            "cica-worker:latest".into(),
-            std::path::PathBuf::from("/c"),
-            Some(std::path::PathBuf::from("/s")),
-            std::path::PathBuf::from("/st"),
-        )
-        .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
-        let args = l.run_args("t1");
-        let e = args
-            .iter()
-            .position(|a| a == "CICA_FAKE_BACKEND=echo")
-            .unwrap();
-        let img = args.iter().position(|a| a == "cica-worker:latest").unwrap();
-        assert!(e < img);
-    }
-
-    #[tokio::test]
     async fn run_worker_turn_reads_job_and_writes_result() {
         let root = tempfile::tempdir().unwrap();
         let store = FilesystemStateStore::new(root.path().to_path_buf());
@@ -1425,24 +1680,86 @@ mod tests {
         assert_eq!(result.backend_session_id, "sess-w");
     }
 
-    /// End-to-end Docker flow with the fake backend. Gated: only runs when
-    /// `CICA_DOCKER_IT=1` (the CI docker-flow job, after building the image).
-    /// Drives the real `cica-worker:latest` container + a tempdir filesystem
-    /// store, asserting the turn round-trips with no real backend.
+    #[tokio::test]
+    async fn subprocess_warm_worker_reuses_one_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(binary) = std::env::var_os("CICA_BIN") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let router = Paths::for_base(root.path().join("router"));
+        std::fs::create_dir_all(&router.base).unwrap();
+        let state = router.internal_dir.join("state-store");
+        std::fs::write(
+            &router.config_file,
+            format!(
+                "backend = \"cursor\"\n[deployment]\nstore = \"filesystem\"\nstate_path = {:?}\n",
+                state.display().to_string()
+            ),
+        )
+        .unwrap();
+        let wrapper = root.path().join("cica-test-worker");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nCICA_FAKE_BACKEND=1 exec {:?} \"$@\"\n",
+                PathBuf::from(binary).display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Arc::new(FilesystemStateStore::new(state));
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(SubprocessLauncher::new(wrapper.clone(), router.clone())),
+            router.base.clone(),
+            Timing::default(),
+            "subprocess-policy".into(),
+            32,
+        );
+        let first = provider.run_turn(sample_job()).await.unwrap();
+        let affinity = sample_job().affinity.id();
+        let first_owner: OwnerRecord = serde_json::from_slice(
+            &store
+                .get_record(&LaunchedWorkerProvider::owner_key(&affinity))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let second = provider.run_turn(sample_job()).await.unwrap();
+        let second_owner: OwnerRecord = serde_json::from_slice(
+            &store
+                .get_record(&LaunchedWorkerProvider::owner_key(&affinity))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(first.response.contains("fake-response: hi"));
+        assert!(second.response.contains("fake-response: hi"));
+        assert_eq!(first_owner.worker_id, second_owner.worker_id);
+        let launcher = SubprocessLauncher::new(wrapper, router);
+        assert_eq!(
+            launcher
+                .stop_and_wait(
+                    second_owner.handle.as_ref().unwrap(),
+                    Duration::from_secs(5)
+                )
+                .await
+                .unwrap(),
+            StopOutcome::Terminated
+        );
+    }
+
     #[tokio::test]
     async fn docker_flow_round_trips_with_fake_backend() {
-        // Enabled by any non-empty `CICA_DOCKER_IT` value (the CI job sets `=1`).
         if std::env::var_os("CICA_DOCKER_IT").is_none() {
-            return; // skipped in normal `cargo test`
+            return;
         }
-
-        use crate::config::AiBackend;
-
         let store_root = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(FilesystemStateStore::new(store_root.path().to_path_buf()));
-
-        // Minimal config.toml to mount (backend is irrelevant — the fake hook
-        // short-circuits before the real CLI call).
         let cfg_dir = tempfile::tempdir().unwrap();
         let config_file = cfg_dir.path().join("config.toml");
         std::fs::write(
@@ -1459,34 +1776,981 @@ mod tests {
             store_root.path().to_path_buf(),
         )
         .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
-
         let provider = LaunchedWorkerProvider::new(
             store.clone(),
             Box::new(launcher),
             cfg_dir.path().join("base"),
+            Timing::default(),
+            "docker-policy".into(),
+            32,
         );
-        let job = TurnJob {
+        let first = provider.run_turn(sample_job()).await.unwrap();
+        let second = provider.run_turn(sample_job()).await.unwrap();
+        assert!(first.response.contains("fake-response: hi"));
+        assert!(second.response.contains("fake-response: hi"));
+        let affinity = sample_job().affinity.id();
+        let owner: OwnerRecord = serde_json::from_slice(
+            &store
+                .get_record(&LaunchedWorkerProvider::owner_key(&affinity))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=cica.session={affinity}"),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+        let launcher = DockerLauncher::new(
+            "cica-worker:latest".into(),
+            cfg_dir.path().join("config.toml"),
+            None,
+            store_root.path().to_path_buf(),
+        );
+        assert_eq!(
+            launcher
+                .stop_and_wait(owner.handle.as_ref().unwrap(), Duration::from_secs(10))
+                .await
+                .unwrap(),
+            StopOutcome::Terminated
+        );
+    }
+}
+
+#[cfg(test)]
+mod warm_protocol_tests {
+    use super::*;
+    use crate::config::AiBackend;
+    use crate::sandbox::state::FilesystemStateStore;
+    use crate::sandbox::warm::WarmHydratingProvider;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FaultStore {
+        records: Mutex<HashMap<String, Vec<u8>>>,
+        fail_get: Mutex<HashSet<String>>,
+        fail_put: Mutex<HashSet<String>>,
+        puts: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    #[async_trait]
+    impl StateStore for FaultStore {
+        async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            if self.fail_get.lock().unwrap().contains(key) {
+                anyhow::bail!("injected get failure for {key}")
+            }
+            Ok(self.records.lock().unwrap().get(key).cloned())
+        }
+
+        async fn put_record(&self, key: &str, bytes: &[u8]) -> Result<()> {
+            if self.fail_put.lock().unwrap().contains(key) {
+                anyhow::bail!("injected put failure for {key}")
+            }
+            self.records
+                .lock()
+                .unwrap()
+                .insert(key.into(), bytes.to_vec());
+            self.puts.lock().unwrap().push((key.into(), bytes.to_vec()));
+            Ok(())
+        }
+
+        async fn delete_record(&self, key: &str) -> Result<()> {
+            self.records.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        async fn pull(&self, _key: &str, _dest: &Path) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn push(&self, _src: &Path, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingLauncher {
+        starts: Arc<AtomicUsize>,
+        stops: Arc<Mutex<Vec<String>>>,
+        reconciles: Arc<AtomicUsize>,
+        stop_outcome: StopOutcome,
+    }
+
+    type LauncherProbe = (
+        RecordingLauncher,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<AtomicUsize>,
+    );
+
+    #[async_trait]
+    impl Launcher for RecordingLauncher {
+        async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(Handle {
+                kind: LauncherKind::Subprocess,
+                id: spec.worker_id.clone(),
+            })
+        }
+
+        async fn status(&self, _handle: &Handle) -> Result<Status> {
+            Ok(Status::Running)
+        }
+
+        async fn stop_and_wait(&self, handle: &Handle, _deadline: Duration) -> Result<StopOutcome> {
+            self.stops.lock().unwrap().push(handle.id.clone());
+            Ok(self.stop_outcome)
+        }
+
+        async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
+            self.reconciles.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Handle {
+                kind: LauncherKind::Subprocess,
+                id: spec.worker_id.clone(),
+            }))
+        }
+    }
+
+    fn recording_launcher(outcome: StopOutcome) -> LauncherProbe {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let reconciles = Arc::new(AtomicUsize::new(0));
+        (
+            RecordingLauncher {
+                starts: starts.clone(),
+                stops: stops.clone(),
+                reconciles: reconciles.clone(),
+                stop_outcome: outcome,
+            },
+            starts,
+            stops,
+            reconciles,
+        )
+    }
+
+    fn owner(affinity: crate::sandbox::Affinity, worker: &str) -> OwnerRecord {
+        OwnerRecord {
+            protocol_version: PROTOCOL_VERSION,
+            phase: OwnerPhase::Running,
+            worker_id: worker.into(),
+            launch_token: format!("token-{worker}"),
+            handle: Some(Handle {
+                kind: LauncherKind::Subprocess,
+                id: worker.into(),
+            }),
+            launched_at_unix: unix_now(),
+            router_protocol_version: PROTOCOL_VERSION,
+            policy_hash: "policy".into(),
+            affinity,
+        }
+    }
+
+    async fn heartbeat(
+        store: &dyn StateStore,
+        affinity: &str,
+        worker: &str,
+        phase: WorkerPhase,
+        current_turn: Option<&str>,
+    ) {
+        put_json(
+            store,
+            &LaunchedWorkerProvider::heartbeat_key(affinity, worker),
+            &HeartbeatRecord {
+                seq: 1,
+                phase,
+                current_turn: current_turn.map(str::to_string),
+                last_turn: None,
+                protocol_version: PROTOCOL_VERSION,
+                policy_hash: "policy".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    struct StubEngine {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SandboxProvider for StubEngine {
+        async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(TurnResult {
+                response: format!("turn-{call}"),
+                backend_session_id: format!("session-{call}"),
+                cost_usd: None,
+                duration_ms: None,
+                produced_files: Vec::new(),
+            })
+        }
+    }
+
+    struct CancelThenSucceed {
+        calls: Arc<AtomicUsize>,
+        started: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SandboxProvider for CancelThenSucceed {
+        async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+            self.started.store(true, Ordering::SeqCst);
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending().await
+            }
+            Ok(TurnResult {
+                response: "recovered".into(),
+                backend_session_id: "session".into(),
+                cost_usd: None,
+                duration_ms: None,
+                produced_files: Vec::new(),
+            })
+        }
+    }
+
+    struct GatedEngine {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl SandboxProvider for GatedEngine {
+        async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(TurnResult {
+                response: "done".into(),
+                backend_session_id: "session".into(),
+                cost_usd: None,
+                duration_ms: None,
+                produced_files: Vec::new(),
+            })
+        }
+    }
+
+    fn job() -> TurnJob {
+        TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
             affinity: crate::sandbox::Affinity::Chat {
                 channel: "telegram".into(),
                 user: "1".into(),
             },
-            session_persistence: crate::sandbox::SessionPersistence::Resume,
-            prompt: "ping".into(),
+            session_persistence: crate::sandbox::SessionPersistence::None,
+            prompt: "hi".into(),
             system_prompt: None,
             resume_session: None,
             skip_permissions: true,
-            backend: AiBackend::Cursor,
+            backend: AiBackend::Claude,
             model: None,
             attachments: Vec::new(),
-        };
+        }
+    }
 
-        let result = provider.run_turn(job).await.expect("docker turn failed");
-        assert!(
-            result.response.contains("fake-response: ping"),
-            "unexpected response: {}",
-            result.response
+    fn timing() -> Timing {
+        Timing {
+            inbox_poll: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(10),
+            stale_after: Duration::from_secs(30),
+            liveness_check: Duration::from_secs(5),
+            start_timeout: Duration::from_secs(3),
+            idle: Duration::from_secs(60),
+            turn_timeout: Duration::from_secs(30),
+            max_age: Duration::from_secs(300),
+        }
+    }
+
+    async fn assign(store: &dyn StateStore, affinity: &str, worker: &str, turn: &str) {
+        store
+            .put_record(&job_key(turn), &serde_json::to_vec(&job()).unwrap())
+            .await
+            .unwrap();
+        put_json(
+            store,
+            &LaunchedWorkerProvider::inbox_key(affinity),
+            &InboxRecord {
+                protocol_version: PROTOCOL_VERSION,
+                turn_id: turn.into(),
+                worker_id: worker.into(),
+                enqueued_at_unix: 0,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn start_loop() -> (
+        tempfile::TempDir,
+        Arc<FilesystemStateStore>,
+        tokio::task::JoinHandle<Result<()>>,
+        Arc<AtomicUsize>,
+        String,
+        String,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let affinity = job().affinity.id();
+        let worker = "worker-1".to_string();
+        let owner = OwnerRecord {
+            protocol_version: PROTOCOL_VERSION,
+            phase: OwnerPhase::Running,
+            worker_id: worker.clone(),
+            launch_token: "token".into(),
+            handle: None,
+            launched_at_unix: 0,
+            router_protocol_version: PROTOCOL_VERSION,
+            policy_hash: "policy".into(),
+            affinity: job().affinity,
+        };
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity),
+            &owner,
+        )
+        .await
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = WarmHydratingProvider::new(
+            StubEngine {
+                calls: calls.clone(),
+            },
+            store.clone(),
+            root.path().join("claude"),
+            root.path().join("cursor"),
+            root.path().join("cwd"),
+            false,
+            None,
         );
+        let spec = WorkerSpec {
+            session: affinity.clone(),
+            worker_id: worker.clone(),
+            launch_token: "token".into(),
+            idle: timing().idle,
+            turn_timeout: timing().turn_timeout,
+            start_timeout: timing().start_timeout,
+            policy_hash: "policy".into(),
+        };
+        let task =
+            tokio::spawn(
+                async move { run_worker_loop(store.clone(), &engine, spec, timing()).await },
+            );
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        tokio::task::yield_now().await;
+        (root, store, task, calls, affinity, worker)
+    }
+
+    async fn spawn_loop<P: SandboxProvider + 'static>(
+        root: &Path,
+        store: Arc<dyn StateStore>,
+        engine: P,
+        worker_timing: Timing,
+    ) -> (tokio::task::JoinHandle<Result<()>>, String, String) {
+        let affinity = job().affinity.id();
+        let worker = "worker-1".to_string();
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity),
+            &owner(job().affinity, &worker),
+        )
+        .await
+        .unwrap();
+        let warm = WarmHydratingProvider::new(
+            engine,
+            store.clone(),
+            root.join("claude"),
+            root.join("cursor"),
+            root.join("cwd"),
+            false,
+            Some((affinity.clone(), worker.clone())),
+        );
+        let spec = WorkerSpec {
+            session: affinity.clone(),
+            worker_id: worker.clone(),
+            launch_token: "token".into(),
+            idle: worker_timing.idle,
+            turn_timeout: worker_timing.turn_timeout,
+            start_timeout: worker_timing.start_timeout,
+            policy_hash: "policy".into(),
+        };
+        let task =
+            tokio::spawn(async move { run_worker_loop(store, &warm, spec, worker_timing).await });
+        tokio::task::yield_now().await;
+        (task, affinity, worker)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn second_turn_reuses_the_first_worker() {
+        let (_root, store, task, calls, affinity, worker) = start_loop().await;
+        assign(store.as_ref(), &affinity, &worker, "one").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            store
+                .get_record(&result_key("one"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assign(store.as_ref(), &affinity, &worker, "two").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        let envelope: TurnEnvelope =
+            serde_json::from_slice(&store.get_record(&result_key("two")).await.unwrap().unwrap())
+                .unwrap();
+        assert_eq!(envelope.worker_id, worker);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_echoes_the_router_policy_hash() {
+        let (_root, store, task, _calls, affinity, worker) = start_loop().await;
+        let heartbeat: HeartbeatRecord = serde_json::from_slice(
+            &store
+                .get_record(&LaunchedWorkerProvider::heartbeat_key(&affinity, &worker))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(heartbeat.policy_hash, "policy");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_ignores_a_consumed_turn_id() {
+        let (_root, store, task, calls, affinity, worker) = start_loop().await;
+        assign(store.as_ref(), &affinity, &worker, "same").await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_worker_drains_and_deletes_its_heartbeat() {
+        let (_root, store, task, _calls, affinity, worker) = start_loop().await;
+        tokio::time::advance(Duration::from_secs(65)).await;
+        tokio::task::yield_now().await;
+        task.await.unwrap().unwrap();
+        assert!(
+            store
+                .get_record(&LaunchedWorkerProvider::heartbeat_key(&affinity, &worker))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cap_never_evicts_a_busy_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, stops, _) = recording_launcher(StopOutcome::Terminated);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            1,
+        );
+        let existing = crate::sandbox::Affinity::Cron {
+            job_id: "existing".into(),
+        };
+        let existing_id = existing.id();
+        provider.owners.lock().await.insert(
+            existing_id.clone(),
+            CachedOwner {
+                record: owner(existing, "busy"),
+                last_dispatch: Instant::now(),
+            },
+        );
+        heartbeat(
+            store.as_ref(),
+            &existing_id,
+            "busy",
+            WorkerPhase::Running,
+            Some("turn"),
+        )
+        .await;
+        let error = provider
+            .ensure_worker(&crate::sandbox::Affinity::Cron {
+                job_id: "new".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "all workers busy");
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert!(stops.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fake_store_injects_get_and_put_failures_per_key() {
+        let store = FaultStore::default();
+        store.put_record("healthy", b"value").await.unwrap();
+        store.fail_put.lock().unwrap().insert("blocked".into());
+        store.fail_get.lock().unwrap().insert("healthy".into());
+        assert!(store.put_record("blocked", b"value").await.is_err());
+        assert!(store.get_record("healthy").await.is_err());
+        assert!(store.get_record("other").await.unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cap_stops_the_lru_idle_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, stops, _) = recording_launcher(StopOutcome::Terminated);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            1,
+        );
+        let existing = crate::sandbox::Affinity::Cron {
+            job_id: "old".into(),
+        };
+        let existing_id = existing.id();
+        provider.owners.lock().await.insert(
+            existing_id.clone(),
+            CachedOwner {
+                record: owner(existing, "idle"),
+                last_dispatch: Instant::now(),
+            },
+        );
+        heartbeat(
+            store.as_ref(),
+            &existing_id,
+            "idle",
+            WorkerPhase::Ready,
+            None,
+        )
+        .await;
+        provider
+            .ensure_worker(&crate::sandbox::Affinity::Cron {
+                job_id: "new".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(&*stops.lock().unwrap(), &["idle"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_stop_outcome_fails_the_turn_without_a_second_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, _, _) = recording_launcher(StopOutcome::Unknown);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            2,
+        );
+        let affinity = job().affinity;
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity.id()),
+            &owner(affinity.clone(), "lost"),
+        )
+        .await
+        .unwrap();
+        let error = provider.ensure_worker(&affinity).await.unwrap_err();
+        assert!(error.to_string().contains("worker state unknown"));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_mismatch_replaces_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, stops, _) = recording_launcher(StopOutcome::Terminated);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            2,
+        );
+        let affinity = job().affinity;
+        let mut mismatched = owner(affinity.clone(), "old");
+        mismatched.policy_hash = "other".into();
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity.id()),
+            &mismatched,
+        )
+        .await
+        .unwrap();
+        provider.ensure_worker(&affinity).await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(&*stops.lock().unwrap(), &["old"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn launching_owner_is_reconciled_not_relaunched() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, _, reconciles) = recording_launcher(StopOutcome::Terminated);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            2,
+        );
+        let affinity = job().affinity;
+        let mut launching = owner(affinity.clone(), "adopted");
+        launching.phase = OwnerPhase::Launching;
+        launching.handle = None;
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity.id()),
+            &launching,
+        )
+        .await
+        .unwrap();
+        heartbeat(
+            store.as_ref(),
+            &affinity.id(),
+            "adopted",
+            WorkerPhase::Ready,
+            None,
+        )
+        .await;
+        let adopted = provider.ensure_worker(&affinity).await.unwrap();
+        assert_eq!(adopted.worker_id, "adopted");
+        assert_eq!(reconciles.load(Ordering::SeqCst), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_heartbeat_replaces_the_worker_after_confirmed_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, stops, _) = recording_launcher(StopOutcome::Terminated);
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            timing(),
+            "policy".into(),
+            2,
+        );
+        let affinity = job().affinity;
+        let affinity_id = affinity.id();
+        let old = owner(affinity.clone(), "stale");
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity_id),
+            &old,
+        )
+        .await
+        .unwrap();
+        heartbeat(
+            store.as_ref(),
+            &affinity_id,
+            "stale",
+            WorkerPhase::Ready,
+            None,
+        )
+        .await;
+        provider.ensure_worker(&affinity).await.unwrap();
+        tokio::time::advance(timing().stale_after + Duration::from_secs(1)).await;
+        provider.ensure_worker(&affinity).await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(&*stops.lock().unwrap(), &["stale"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_record_aborts_the_turn_and_keeps_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            CancelThenSucceed {
+                calls: calls.clone(),
+                started: started.clone(),
+            },
+            timing(),
+        )
+        .await;
+        assign(store.as_ref(), &affinity, &worker, "cancelled").await;
+        for _ in 0..50 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        assert!(started.load(Ordering::SeqCst));
+        store
+            .put_record("turns/cancelled/cancel", b"{}")
+            .await
+            .unwrap();
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            let heartbeat: HeartbeatRecord = serde_json::from_slice(
+                &store
+                    .get_record(&LaunchedWorkerProvider::heartbeat_key(&affinity, &worker))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            if heartbeat.current_turn.is_none() {
+                break;
+            }
+        }
+        assert!(
+            store
+                .get_record(&result_key("cancelled"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_record(&LaunchedWorkerProvider::heartbeat_key(&affinity, &worker))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assign(store.as_ref(), &affinity, &worker, "next").await;
+        for _ in 0..50 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            if store
+                .get_record(&result_key("next"))
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            store
+                .get_record(&result_key("next"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fenced_worker_skips_dehydrate_and_result() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            GatedEngine {
+                started: started.clone(),
+                release: release.clone(),
+            },
+            timing(),
+        )
+        .await;
+        assign(store.as_ref(), &affinity, &worker, "fenced").await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        started.notified().await;
+        let mut replacement = owner(job().affinity, "replacement");
+        replacement.policy_hash = "policy".into();
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity),
+            &replacement,
+        )
+        .await
+        .unwrap();
+        release.notify_one();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(
+            store
+                .get_record(&result_key("fenced"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn max_age_drains_after_the_active_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut worker_timing = timing();
+        worker_timing.max_age = Duration::from_secs(2);
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            GatedEngine {
+                started: started.clone(),
+                release: release.clone(),
+            },
+            worker_timing,
+        )
+        .await;
+        assign(store.as_ref(), &affinity, &worker, "active").await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        started.notified().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(!task.is_finished());
+        release.notify_one();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        task.await.unwrap().unwrap();
+        assert!(
+            store
+                .get_record(&result_key("active"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_heartbeat_stays_draining() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FaultStore::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut worker_timing = timing();
+        worker_timing.max_age = Duration::from_secs(2);
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            GatedEngine {
+                started: started.clone(),
+                release: release.clone(),
+            },
+            worker_timing,
+        )
+        .await;
+        assign(store.as_ref(), &affinity, &worker, "active").await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        started.notified().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        release.notify_one();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        task.await.unwrap().unwrap();
+        let key = LaunchedWorkerProvider::heartbeat_key(&affinity, &worker);
+        let completion = store
+            .puts
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|(put_key, _)| put_key == &key)
+            .filter_map(|(_, bytes)| serde_json::from_slice::<HeartbeatRecord>(bytes).ok())
+            .find(|heartbeat| heartbeat.last_turn.as_deref() == Some("active"))
+            .unwrap();
+        assert_eq!(completion.phase, WorkerPhase::Draining);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn job_landing_during_drain_is_run_or_fails_never_lost_silently() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut worker_timing = timing();
+        worker_timing.idle = Duration::from_secs(2);
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            StubEngine {
+                calls: calls.clone(),
+            },
+            worker_timing,
+        )
+        .await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assign(store.as_ref(), &affinity, &worker, "edge").await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let result = store.get_record(&result_key("edge")).await.unwrap();
+        assert!(result.is_some() || task.is_finished());
+        if !task.is_finished() {
+            task.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn vanished_worker_fails_the_turn_and_never_redispatches() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().join("store")));
+        let (launcher, starts, _, _) = recording_launcher(StopOutcome::Terminated);
+        let mut router_timing = timing();
+        router_timing.liveness_check = Duration::from_secs(1);
+        let provider = Arc::new(LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            root.path().join("base"),
+            router_timing,
+            "policy".into(),
+            2,
+        ));
+        let affinity = job().affinity;
+        let affinity_id = affinity.id();
+        let live = owner(affinity.clone(), "vanished");
+        put_json(
+            store.as_ref(),
+            &LaunchedWorkerProvider::owner_key(&affinity_id),
+            &live,
+        )
+        .await
+        .unwrap();
+        heartbeat(
+            store.as_ref(),
+            &affinity_id,
+            "vanished",
+            WorkerPhase::Ready,
+            None,
+        )
+        .await;
+        let turn = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.run_turn(job()).await }
+        });
+        tokio::task::yield_now().await;
+        store
+            .delete_record(&LaunchedWorkerProvider::heartbeat_key(
+                &affinity_id,
+                "vanished",
+            ))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let error = turn.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "worker vanished during turn");
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
     }
 }

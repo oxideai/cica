@@ -200,14 +200,26 @@ fn default_container_name() -> String {
 fn default_poll_interval_secs() -> u64 {
     5
 }
-fn default_timeout_secs() -> u64 {
+fn default_worker_idle_secs() -> u64 {
+    600
+}
+fn default_worker_start_timeout_secs() -> u64 {
+    180
+}
+fn default_turn_timeout_secs() -> u64 {
     900
+}
+fn default_worker_cap() -> usize {
+    32
+}
+fn default_worker_max_age_secs() -> u64 {
+    86_400
 }
 
 /// Fargate launcher settings (used when `provider = "fargate"`). Credentials
 /// come from the task IAM role (the AWS chain), never config.
 ///
-/// Field defaults (`container_name`, `poll_interval_secs`, `timeout_secs`) are
+/// Field defaults (`container_name`, `poll_interval_secs`) are
 /// supplied by serde on parse — `Default::default()` leaves them empty/zero, so
 /// always deserialize this from TOML rather than constructing it directly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -234,13 +246,10 @@ pub struct FargateConfig {
     /// DescribeTasks poll interval in seconds.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
-    /// Max seconds to wait for the task to stop before bailing.
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
 }
 
 /// Distributed-deployment configuration. All optional; absent = single-box.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentConfig {
     /// State store backend. `None` disables hydration (default).
     #[serde(default)]
@@ -260,6 +269,49 @@ pub struct DeploymentConfig {
     /// Fargate launcher settings (used when `provider = "fargate"`).
     #[serde(default)]
     pub fargate: Option<FargateConfig>,
+    #[serde(default = "default_worker_idle_secs")]
+    pub worker_idle_secs: u64,
+    #[serde(default = "default_worker_start_timeout_secs")]
+    pub worker_start_timeout_secs: u64,
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_timeout_secs: u64,
+    #[serde(default = "default_worker_cap")]
+    pub worker_cap: usize,
+    #[serde(default = "default_worker_max_age_secs")]
+    pub worker_max_age_secs: u64,
+}
+
+impl Default for DeploymentConfig {
+    fn default() -> Self {
+        Self {
+            store: None,
+            state_path: None,
+            provider: None,
+            docker_image: None,
+            s3: None,
+            fargate: None,
+            worker_idle_secs: default_worker_idle_secs(),
+            worker_start_timeout_secs: default_worker_start_timeout_secs(),
+            turn_timeout_secs: default_turn_timeout_secs(),
+            worker_cap: default_worker_cap(),
+            worker_max_age_secs: default_worker_max_age_secs(),
+        }
+    }
+}
+
+impl DeploymentConfig {
+    pub fn policy_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = format!(
+            "worker_idle_secs={};worker_start_timeout_secs={};turn_timeout_secs={};worker_cap={};worker_max_age_secs={}",
+            self.worker_idle_secs,
+            self.worker_start_timeout_secs,
+            self.turn_timeout_secs,
+            self.worker_cap,
+            self.worker_max_age_secs
+        );
+        format!("{:x}", Sha256::digest(canonical.as_bytes()))
+    }
 }
 
 fn default_skills_ref() -> String {
@@ -532,6 +584,21 @@ impl Config {
         if let Some(v) = get("CICA_STATE_PATH") {
             self.deployment.state_path = Some(v);
         }
+        macro_rules! overlay_number {
+            ($name:literal, $field:ident) => {
+                if let Some(value) = get($name) {
+                    match value.parse() {
+                        Ok(value) => self.deployment.$field = value,
+                        Err(error) => tracing::warn!("ignoring invalid {}={value}: {error}", $name),
+                    }
+                }
+            };
+        }
+        overlay_number!("CICA_WORKER_IDLE_SECS", worker_idle_secs);
+        overlay_number!("CICA_WORKER_START_TIMEOUT_SECS", worker_start_timeout_secs);
+        overlay_number!("CICA_TURN_TIMEOUT_SECS", turn_timeout_secs);
+        overlay_number!("CICA_WORKER_CAP", worker_cap);
+        overlay_number!("CICA_WORKER_MAX_AGE_SECS", worker_max_age_secs);
         if let Some(v) = get("CICA_S3_BUCKET") {
             self.deployment
                 .s3
@@ -864,7 +931,6 @@ mod tests {
         assert_eq!(f.region, None);
         assert_eq!(f.container_name, "cica-worker");
         assert_eq!(f.poll_interval_secs, 5);
-        assert_eq!(f.timeout_secs, 900);
     }
 
     #[test]

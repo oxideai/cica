@@ -37,6 +37,7 @@ pub trait StateStore: Send + Sync {
     /// as present and empty, not absent.
     async fn push(&self, src: &Path, key: &str) -> Result<()>;
     /// Remove `key` and everything under it. An absent key is not an error.
+    #[allow(dead_code)]
     async fn delete(&self, key: &str) -> Result<()>;
 }
 

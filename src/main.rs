@@ -58,6 +58,9 @@ enum Commands {
         /// Per-turn limit in seconds
         #[arg(long)]
         turn_timeout_secs: Option<u64>,
+        /// Router-computed worker compatibility hash
+        #[arg(long)]
+        policy_hash: Option<String>,
         /// Isolated worker data directory
         #[arg(long)]
         home: Option<std::path::PathBuf>,
@@ -101,15 +104,19 @@ async fn main() -> Result<()> {
             worker_id,
             idle_secs,
             turn_timeout_secs,
+            policy_hash,
             home,
             deps,
             skills,
             config,
         }) => {
-            let _ = (worker_id, idle_secs, turn_timeout_secs);
             cmd::worker::run(
                 turn.as_deref(),
                 session.as_deref(),
+                worker_id.as_deref(),
+                idle_secs,
+                turn_timeout_secs,
+                policy_hash.as_deref(),
                 home,
                 deps,
                 skills,

@@ -34,6 +34,12 @@ pub async fn sync_once(
         store.push(staging.path(), "skills").await?;
     }
     staging.commit()?;
+    if let Some(store) = store {
+        let head = serde_json::json!({ "protocol_version": crate::sandbox::PROTOCOL_VERSION, "version": Uuid::new_v4().to_string() });
+        store
+            .put_record("skills/head", &serde_json::to_vec(&head)?)
+            .await?;
+    }
     Ok(())
 }
 

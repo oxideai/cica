@@ -171,6 +171,41 @@ mod tests {
 
     use crate::sandbox::state::FilesystemStateStore;
 
+    struct CallStore {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl StateStore for CallStore {
+        async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.calls.lock().unwrap().push(format!("get:{key}"));
+            Ok(None)
+        }
+        async fn put_record(&self, key: &str, _bytes: &[u8]) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("put:{key}"));
+            Ok(())
+        }
+        async fn delete_record(&self, key: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete-record:{key}"));
+            Ok(())
+        }
+        async fn pull(&self, key: &str, _dest: &Path) -> Result<bool> {
+            self.calls.lock().unwrap().push(format!("pull:{key}"));
+            Ok(false)
+        }
+        async fn push(&self, _src: &Path, key: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("push:{key}"));
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("delete:{key}"));
+            Ok(())
+        }
+    }
+
     /// Inner provider that records the job and returns a fixed session id.
     struct StubProvider {
         session_id: String,
@@ -304,6 +339,29 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|key| !key.starts_with("mem/"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_provider_with_store_pulls_exactly_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(CallStore {
+            calls: Mutex::new(Vec::new()),
+        });
+        let provider = HydratingProvider::new(
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            store.clone(),
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            tmp.path().join("cwd"),
+        );
+        provider.run_turn(job(Some("session"))).await.unwrap();
+        assert_eq!(
+            &*store.calls.lock().unwrap(),
+            &["pull:session/session", "pull:mem/telegram_1", "pull:skills"]
         );
     }
 

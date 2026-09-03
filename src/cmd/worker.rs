@@ -10,13 +10,18 @@ use std::path::PathBuf;
 
 use crate::config::{Config, Paths};
 use crate::sandbox::LocalProcessProvider;
-use crate::sandbox::hydrating::HydratingProvider;
 use crate::sandbox::state::default_store;
-use crate::sandbox::worker::run_worker_turn;
+use crate::sandbox::warm::WarmHydratingProvider;
+use crate::sandbox::worker::{Timing, WorkerSpec, run_worker_loop, run_worker_turn};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     turn_id: Option<&str>,
     session: Option<&str>,
+    worker_id: Option<&str>,
+    idle_secs: Option<u64>,
+    turn_timeout_secs: Option<u64>,
+    policy_hash: Option<&str>,
     home: Option<PathBuf>,
     deps: Option<PathBuf>,
     skills: Option<PathBuf>,
@@ -44,21 +49,47 @@ pub async fn run(
     let store = default_store(&config, &paths)?
         .ok_or_else(|| anyhow!("`cica worker` requires [deployment].store to be configured"))?;
 
-    let engine = HydratingProvider::new(
+    if let Some(turn_id) = turn_id {
+        let engine = crate::sandbox::hydrating::HydratingProvider::new(
+            LocalProcessProvider::new(config.clone(), paths.clone()),
+            store.clone(),
+            paths.claude_home.clone(),
+            paths.cursor_home.clone(),
+            paths.base.clone(),
+        );
+        return run_worker_turn(store.as_ref(), &engine, turn_id).await;
+    }
+    let session = session.ok_or_else(|| anyhow!("`cica worker` requires --session or --turn"))?;
+    let worker_id =
+        worker_id.ok_or_else(|| anyhow!("`cica worker --session` requires --worker-id"))?;
+    let idle = idle_secs.ok_or_else(|| anyhow!("`cica worker --session` requires --idle-secs"))?;
+    let turn_timeout = turn_timeout_secs
+        .ok_or_else(|| anyhow!("`cica worker --session` requires --turn-timeout-secs"))?;
+    let policy_hash =
+        policy_hash.ok_or_else(|| anyhow!("`cica worker --session` requires --policy-hash"))?;
+    let timing = Timing {
+        idle: std::time::Duration::from_secs(idle),
+        turn_timeout: std::time::Duration::from_secs(turn_timeout),
+        max_age: std::time::Duration::from_secs(config.deployment.worker_max_age_secs),
+        ..Default::default()
+    };
+    let spec = WorkerSpec {
+        session: session.into(),
+        worker_id: worker_id.into(),
+        launch_token: String::new(),
+        idle: timing.idle,
+        turn_timeout: timing.turn_timeout,
+        start_timeout: timing.start_timeout,
+        policy_hash: policy_hash.into(),
+    };
+    let engine = WarmHydratingProvider::new(
         LocalProcessProvider::new(config.clone(), paths.clone()),
         store.clone(),
         paths.claude_home.clone(),
         paths.cursor_home.clone(),
         paths.base.clone(),
+        config.skills.is_some(),
+        Some((session.into(), worker_id.into())),
     );
-
-    let turn_id = turn_id.ok_or_else(|| {
-        anyhow!(
-            "persistent worker sessions are not available yet{}",
-            session
-                .map(|value| format!(" ({value})"))
-                .unwrap_or_default()
-        )
-    })?;
-    run_worker_turn(store.as_ref(), &engine, turn_id).await
+    run_worker_loop(store, &engine, spec, timing).await
 }

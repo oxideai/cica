@@ -2128,7 +2128,6 @@ mod warm_protocol_tests {
             root.path().join("claude"),
             root.path().join("cursor"),
             root.path().join("cwd"),
-            false,
             None,
         );
         let spec = WorkerSpec {
@@ -2170,7 +2169,6 @@ mod warm_protocol_tests {
             root.join("claude"),
             root.join("cursor"),
             root.join("cwd"),
-            false,
             Some((affinity.clone(), worker.clone())),
         );
         let spec = WorkerSpec {

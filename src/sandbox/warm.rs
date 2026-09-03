@@ -25,7 +25,6 @@ pub struct WarmHydratingProvider<P: SandboxProvider> {
     cwd: PathBuf,
     owned_sessions: Mutex<HashSet<String>>,
     skills_version: Mutex<Option<String>>,
-    synced_skills: bool,
     fence: Option<(String, String)>,
 }
 
@@ -36,7 +35,6 @@ impl<P: SandboxProvider> WarmHydratingProvider<P> {
         claude_home: PathBuf,
         cursor_home: PathBuf,
         cwd: PathBuf,
-        synced_skills: bool,
         fence: Option<(String, String)>,
     ) -> Self {
         Self {
@@ -47,7 +45,6 @@ impl<P: SandboxProvider> WarmHydratingProvider<P> {
             cwd,
             owned_sessions: Mutex::new(HashSet::new()),
             skills_version: Mutex::new(None),
-            synced_skills,
             fence,
         }
     }
@@ -81,9 +78,6 @@ impl<P: SandboxProvider> WarmHydratingProvider<P> {
     }
 
     async fn refresh_skills(&self) {
-        if !self.synced_skills {
-            return;
-        }
         let head = match self.store.get_record("skills/head").await {
             Ok(Some(bytes)) => serde_json::from_slice::<SkillsHead>(&bytes).map_err(Into::into),
             Ok(None) => return,
@@ -347,7 +341,6 @@ mod tests {
             root.path().join("claude"),
             root.path().join("cursor"),
             root.path().join("cwd"),
-            true,
             None,
         );
         provider.run_turn(job(None)).await.unwrap();
@@ -359,6 +352,36 @@ mod tests {
             .unwrap();
         provider.run_turn(job(None)).await.unwrap();
         assert_eq!(store.skill_pulls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_without_skills_config_still_pulls_published_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingStore {
+            inner: FilesystemStateStore::new(root.path().join("store")),
+            skill_pulls: AtomicUsize::new(0),
+        });
+        let skills = root.path().join("seed");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::create_dir_all(skills.join("foo")).unwrap();
+        std::fs::write(skills.join("foo/SKILL.md"), "name: foo").unwrap();
+        store.push(&skills, "skills").await.unwrap();
+        store
+            .put_record("skills/head", br#"{"version":"one"}"#)
+            .await
+            .unwrap();
+        let cwd = root.path().join("cwd");
+        let provider = WarmHydratingProvider::new(
+            Success,
+            store.clone(),
+            root.path().join("claude"),
+            root.path().join("cursor"),
+            cwd.clone(),
+            None,
+        );
+        provider.run_turn(job(None)).await.unwrap();
+        assert_eq!(store.skill_pulls.load(Ordering::SeqCst), 1);
+        assert!(cwd.join("skills/foo/SKILL.md").exists());
     }
 
     #[tokio::test(start_paused = true)]
@@ -375,7 +398,6 @@ mod tests {
             claude,
             root.path().join("cursor"),
             root.path().join("cwd"),
-            false,
             None,
         );
         assert!(provider.run_turn(job(Some("session"))).await.is_err());

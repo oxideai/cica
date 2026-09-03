@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::signal;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -29,6 +29,8 @@ pub async fn run() -> Result<()> {
         println!("Run `cica init` to add a channel.");
         return Ok(());
     }
+
+    crate::sandbox::try_default_provider(&config).context("invalid [deployment] configuration")?;
 
     info!("Starting Cica with channels: {}", channels.join(", "));
 

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::sandbox::state::{StateStore, clear_dir, copy_dir_all, safe_join};
+use crate::atomic::Staging;
+use crate::sandbox::state::{StateStore, copy_dir_all, safe_join};
 
 /// Stores each key as a directory tree under `root`.
 pub struct FilesystemStateStore {
@@ -26,27 +27,33 @@ impl StateStore for FilesystemStateStore {
         if !src.exists() {
             return Ok(false);
         }
-        clear_dir(dest)?;
-        copy_dir_all(&src, dest)?;
+        let staging = Staging::beside(dest)?;
+        copy_dir_all(&src, staging.path())?;
+        staging.commit()?;
         Ok(true)
     }
 
     async fn push(&self, src: &Path, key: &str) -> Result<()> {
         let dst = safe_join(&self.root, key)?;
-        if dst.exists() {
-            fs::remove_dir_all(&dst)?;
-        }
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_dir_all(src, &dst)?;
+        let staging = Staging::beside(&dst)?;
+        copy_dir_all(src, staging.path())?;
+        staging.commit()?;
         Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let dst = safe_join(&self.root, key)?;
+        match fs::remove_dir_all(dst) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => Ok(result?),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::state::contract;
 
     fn write(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -54,54 +61,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_absent_key_returns_false() {
+    async fn push_then_pull_round_trips() {
         let root = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
         let store = FilesystemStateStore::new(root.path().to_path_buf());
-        assert!(!store.pull("session/missing", dest.path()).await.unwrap());
+        contract::push_then_pull_round_trips(&store, "round-trip")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn push_then_pull_round_trips_nested_tree() {
+    async fn push_smaller_tree_removes_stale_files() {
         let root = tempfile::tempdir().unwrap();
-        let src = tempfile::tempdir().unwrap();
-        write(&src.path().join("a.txt"), "alpha");
-        write(&src.path().join("sub/b.txt"), "beta");
-
         let store = FilesystemStateStore::new(root.path().to_path_buf());
-        store.push(src.path(), "session/x").await.unwrap();
-
-        let dest = tempfile::tempdir().unwrap();
-        assert!(store.pull("session/x", dest.path()).await.unwrap());
-        assert_eq!(
-            fs::read_to_string(dest.path().join("a.txt")).unwrap(),
-            "alpha"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.path().join("sub/b.txt")).unwrap(),
-            "beta"
-        );
+        contract::push_smaller_tree_removes_stale_files(&store, "smaller")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn push_overwrites_prior_contents() {
+    async fn push_empty_tree_reads_present_and_empty() {
         let root = tempfile::tempdir().unwrap();
         let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::push_empty_tree_reads_present_and_empty(&store, "empty")
+            .await
+            .unwrap();
+    }
 
-        let src1 = tempfile::tempdir().unwrap();
-        write(&src1.path().join("old.txt"), "old");
-        store.push(src1.path(), "k").await.unwrap();
+    #[tokio::test]
+    async fn pull_absent_key_leaves_dest_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::pull_absent_key_leaves_dest_untouched(&store, "absent")
+            .await
+            .unwrap();
+    }
 
-        let src2 = tempfile::tempdir().unwrap();
-        write(&src2.path().join("new.txt"), "new");
-        store.push(src2.path(), "k").await.unwrap();
+    #[tokio::test]
+    async fn pull_replaces_dest_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::pull_replaces_dest_whole(&store, "replace")
+            .await
+            .unwrap();
+    }
 
-        let dest = tempfile::tempdir().unwrap();
-        store.pull("k", dest.path()).await.unwrap();
-        assert!(!dest.path().join("old.txt").exists());
-        assert_eq!(
-            fs::read_to_string(dest.path().join("new.txt")).unwrap(),
-            "new"
-        );
+    #[tokio::test]
+    async fn push_failure_leaves_prior_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::push_failure_leaves_prior_contents(&store, "push-failure")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_makes_key_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::delete_makes_key_absent(&store, "delete")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_absent_key_is_ok() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        contract::delete_absent_key_is_ok(&store, "absent-delete")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_failure_leaves_prior_local_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemStateStore::new(root.path().to_path_buf());
+        let first = tempfile::tempdir().unwrap();
+        write(&first.path().join("good.txt"), "good");
+        store.push(first.path(), "broken").await.unwrap();
+        let dest_parent = tempfile::tempdir().unwrap();
+        let dest = dest_parent.path().join("dest");
+        store.pull("broken", &dest).await.unwrap();
+        write(&root.path().join("broken/new.txt"), "new");
+        std::os::unix::fs::symlink("./missing", root.path().join("broken/zz-broken")).unwrap();
+
+        assert!(store.pull("broken", &dest).await.is_err());
+        assert_eq!(fs::read_to_string(dest.join("good.txt")).unwrap(), "good");
+        assert!(!dest.join("new.txt").exists());
     }
 }

@@ -11,7 +11,9 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::sandbox::state::StateStore;
-use crate::sandbox::{SandboxProvider, TurnJob, TurnResult};
+use crate::sandbox::{
+    PROTOCOL_VERSION, SandboxProvider, TurnEnvelope, TurnJob, TurnOutcome, TurnResult,
+};
 
 fn job_key(turn_id: &str) -> String {
     format!("turns/{turn_id}/job")
@@ -181,31 +183,27 @@ async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
     result
 }
 
-async fn push_result(store: &dyn StateStore, turn_id: &str, result: &TurnResult) -> Result<()> {
-    let dir = scratch_dir(turn_id, "result");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("result.json"), serde_json::to_vec_pretty(result)?)?;
-    store.push(&dir, &result_key(turn_id)).await?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
+async fn push_result(store: &dyn StateStore, envelope: &TurnEnvelope) -> Result<()> {
+    store
+        .put_record(
+            &result_key(&envelope.turn_id),
+            &serde_json::to_vec(envelope)?,
+        )
+        .await
 }
 
 /// `None` if the worker never wrote a result.
-async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<TurnResult>> {
-    let dir = scratch_dir(turn_id, "result-in");
-    let found = store.pull(&result_key(turn_id), &dir).await?;
-    let result = if found {
-        let bytes = std::fs::read(dir.join("result.json")).context("reading result.json")?;
-        Some(serde_json::from_slice(&bytes).context("deserializing TurnResult")?)
-    } else {
-        None
-    };
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(result)
+async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<TurnEnvelope>> {
+    store
+        .get_record(&result_key(turn_id))
+        .await?
+        .map(|bytes| serde_json::from_slice(&bytes).context("deserializing TurnEnvelope"))
+        .transpose()
 }
 
 /// Best-effort removal of a turn's blobs after the router has the result.
 async fn cleanup(store: &dyn StateStore, turn_id: &str) {
+    let _ = store.delete_record(&result_key(turn_id)).await;
     let _ = store.delete(&turn_prefix(turn_id)).await;
 }
 
@@ -214,10 +212,27 @@ pub async fn run_worker_turn(
     engine: &dyn crate::sandbox::SandboxProvider,
     turn_id: &str,
 ) -> Result<()> {
+    static WORKER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let job = pull_job(store, turn_id).await?;
-    let mut result = engine.run_turn(job).await?;
-    push_produced_files(store, turn_id, &mut result).await;
-    push_result(store, turn_id, &result).await?;
+    let affinity_id = job.affinity.id();
+    let outcome = match engine.run_turn(job).await {
+        Ok(mut result) => {
+            push_produced_files(store, turn_id, &mut result).await;
+            TurnOutcome::Result(result)
+        }
+        Err(error) => TurnOutcome::Error(error.to_string()),
+    };
+    push_result(
+        store,
+        &TurnEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            affinity_id,
+            turn_id: turn_id.to_string(),
+            worker_id: WORKER_ID.get_or_init(|| Uuid::new_v4().to_string()).clone(),
+            outcome,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -264,11 +279,34 @@ impl SandboxProvider for LaunchedWorkerProvider {
             return Err(e);
         }
 
+        let expected_affinity = job.affinity.id();
         let result = pull_result(self.store.as_ref(), &turn_id).await;
 
         // cleanup deletes the whole turn prefix, produced files included.
         let result = match result {
-            Ok(Some(mut result)) => {
+            Ok(Some(envelope)) => {
+                if envelope.turn_id != turn_id || envelope.affinity_id != expected_affinity {
+                    cleanup(self.store.as_ref(), &turn_id).await;
+                    anyhow::bail!(
+                        "worker result identity mismatch: turn_id expected {turn_id}, got {}; affinity_id expected {expected_affinity}, got {}",
+                        envelope.turn_id,
+                        envelope.affinity_id
+                    );
+                }
+                if envelope.protocol_version != PROTOCOL_VERSION {
+                    cleanup(self.store.as_ref(), &turn_id).await;
+                    anyhow::bail!(
+                        "unsupported worker protocol version {}",
+                        envelope.protocol_version
+                    );
+                }
+                let mut result = match envelope.outcome {
+                    TurnOutcome::Result(result) => result,
+                    TurnOutcome::Error(error) => {
+                        cleanup(self.store.as_ref(), &turn_id).await;
+                        return Err(anyhow::anyhow!(error));
+                    }
+                };
                 pull_produced_files(
                     self.store.as_ref(),
                     &turn_id,
@@ -278,7 +316,8 @@ impl SandboxProvider for LaunchedWorkerProvider {
                 .await;
                 Ok(Some(result))
             }
-            other => other,
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
         };
         cleanup(self.store.as_ref(), &turn_id).await;
 
@@ -381,6 +420,8 @@ impl DockerLauncher {
             "--rm".into(),
             "--name".into(),
             format!("cica-turn-{turn_id}"),
+            "-e".into(),
+            "CICA_STATE_PATH=/data/cica/internal/state-store".into(),
         ];
         for (k, v) in &self.env {
             args.push("-e".into());
@@ -436,6 +477,11 @@ mod tests {
         TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
+            affinity: crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            session_persistence: crate::sandbox::SessionPersistence::Resume,
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: None,
@@ -560,8 +606,22 @@ mod tests {
             duration_ms: None,
             produced_files: Vec::new(),
         };
-        push_result(&store, "t2", &result).await.unwrap();
+        push_result(
+            &store,
+            &TurnEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                affinity_id: sample_job().affinity.id(),
+                turn_id: "t2".into(),
+                worker_id: "w1".into(),
+                outcome: TurnOutcome::Result(result),
+            },
+        )
+        .await
+        .unwrap();
         let back = pull_result(&store, "t2").await.unwrap().unwrap();
+        let TurnOutcome::Result(back) = back.outcome else {
+            panic!("expected result")
+        };
         assert_eq!(back.backend_session_id, "sess");
     }
 
@@ -603,6 +663,11 @@ mod tests {
         let job = TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
+            affinity: crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            session_persistence: crate::sandbox::SessionPersistence::Resume,
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: None,
@@ -613,6 +678,76 @@ mod tests {
         };
         let result = provider.run_turn(job).await.unwrap();
         assert_eq!(result.backend_session_id, "sess");
+    }
+
+    #[tokio::test]
+    async fn launched_provider_maps_error_envelope_to_error() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
+        struct FailingEngine;
+        #[async_trait]
+        impl SandboxProvider for FailingEngine {
+            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+                anyhow::bail!("backend failed")
+            }
+        }
+        struct Fake {
+            store: Arc<FilesystemStateStore>,
+        }
+        #[async_trait]
+        impl Launcher for Fake {
+            async fn launch(&self, turn_id: &str) -> Result<()> {
+                run_worker_turn(self.store.as_ref(), &FailingEngine, turn_id).await
+            }
+        }
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(Fake { store }),
+            root.path().join("base"),
+        );
+        assert!(
+            provider
+                .run_turn(sample_job())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("backend failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn launched_provider_rejects_result_identity_mismatch() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(root.path().to_path_buf()));
+        struct Fake {
+            store: Arc<FilesystemStateStore>,
+        }
+        #[async_trait]
+        impl Launcher for Fake {
+            async fn launch(&self, turn_id: &str) -> Result<()> {
+                let envelope = TurnEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    affinity_id: "wrong-affinity".into(),
+                    turn_id: format!("wrong-{turn_id}"),
+                    worker_id: "w1".into(),
+                    outcome: TurnOutcome::Result(sample_result("ok")),
+                };
+                self.store
+                    .put_record(&result_key(turn_id), &serde_json::to_vec(&envelope)?)
+                    .await
+            }
+        }
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(Fake { store }),
+            root.path().join("base"),
+        );
+        let error = provider
+            .run_turn(sample_job())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("turn_id expected") && error.contains("affinity_id expected"));
     }
 
     #[test]
@@ -628,6 +763,7 @@ mod tests {
         assert!(args.contains(&"/host/config.toml:/data/cica/config.toml:ro".to_string()));
         assert!(args.contains(&"/host/skills:/data/cica/skills:ro".to_string()));
         assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
+        assert!(args.contains(&"CICA_STATE_PATH=/data/cica/internal/state-store".to_string()));
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
     }
@@ -659,8 +795,10 @@ mod tests {
         )
         .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
         let args = l.run_args("t1");
-        let e = args.iter().position(|a| a == "-e").unwrap();
-        assert_eq!(args[e + 1], "CICA_FAKE_BACKEND=echo");
+        let e = args
+            .iter()
+            .position(|a| a == "CICA_FAKE_BACKEND=echo")
+            .unwrap();
         let img = args.iter().position(|a| a == "cica-worker:latest").unwrap();
         assert!(e < img);
     }
@@ -687,6 +825,9 @@ mod tests {
 
         run_worker_turn(&store, &StubEngine, "tX").await.unwrap();
         let result = pull_result(&store, "tX").await.unwrap().unwrap();
+        let TurnOutcome::Result(result) = result.outcome else {
+            panic!("expected result")
+        };
         assert_eq!(result.response, "from-worker");
         assert_eq!(result.backend_session_id, "sess-w");
     }
@@ -734,6 +875,11 @@ mod tests {
         let job = TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
+            affinity: crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            session_persistence: crate::sandbox::SessionPersistence::Resume,
             prompt: "ping".into(),
             system_prompt: None,
             resume_session: None,

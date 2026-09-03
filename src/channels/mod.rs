@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
@@ -21,8 +22,10 @@ use crate::cron::{
 use crate::memory::MemoryIndex;
 use crate::onboarding;
 use crate::runtime::{Runtime, lock};
-use crate::sandbox::{self, TurnJob};
+use crate::sandbox::{self, Affinity, SessionPersistence, TurnJob};
 use crate::skills;
+
+pub type SessionLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
 /// Abstraction over channel-specific transport operations.
 #[async_trait]
@@ -105,6 +108,7 @@ pub fn determine_action(
     _image_paths: &[PathBuf],
     username: Option<String>,
     display_name: Option<String>,
+    session_key_override: Option<&str>,
 ) -> Result<MessageAction> {
     let text = text.trim();
 
@@ -132,7 +136,14 @@ pub fn determine_action(
         onboarding::is_complete_for_user(&rt.paths, &settings, channel, user_id)?;
 
     // Commands work even during onboarding.
-    match process_command(rt, channel, user_id, text, onboarding_complete)? {
+    match process_command(
+        rt,
+        channel,
+        user_id,
+        text,
+        onboarding_complete,
+        session_key_override,
+    )? {
         CommandResult::Response(response) => {
             return Ok(MessageAction::SendResponse(response));
         }
@@ -323,6 +334,7 @@ pub async fn execute_claude_query(
     rt: Arc<Runtime>,
     channel: Arc<dyn Channel>,
     user_id: &str,
+    affinity: Affinity,
     messages: Vec<String>,
     session_key: Option<String>,
     attachments: Vec<String>,
@@ -352,6 +364,7 @@ pub async fn execute_claude_query(
         &rt,
         channel.name(),
         user_id,
+        affinity,
         &combined_text,
         context_prompt,
         session_key.as_deref(),
@@ -417,12 +430,14 @@ const DEBOUNCE_MS: u64 = 200;
 
 struct ActiveTask {
     handle: JoinHandle<()>,
+    generation: u64,
 }
 
 /// Manages per-user message processing with debouncing and interruption
 pub struct UserTaskManager {
     tasks: Mutex<HashMap<String, ActiveTask>>,
     pending: Mutex<HashMap<String, Vec<String>>>,
+    next_generation: AtomicU64,
 }
 
 impl UserTaskManager {
@@ -430,6 +445,7 @@ impl UserTaskManager {
         Arc::new(Self {
             tasks: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            next_generation: AtomicU64::new(0),
         })
     }
 
@@ -462,6 +478,7 @@ impl UserTaskManager {
 
         let manager = Arc::clone(self);
         let user_key_clone = user_key.clone();
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
@@ -483,10 +500,22 @@ impl UserTaskManager {
 
             handler(messages).await;
 
-            manager.tasks.lock().await.remove(&user_key_clone);
+            manager
+                .cleanup_generation(&user_key_clone, generation)
+                .await;
         });
 
-        tasks.insert(user_key, ActiveTask { handle });
+        tasks.insert(user_key, ActiveTask { handle, generation });
+    }
+
+    async fn cleanup_generation(&self, user_key: &str, generation: u64) {
+        let mut tasks = self.tasks.lock().await;
+        if tasks
+            .get(user_key)
+            .is_some_and(|task| task.generation == generation)
+        {
+            tasks.remove(user_key);
+        }
     }
 }
 
@@ -515,6 +544,7 @@ pub fn process_command(
     user_id: &str,
     text: &str,
     onboarding_complete: bool,
+    session_key_override: Option<&str>,
 ) -> Result<CommandResult> {
     let text = text.trim();
 
@@ -532,7 +562,9 @@ pub fn process_command(
                 "Please complete the onboarding first. Say \"hello\" to get started!".to_string(),
             ));
         }
-        let session_key = format!("{}:{}", channel, user_id);
+        let session_key = session_key_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}:{}", channel, user_id));
         let old_session_id =
             lock(&rt.pairing).modify(|store| Ok(store.sessions.remove(&session_key)))?;
 
@@ -871,10 +903,17 @@ pub async fn execute_cron_job(
         &rt.config,
         channel,
         user_id,
+        Affinity::Cron {
+            job_id: job.id.clone(),
+        },
         job.prompt.clone(),
         Some(context_prompt),
         None,
     );
+    let turn = TurnJob {
+        session_persistence: SessionPersistence::None,
+        ..turn
+    };
 
     let tr = rt.provider.run_turn(turn).await?;
 
@@ -882,10 +921,12 @@ pub async fn execute_cron_job(
 }
 
 /// Query the AI backend through the configured provider and persist the returned session id.
+#[allow(clippy::too_many_arguments)]
 pub async fn query_ai_with_session(
     rt: &Runtime,
     channel: &str,
     user_id: &str,
+    affinity: Affinity,
     text: &str,
     context_prompt: String,
     session_key_override: Option<&str>,
@@ -895,33 +936,59 @@ pub async fn query_ai_with_session(
         Some(key) => key.to_string(),
         None => format!("{}:{}", channel, user_id),
     };
-    let existing_session = lock(&rt.pairing).sessions.get(&session_key).cloned();
+    let ticket = rt.session_ticket.fetch_add(1, Ordering::Relaxed);
+    debug!(ticket, session_key, "waiting for session lock");
+    let session_lock = {
+        let mut locks = lock(&rt.session_locks);
+        locks
+            .entry(session_key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    // Tokio's mutex serves waiters in FIFO order.
+    let session_guard = session_lock.lock().await;
+    debug!(ticket, session_key, "acquired session lock");
+    let result = async {
+        let existing_session = lock(&rt.pairing).sessions.get(&session_key).cloned();
 
-    let job = TurnJob::new(
-        &rt.config,
-        channel,
-        user_id,
-        text.to_string(),
-        Some(context_prompt),
-        existing_session.clone(),
-    )
-    .with_attachments(attachments);
+        let job = TurnJob::new(
+            &rt.config,
+            channel,
+            user_id,
+            affinity,
+            text.to_string(),
+            Some(context_prompt),
+            existing_session.clone(),
+        )
+        .with_attachments(attachments);
 
-    let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
+        let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
 
-    if !qr.session_id.is_empty() {
-        let written = lock(&rt.pairing).modify(|store| {
-            Ok(store.set_session_if(&session_key, existing_session.as_deref(), &qr.session_id))
-        })?;
-        if !written {
-            warn!(
-                "Session for {} changed during the turn; not overwriting",
-                session_key
-            );
+        if !qr.session_id.is_empty() {
+            let written = lock(&rt.pairing).modify(|store| {
+                Ok(store.set_session_if(&session_key, existing_session.as_deref(), &qr.session_id))
+            })?;
+            if !written {
+                warn!(
+                    "Session for {} changed during the turn; not overwriting",
+                    session_key
+                );
+            }
         }
-    }
 
-    Ok(qr)
+        Ok(qr)
+    }
+    .await;
+    drop(session_guard);
+    drop(session_lock);
+    let mut locks = lock(&rt.session_locks);
+    if locks
+        .get(&session_key)
+        .is_some_and(|entry| Arc::strong_count(entry) == 1)
+    {
+        locks.remove(&session_key);
+    }
+    result
 }
 
 /// Handle onboarding flow - AI drives the conversation
@@ -1085,9 +1152,65 @@ mod memory_pull_tests {
 }
 
 #[cfg(test)]
+mod task_manager_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn old_task_cleanup_keeps_replacement_registered() {
+        let manager = UserTaskManager::new();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
+        let old_manager = manager.clone();
+        let old = tokio::spawn(async move {
+            let _ = release_rx.await;
+            old_manager.cleanup_generation("slack:U1", 1).await;
+            let _ = done_tx.send(());
+        });
+        manager.tasks.lock().await.insert(
+            "slack:U1".into(),
+            ActiveTask {
+                handle: old,
+                generation: 1,
+            },
+        );
+        let replacement = tokio::spawn(std::future::pending());
+        manager.tasks.lock().await.insert(
+            "slack:U1".into(),
+            ActiveTask {
+                handle: replacement,
+                generation: 2,
+            },
+        );
+
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+
+        assert_eq!(
+            manager
+                .tasks
+                .lock()
+                .await
+                .get("slack:U1")
+                .unwrap()
+                .generation,
+            2
+        );
+        manager
+            .tasks
+            .lock()
+            .await
+            .remove("slack:U1")
+            .unwrap()
+            .handle
+            .abort();
+    }
+}
+
+#[cfg(test)]
 mod runtime_store_tests {
     use super::*;
     use async_trait::async_trait;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
 
@@ -1099,6 +1222,29 @@ mod runtime_store_tests {
     struct BlockingProvider {
         entered: Mutex<Option<oneshot::Sender<()>>>,
         release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    struct SerialProvider {
+        entered: tokio::sync::mpsc::UnboundedSender<String>,
+        releases: Mutex<VecDeque<oneshot::Receiver<()>>>,
+        calls: AtomicU64,
+    }
+
+    #[async_trait]
+    impl SandboxProvider for SerialProvider {
+        async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
+            self.entered.send(job.prompt).unwrap();
+            let release = self.releases.lock().unwrap().pop_front().unwrap();
+            release.await.unwrap();
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(TurnResult {
+                response: "done".into(),
+                backend_session_id: format!("sess-{call}"),
+                cost_usd: None,
+                duration_ms: None,
+                produced_files: Vec::new(),
+            })
+        }
     }
 
     #[async_trait]
@@ -1143,6 +1289,8 @@ mod runtime_store_tests {
                 paths,
                 provider,
                 pairing: std::sync::Mutex::new(pairing),
+                session_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+                session_ticket: std::sync::atomic::AtomicU64::new(0),
                 cron,
             }),
             entered_rx,
@@ -1165,6 +1313,10 @@ mod runtime_store_tests {
                 &turn_rt,
                 "telegram",
                 "1",
+                Affinity::Chat {
+                    channel: "telegram".into(),
+                    user: "1".into(),
+                },
                 "hello",
                 String::new(),
                 None,
@@ -1202,6 +1354,10 @@ mod runtime_store_tests {
                 &turn_rt,
                 "telegram",
                 "1",
+                Affinity::Chat {
+                    channel: "telegram".into(),
+                    user: "1".into(),
+                },
                 "hello",
                 String::new(),
                 None,
@@ -1210,7 +1366,7 @@ mod runtime_store_tests {
             .await
         });
         entered.await.unwrap();
-        process_command(&rt, "telegram", "1", "/new", true).unwrap();
+        process_command(&rt, "telegram", "1", "/new", true, None).unwrap();
         release.send(()).unwrap();
         turn.await.unwrap().unwrap();
         assert!(
@@ -1218,6 +1374,38 @@ mod runtime_store_tests {
                 .unwrap()
                 .sessions
                 .contains_key("telegram:1")
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_thread_new_clears_thread_session_only() {
+        let (_temp, paths) = crate::config::test_paths();
+        let (rt, _entered, _release) = runtime(&paths);
+        lock(&rt.pairing)
+            .modify(|store| {
+                store
+                    .sessions
+                    .insert("slack:thread:C1:1.2".into(), "thread".into());
+                store.sessions.insert("slack:U1".into(), "direct".into());
+                Ok(())
+            })
+            .unwrap();
+
+        process_command(
+            &rt,
+            "slack",
+            "U1",
+            "/new",
+            true,
+            Some("slack:thread:C1:1.2"),
+        )
+        .unwrap();
+
+        let stored = PairingStore::load(&paths).unwrap();
+        assert!(!stored.sessions.contains_key("slack:thread:C1:1.2"));
+        assert_eq!(
+            stored.sessions.get("slack:U1").map(String::as_str),
+            Some("direct")
         );
     }
 
@@ -1230,6 +1418,10 @@ mod runtime_store_tests {
                 &rt,
                 "telegram",
                 "1",
+                Affinity::Chat {
+                    channel: "telegram".into(),
+                    user: "1".into(),
+                },
                 "hello",
                 String::new(),
                 None,
@@ -1248,6 +1440,90 @@ mod runtime_store_tests {
                 .unwrap(),
             "sess-1"
         );
+    }
+
+    #[tokio::test]
+    async fn same_slack_thread_calls_serialize_through_cas() {
+        let (_temp, paths) = crate::config::test_paths();
+        let config = Arc::new(Config::default());
+        let paths = Arc::new(paths);
+        let pairing = PairingStore::load(&paths).unwrap();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release1_tx, release1_rx) = oneshot::channel();
+        let (release2_tx, release2_rx) = oneshot::channel();
+        let provider: Arc<dyn SandboxProvider> = Arc::new(SerialProvider {
+            entered: entered_tx,
+            releases: Mutex::new(VecDeque::from([release1_rx, release2_rx])),
+            calls: AtomicU64::new(0),
+        });
+        let cron = CronService::new(
+            SystemClock,
+            CronConfig::default(),
+            config.clone(),
+            paths.clone(),
+            provider.clone(),
+        )
+        .unwrap();
+        let rt = Arc::new(Runtime {
+            config,
+            paths,
+            provider,
+            pairing: std::sync::Mutex::new(pairing),
+            session_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            session_ticket: AtomicU64::new(0),
+            cron,
+        });
+        let key = "slack:thread:C1:1.2";
+        let first_rt = rt.clone();
+        let first = tokio::spawn(async move {
+            query_ai_with_session(
+                &first_rt,
+                "slack",
+                "U1",
+                Affinity::SlackThread {
+                    channel_id: "C1".into(),
+                    thread_ts: "1.2".into(),
+                },
+                "first",
+                String::new(),
+                Some(key),
+                Vec::new(),
+            )
+            .await
+        });
+        assert_eq!(entered_rx.recv().await.as_deref(), Some("first"));
+        let second_rt = rt.clone();
+        let second = tokio::spawn(async move {
+            query_ai_with_session(
+                &second_rt,
+                "slack",
+                "U2",
+                Affinity::SlackThread {
+                    channel_id: "C1".into(),
+                    thread_ts: "1.2".into(),
+                },
+                "second",
+                String::new(),
+                Some(key),
+                Vec::new(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(entered_rx.try_recv().is_err());
+        release1_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert_eq!(entered_rx.recv().await.as_deref(), Some("second"));
+        assert_eq!(
+            PairingStore::load(&rt.paths)
+                .unwrap()
+                .sessions
+                .get(key)
+                .map(String::as_str),
+            Some("sess-1")
+        );
+        release2_tx.send(()).unwrap();
+        second.await.unwrap().unwrap();
     }
 }
 

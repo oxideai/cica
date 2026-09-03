@@ -498,6 +498,9 @@ impl Config {
                 other => tracing::warn!("ignoring unknown CICA_STORE={other}"),
             }
         }
+        if let Some(v) = get("CICA_STATE_PATH") {
+            self.deployment.state_path = Some(v);
+        }
         if let Some(v) = get("CICA_S3_BUCKET") {
             self.deployment
                 .s3
@@ -727,6 +730,18 @@ mod tests {
         let s3 = cfg.deployment.s3.unwrap();
         assert_eq!(s3.bucket, "cica-state");
         assert_eq!(s3.region.as_deref(), Some("eu-central-1"));
+    }
+
+    #[test]
+    fn env_overlay_sets_state_path() {
+        let mut cfg = Config::default();
+        cfg.overlay_from_env(|key| {
+            (key == "CICA_STATE_PATH").then(|| "/data/cica/internal/state-store".to_string())
+        });
+        assert_eq!(
+            cfg.deployment.state_path.as_deref(),
+            Some("/data/cica/internal/state-store")
+        );
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub async fn run() -> Result<()> {
         paths,
         provider,
         pairing: std::sync::Mutex::new(pairing),
+        session_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        session_ticket: std::sync::atomic::AtomicU64::new(0),
         cron,
     });
 

@@ -295,10 +295,17 @@ async fn execute_job<C: Clock>(
                 config,
                 &job.channel,
                 &job.user_id,
+                crate::sandbox::Affinity::Cron {
+                    job_id: job.id.clone(),
+                },
                 job.prompt.clone(),
                 Some(ctx),
                 None,
             );
+            let turn = TurnJob {
+                session_persistence: crate::sandbox::SessionPersistence::None,
+                ..turn
+            };
             provider
                 .run_turn(turn)
                 .await

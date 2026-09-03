@@ -16,14 +16,60 @@ pub use local::{LocalProcessProvider, query_result_from_turn};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::Engine;
+use sha2::{Digest, Sha256};
 
 use crate::config::{AiBackend, Config, Paths};
 
 /// A single agent turn to execute.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Affinity {
+    Chat {
+        channel: String,
+        user: String,
+    },
+    SlackThread {
+        channel_id: String,
+        thread_ts: String,
+    },
+    Cron {
+        job_id: String,
+    },
+}
+
+impl Affinity {
+    pub fn id(&self) -> String {
+        let (tag, fields): (u8, Vec<&str>) = match self {
+            Self::Chat { channel, user } => (0, vec![channel, user]),
+            Self::SlackThread {
+                channel_id,
+                thread_ts,
+            } => (1, vec![channel_id, thread_ts]),
+            Self::Cron { job_id } => (2, vec![job_id]),
+        };
+        let mut bytes = vec![tag];
+        for field in fields {
+            bytes.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(field.as_bytes());
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(bytes))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SessionPersistence {
+    #[default]
+    Resume,
+    None,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TurnJob {
     pub channel: String,
     pub user_id: String,
+    pub affinity: Affinity,
+    #[serde(default)]
+    pub session_persistence: SessionPersistence,
     /// The user/cron prompt to send to the agent.
     pub prompt: String,
     /// System prompt (full on new session, appended on resume — backend decides).
@@ -39,6 +85,47 @@ pub struct TurnJob {
     pub attachments: Vec<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct TurnJobWire {
+    channel: String,
+    user_id: String,
+    #[serde(default)]
+    affinity: Option<Affinity>,
+    #[serde(default)]
+    session_persistence: SessionPersistence,
+    prompt: String,
+    system_prompt: Option<String>,
+    resume_session: Option<String>,
+    skip_permissions: bool,
+    backend: AiBackend,
+    model: Option<String>,
+    #[serde(default)]
+    attachments: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for TurnJob {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = TurnJobWire::deserialize(deserializer)?;
+        let affinity = wire.affinity.unwrap_or_else(|| Affinity::Chat {
+            channel: wire.channel.clone(),
+            user: wire.user_id.clone(),
+        });
+        Ok(Self {
+            channel: wire.channel,
+            user_id: wire.user_id,
+            affinity,
+            session_persistence: wire.session_persistence,
+            prompt: wire.prompt,
+            system_prompt: wire.system_prompt,
+            resume_session: wire.resume_session,
+            skip_permissions: wire.skip_permissions,
+            backend: wire.backend,
+            model: wire.model,
+            attachments: wire.attachments,
+        })
+    }
+}
+
 impl TurnJob {
     /// The router's turn contract: backend and model are decided here, from the router's
     /// config, and the worker honours them regardless of its own environment.
@@ -46,6 +133,7 @@ impl TurnJob {
         config: &Config,
         channel: &str,
         user_id: &str,
+        affinity: Affinity,
         prompt: String,
         system_prompt: Option<String>,
         resume_session: Option<String>,
@@ -53,6 +141,8 @@ impl TurnJob {
         Self {
             channel: channel.to_string(),
             user_id: user_id.to_string(),
+            affinity,
+            session_persistence: SessionPersistence::Resume,
             prompt,
             system_prompt,
             resume_session,
@@ -67,6 +157,25 @@ impl TurnJob {
         self.attachments = attachments;
         self
     }
+}
+
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Wire result for a completed one-shot worker turn.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TurnEnvelope {
+    pub protocol_version: u32,
+    pub affinity_id: String,
+    pub turn_id: String,
+    pub worker_id: String,
+    pub outcome: TurnOutcome,
+}
+
+/// Successful or failed worker execution.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TurnOutcome {
+    Result(TurnResult),
+    Error(String),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -276,6 +385,11 @@ mod tests {
         let job = TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
+            affinity: Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            session_persistence: SessionPersistence::Resume,
             prompt: "hi".into(),
             system_prompt: Some("ctx".into()),
             resume_session: Some("sess-1".into()),
@@ -309,13 +423,35 @@ mod tests {
         };
         cfg.claude.model = Some("opus".into());
         cfg.cursor.model = Some("auto".into());
-        let job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        let job = TurnJob::new(
+            &cfg,
+            "telegram",
+            "1",
+            Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            "hi".into(),
+            None,
+            None,
+        );
         assert_eq!(job.backend, AiBackend::Claude);
         assert_eq!(job.model.as_deref(), Some("opus"));
         assert!(job.skip_permissions);
 
         cfg.backend = AiBackend::Cursor;
-        let job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        let job = TurnJob::new(
+            &cfg,
+            "telegram",
+            "1",
+            Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            "hi".into(),
+            None,
+            None,
+        );
         assert_eq!(job.backend, AiBackend::Cursor);
         assert_eq!(job.model.as_deref(), Some("auto"));
         assert!(job.skip_permissions);
@@ -331,6 +467,47 @@ mod tests {
         let job: TurnJob = serde_json::from_str(json).unwrap();
         assert_eq!(job.channel, "telegram");
         assert_eq!(job.resume_session.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn affinity_encoding_distinguishes_punctuation() {
+        let left = Affinity::Chat {
+            channel: "a:b".into(),
+            user: "c".into(),
+        };
+        let right = Affinity::Chat {
+            channel: "a".into(),
+            user: "b:c".into(),
+        };
+        assert_ne!(left.id(), right.id());
+    }
+
+    #[test]
+    fn slack_affinity_includes_channel() {
+        let left = Affinity::SlackThread {
+            channel_id: "C1".into(),
+            thread_ts: "1.2".into(),
+        };
+        let right = Affinity::SlackThread {
+            channel_id: "C2".into(),
+            thread_ts: "1.2".into(),
+        };
+        assert_ne!(left.id(), right.id());
+    }
+
+    #[test]
+    fn old_job_defaults_to_chat_affinity() {
+        let json = r#"{"channel":"slack","user_id":"U1","prompt":"hi","system_prompt":null,
+                      "resume_session":null,"skip_permissions":true,"backend":"claude","model":null}"#;
+        let job: TurnJob = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            job.affinity,
+            Affinity::Chat {
+                channel: "slack".into(),
+                user: "U1".into()
+            }
+        );
+        assert_eq!(job.session_persistence, SessionPersistence::Resume);
     }
 }
 

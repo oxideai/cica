@@ -142,6 +142,7 @@ These overlay config at load time (env wins over file). The cloud worker uses th
 | `CICA_CURSOR_MODEL` | `cursor.model` | Workers use it only as a fallback. |
 | `CICA_BACKEND` | `backend` | `claude` or `cursor`; workers do not use it for turns. |
 | `CICA_STORE` | `deployment.store` | `s3` or `filesystem`. |
+| `CICA_STATE_PATH` | `deployment.state_path` | Filesystem state-store root; Docker workers receive `/data/cica/internal/state-store`. |
 | `CICA_S3_BUCKET` | `deployment.s3.bucket` | |
 | `CICA_S3_REGION` | `deployment.s3.region` | |
 | `CICA_SKILLS_GIT_TOKEN` | — | Git credential for the skills sync loop. Env-only. |

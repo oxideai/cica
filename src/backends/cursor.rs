@@ -2,6 +2,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -135,15 +136,19 @@ pub async fn query_with_options(
     }
 
     cmd.current_dir(&paths.base);
+    cmd.kill_on_drop(true);
+    cmd.as_std_mut().process_group(0);
 
     cmd.arg(&full_prompt);
 
-    let output = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .stderr(Stdio::piped());
+    let child = cmd.spawn()?;
+    let mut group =
+        crate::backends::ProcessGroupGuard::new(child.id().expect("spawned child has pid"));
+    let output = child.wait_with_output().await?;
+    group.disarm();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -15,6 +15,7 @@ use super::{
 };
 use crate::config::{Paths, TelegramConfig};
 use crate::runtime::Runtime;
+use crate::sandbox::Affinity;
 
 pub struct TelegramChannel {
     bot: Bot,
@@ -243,6 +244,7 @@ async fn handle_message(
         &image_paths,
         username,
         display_name,
+        None,
     )?;
 
     if let Some(query_text) = execute_action(&rt, channel.as_ref(), &user_id, action).await? {
@@ -251,6 +253,10 @@ async fn handle_message(
         let user_key = format!("{}:{}", channel.name(), user_id);
         let channel_clone = channel.clone();
         let user_id_clone = user_id.clone();
+        let affinity = Affinity::Chat {
+            channel: channel.name().to_string(),
+            user: user_id.clone(),
+        };
         let rt = rt.clone();
 
         task_manager
@@ -259,6 +265,7 @@ async fn handle_message(
                     rt,
                     channel_clone,
                     &user_id_clone,
+                    affinity,
                     messages,
                     None,
                     attachment_names,

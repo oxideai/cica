@@ -89,6 +89,11 @@ mod tests {
         TurnJob {
             channel: "telegram".into(),
             user_id: "42".into(),
+            affinity: crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "42".into(),
+            },
+            session_persistence: crate::sandbox::SessionPersistence::Resume,
             prompt: "hello".into(),
             system_prompt: Some("ctx".into()),
             resume_session: Some("sess-1".into()),
@@ -191,7 +196,18 @@ mod tests {
         cfg.claude.api_key = Some("k".into());
         cfg.cursor.api_key = None;
         let provider = LocalProcessProvider::new(cfg.clone(), paths);
-        let mut job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        let mut job = TurnJob::new(
+            &cfg,
+            "telegram",
+            "1",
+            crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            "hi".into(),
+            None,
+            None,
+        );
         job.backend = AiBackend::Cursor;
         let error = provider.run_turn(job).await.unwrap_err().to_string();
         assert!(error.contains("No Cursor API key configured"));
@@ -208,7 +224,18 @@ mod tests {
         cfg.cursor.api_key = Some("k".into());
         cfg.claude.api_key = None;
         let provider = LocalProcessProvider::new(cfg.clone(), paths);
-        let mut job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        let mut job = TurnJob::new(
+            &cfg,
+            "telegram",
+            "1",
+            crate::sandbox::Affinity::Chat {
+                channel: "telegram".into(),
+                user: "1".into(),
+            },
+            "hi".into(),
+            None,
+            None,
+        );
         job.backend = AiBackend::Claude;
         let error = provider.run_turn(job).await.unwrap_err().to_string();
         assert!(error.contains("No credential configured"));

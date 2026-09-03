@@ -23,11 +23,156 @@ use crate::config::{Config, Paths, StoreKind};
 /// Keys may contain `/` to namespace entries (e.g. `session/<id>`).
 #[async_trait]
 pub trait StateStore: Send + Sync {
-    /// Replace `dest`'s contents with what is stored under `key`.
-    /// Returns `false` (and leaves `dest` untouched) if `key` is absent.
+    /// Replace `dest` with the tree stored under `key`, as a whole. On error, or when
+    /// `key` is absent (`Ok(false)`), `dest` is untouched.
     async fn pull(&self, key: &str, dest: &Path) -> Result<bool>;
-    /// Store the contents of `src` under `key`, replacing any prior contents.
+    /// Replace what is stored under `key` with the tree at `src`. On error the prior
+    /// contents stay readable. An empty `src` stores an empty tree, which reads back
+    /// as present and empty, not absent.
     async fn push(&self, src: &Path, key: &str) -> Result<()>;
+    /// Remove `key` and everything under it. An absent key is not an error.
+    async fn delete(&self, key: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+pub(crate) mod contract {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    use anyhow::Result;
+
+    use super::StateStore;
+
+    fn write(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn files(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn collect(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            if !dir.exists() {
+                return;
+            }
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, out);
+                } else {
+                    out.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        collect(root, root, &mut out);
+        out
+    }
+
+    pub async fn push_then_pull_round_trips(store: &dyn StateStore, key: &str) -> Result<()> {
+        let src = tempfile::tempdir()?;
+        write(&src.path().join("a.txt"), "alpha");
+        write(&src.path().join("sub/b.txt"), "beta");
+        store.push(src.path(), key).await?;
+        let dest_parent = tempfile::tempdir()?;
+        let dest = dest_parent.path().join("dest");
+        assert!(store.pull(key, &dest).await?);
+        assert_eq!(files(&dest), files(src.path()));
+        Ok(())
+    }
+
+    pub async fn push_smaller_tree_removes_stale_files(
+        store: &dyn StateStore,
+        key: &str,
+    ) -> Result<()> {
+        let first = tempfile::tempdir()?;
+        write(&first.path().join("a.txt"), "a");
+        write(&first.path().join("sub/b.txt"), "b");
+        store.push(first.path(), key).await?;
+        let second = tempfile::tempdir()?;
+        write(&second.path().join("new"), "new");
+        store.push(second.path(), key).await?;
+        let parent = tempfile::tempdir()?;
+        let dest = parent.path().join("dest");
+        assert!(store.pull(key, &dest).await?);
+        assert_eq!(files(&dest), files(second.path()));
+        Ok(())
+    }
+
+    pub async fn push_empty_tree_reads_present_and_empty(
+        store: &dyn StateStore,
+        key: &str,
+    ) -> Result<()> {
+        let src = tempfile::tempdir()?;
+        store.push(src.path(), key).await?;
+        let parent = tempfile::tempdir()?;
+        let dest = parent.path().join("dest");
+        assert!(store.pull(key, &dest).await?);
+        assert!(files(&dest).is_empty());
+        Ok(())
+    }
+
+    pub async fn pull_absent_key_leaves_dest_untouched(
+        store: &dyn StateStore,
+        key: &str,
+    ) -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let dest = parent.path().join("dest");
+        write(&dest.join("seed.txt"), "seed");
+        assert!(!store.pull(key, &dest).await?);
+        assert_eq!(fs::read_to_string(dest.join("seed.txt"))?, "seed");
+        Ok(())
+    }
+
+    pub async fn pull_replaces_dest_whole(store: &dyn StateStore, key: &str) -> Result<()> {
+        let src = tempfile::tempdir()?;
+        write(&src.path().join("stored.txt"), "stored");
+        store.push(src.path(), key).await?;
+        let parent = tempfile::tempdir()?;
+        let dest = parent.path().join("dest");
+        write(&dest.join("stray.txt"), "stray");
+        assert!(store.pull(key, &dest).await?);
+        assert_eq!(files(&dest), files(src.path()));
+        Ok(())
+    }
+
+    pub async fn push_failure_leaves_prior_contents(
+        store: &dyn StateStore,
+        key: &str,
+    ) -> Result<()> {
+        let first = tempfile::tempdir()?;
+        write(&first.path().join("good.txt"), "good");
+        store.push(first.path(), key).await?;
+        let broken = tempfile::tempdir()?;
+        write(&broken.path().join("a.txt"), "new");
+        symlink("./missing", broken.path().join("zz-broken"))?;
+        assert!(store.push(broken.path(), key).await.is_err());
+        let parent = tempfile::tempdir()?;
+        let dest = parent.path().join("dest");
+        assert!(store.pull(key, &dest).await?);
+        assert_eq!(files(&dest), files(first.path()));
+        Ok(())
+    }
+
+    pub async fn delete_makes_key_absent(store: &dyn StateStore, key: &str) -> Result<()> {
+        let src = tempfile::tempdir()?;
+        write(&src.path().join("a.txt"), "a");
+        store.push(src.path(), key).await?;
+        store.delete(key).await?;
+        let parent = tempfile::tempdir()?;
+        assert!(!store.pull(key, &parent.path().join("dest")).await?);
+        Ok(())
+    }
+
+    pub async fn delete_absent_key_is_ok(store: &dyn StateStore, key: &str) -> Result<()> {
+        store.delete(key).await
+    }
 }
 
 /// The filesystem path of the state store: `[deployment].state_path` if set,

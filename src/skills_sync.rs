@@ -11,12 +11,13 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::atomic::Staging;
 use crate::config::SkillsConfig;
-use crate::sandbox::state::StateStore;
+use crate::sandbox::state::{StateStore, clear_dir};
 
 /// Clone `cfg.repo`@`cfg.git_ref`, mirror to `store` (if any) under "skills",
 /// and atomically replace `skills_dir`. Leaves `skills_dir` untouched on error.
@@ -25,51 +26,14 @@ pub async fn sync_once(
     store: Option<&dyn StateStore>,
     skills_dir: &Path,
 ) -> Result<()> {
-    let parent = skills_dir
-        .parent()
-        .ok_or_else(|| anyhow!("skills_dir has no parent: {}", skills_dir.display()))?;
-    std::fs::create_dir_all(parent)?;
-
-    // Clone into a sibling temp dir so the final rename is same-filesystem.
-    let tmp = parent.join(format!("skills.tmp-{}", Uuid::new_v4()));
-    let result = build_and_swap(cfg, store, &tmp, skills_dir).await;
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-    result
-}
-
-async fn build_and_swap(
-    cfg: &SkillsConfig,
-    store: Option<&dyn StateStore>,
-    tmp: &Path,
-    skills_dir: &Path,
-) -> Result<()> {
-    clone_repo(cfg, tmp)?;
-    // Drop git internals: we neither mirror nor serve them.
-    let _ = std::fs::remove_dir_all(tmp.join(".git"));
+    let staging = Staging::beside(skills_dir)?;
+    clone_repo(cfg, staging.path())?;
+    let _ = std::fs::remove_dir_all(staging.path().join(".git"));
 
     if let Some(store) = store {
-        store.push(tmp, "skills").await?;
+        store.push(staging.path(), "skills").await?;
     }
-
-    // Atomic swap: move the old tree aside, move the new one in, delete the old.
-    // If the swap-in fails, restore the old tree so skills_dir is never left
-    // missing (last-good wins).
-    let parent = skills_dir.parent().unwrap();
-    let backup = parent.join(format!("skills.old-{}", Uuid::new_v4()));
-    let backed_up = skills_dir.exists();
-    if backed_up {
-        std::fs::rename(skills_dir, &backup)?;
-    }
-    if let Err(e) = std::fs::rename(tmp, skills_dir) {
-        if backed_up {
-            let _ = std::fs::rename(&backup, skills_dir); // restore last-good
-        }
-        let _ = std::fs::remove_dir_all(&backup);
-        return Err(e.into());
-    }
-    let _ = std::fs::remove_dir_all(&backup);
+    staging.commit()?;
     Ok(())
 }
 
@@ -104,7 +68,7 @@ fn clone_with_askpass(cfg: &SkillsConfig, dest: &Path, askpass: &Path) -> Result
         return Ok(());
     }
     // Fallback (e.g. `ref` is a sha that --branch can't take): full clone + checkout.
-    let _ = std::fs::remove_dir_all(dest);
+    clear_dir(dest)?;
     if !run(&["clone", &cfg.repo, &dest_s])? {
         bail!("git clone failed for {}", cfg.repo);
     }

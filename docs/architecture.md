@@ -69,10 +69,12 @@ The router selects an execution **provider** via `[deployment].provider`:
 
 ## The state store
 
-A small two-method trait (`StateStore`): `pull(key, dest) → bool` and `push(src, key)`. A key maps to a directory tree; keys use `/` as a namespace separator. Two implementations:
+A three-method trait (`StateStore`): `pull(key, dest) → bool`, `push(src, key)`, and `delete(key)`. A key maps to a directory tree; keys use `/` as a namespace separator. A push replaces the stored tree as a whole. Pushing an empty directory stores a present, empty tree rather than deleting the key; deletion is explicit.
 
 - **Filesystem** — keys are directories under a root path. Good for single-box-with-persistence and local testing.
 - **S3** — keys are object prefixes in a bucket (behind the `s3` feature). Credentials come from the standard AWS provider chain (env / instance role), **never** from config.
+
+S3 stores each tree as immutable objects under `<prefix>/<key>/gen/<uuid>/<relative-path>` and commits it by writing a JSON manifest at `<prefix>/<key>/current` last. Pulls follow that manifest, so readers see either the complete previous generation or the complete new one. Legacy flat objects under `<prefix>/<key>/` remain readable until the next push migrates and prunes them.
 
 ### Key layout
 

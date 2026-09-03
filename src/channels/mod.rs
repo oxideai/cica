@@ -936,9 +936,6 @@ async fn pull_memories_with_store(
 
 /// Pull the user's memories from the authoritative state store (cloud) or skip
 /// (single-box), then re-index the local copy.
-///
-/// If a same-user follow-up message aborts this mid-pull, the local copy may be
-/// transiently incomplete; the next turn's pull re-heals it.
 pub async fn reindex_user_memories(rt: &Runtime, channel: &str, user_id: &str) {
     // Cloud mode: S3 is authoritative for memories — pull this user's prefix so
     // the router index reflects what workers wrote. (Hand-edits on the router's

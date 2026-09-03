@@ -11,11 +11,22 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
+use tracing::warn;
+use uuid::Uuid;
 
+use crate::atomic::Staging;
 use crate::config::S3Config;
-use crate::sandbox::state::{StateStore, clear_dir};
+use crate::sandbox::state::StateStore;
+
+#[derive(Deserialize, Serialize)]
+struct Manifest {
+    #[serde(rename = "gen")]
+    generation: String,
+    files: Vec<String>,
+}
 
 pub struct S3StateStore {
     config: S3Config,
@@ -74,68 +85,66 @@ impl StateStore for S3StateStore {
         let client = self.client().await?;
         let bucket = &self.config.bucket;
         let prefix = dir_prefix(&self.prefix, key);
-
-        // List all objects under the prefix (paginated).
-        let mut keys: Vec<String> = Vec::new();
-        let mut token: Option<String> = None;
-        loop {
-            let mut req = client.list_objects_v2().bucket(bucket).prefix(&prefix);
-            if let Some(t) = &token {
-                req = req.continuation_token(t);
+        let current = format!("{prefix}current");
+        let manifest = match client
+            .get_object()
+            .bucket(bucket)
+            .key(&current)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let bytes = response
+                    .body
+                    .collect()
+                    .await
+                    .context("s3 current body collect")?
+                    .into_bytes();
+                Some(serde_json::from_slice::<Manifest>(&bytes).context("parsing s3 current")?)
             }
-            let resp = req.send().await.context("s3 list_objects_v2")?;
-            for obj in resp.contents() {
-                if let Some(k) = obj.key() {
-                    keys.push(k.to_string());
+            Err(error) => {
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.is_no_such_key())
+                {
+                    None
+                } else {
+                    return Err(error).context("s3 get current");
                 }
             }
-            if resp.is_truncated().unwrap_or(false) {
-                match resp.next_continuation_token() {
-                    Some(t) => token = Some(t.to_string()),
-                    None => anyhow::bail!("s3 list truncated but returned no continuation token"),
-                }
-            } else {
-                break;
-            }
-        }
+        };
 
-        if keys.is_empty() {
-            return Ok(false); // absent — matches FilesystemStateStore
-        }
+        let (generation, files) = if let Some(manifest) = manifest {
+            (Some(manifest.generation), manifest.files)
+        } else {
+            let keys = list_keys(client, bucket, &prefix).await?;
+            let files = keys
+                .into_iter()
+                .filter_map(|object| {
+                    object.strip_prefix(&prefix).and_then(|rel| {
+                        (!rel.is_empty() && rel != "current" && !rel.starts_with("gen/"))
+                            .then(|| rel.to_string())
+                    })
+                })
+                .collect::<Vec<_>>();
+            if files.is_empty() {
+                return Ok(false);
+            }
+            (None, files)
+        };
 
-        clear_dir(dest)?;
-        for obj_key in keys {
-            let rel = obj_key
-                .strip_prefix(&prefix)
-                .with_context(|| format!("s3 returned key outside prefix: {obj_key}"))?;
-            if rel.is_empty() {
-                continue;
+        let staging = Staging::beside(dest)?;
+        for rel in files {
+            if rel.split('/').any(|segment| segment == "..") {
+                anyhow::bail!("s3 object key escapes dest: {rel}");
             }
-            // Bucket contents are only ever written by `push` (keys derived from
-            // real filesystem paths), but guard the join anyway so a stray `..`
-            // object key can't escape `dest` — parity with the filesystem store.
-            if rel.split('/').any(|seg| seg == "..") {
-                anyhow::bail!("s3 object key escapes dest: {obj_key}");
-            }
-            let out = dest.join(rel);
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let resp = client
-                .get_object()
-                .bucket(bucket)
-                .key(&obj_key)
-                .send()
-                .await
-                .with_context(|| format!("s3 get_object {obj_key}"))?;
-            let bytes = resp
-                .body
-                .collect()
-                .await
-                .context("s3 body collect")?
-                .into_bytes();
-            fs::write(&out, bytes)?;
+            let object = match &generation {
+                Some(generation) => format!("{prefix}gen/{generation}/{rel}"),
+                None => format!("{prefix}{rel}"),
+            };
+            download_file(client, bucket, &object, &staging.path().join(&rel)).await?;
         }
+        staging.commit()?;
         Ok(true)
     }
 
@@ -143,65 +152,146 @@ impl StateStore for S3StateStore {
         let client = self.client().await?;
         let bucket = &self.config.bucket;
         let prefix = dir_prefix(&self.prefix, key);
-
-        // Replace semantics: delete everything currently under the prefix.
-        let mut token: Option<String> = None;
-        loop {
-            let mut req = client.list_objects_v2().bucket(bucket).prefix(&prefix);
-            if let Some(t) = &token {
-                req = req.continuation_token(t);
-            }
-            let resp = req.send().await.context("s3 list (pre-delete)")?;
-            let ids: Vec<ObjectIdentifier> = resp
-                .contents()
-                .iter()
-                .filter_map(|obj| obj.key())
-                .map(|k| ObjectIdentifier::builder().key(k).build())
-                .collect::<Result<Vec<_>, _>>()
-                .context("building delete identifiers")?;
-            if !ids.is_empty() {
-                let delete = Delete::builder()
-                    .set_objects(Some(ids))
-                    .build()
-                    .context("building delete request")?;
-                let deleted = client
-                    .delete_objects()
-                    .bucket(bucket)
-                    .delete(delete)
-                    .send()
-                    .await
-                    .context("s3 delete_objects")?;
-                // delete_objects returns 200 even on per-key failures; they
-                // surface in `errors()`, so an unchecked call could leave stale
-                // objects under the key and silently break replace semantics.
-                let errs = deleted.errors();
-                if !errs.is_empty() {
-                    anyhow::bail!("s3 delete_objects partial failure: {} error(s)", errs.len());
-                }
-            }
-            if resp.is_truncated().unwrap_or(false) {
-                match resp.next_continuation_token() {
-                    Some(t) => token = Some(t.to_string()),
-                    None => anyhow::bail!("s3 list truncated but returned no continuation token"),
-                }
-            } else {
-                break;
-            }
-        }
-
+        let generation = Uuid::new_v4().to_string();
+        let mut files = Vec::new();
         for entry in walk_files(src)? {
             let rel = entry
                 .strip_prefix(src)
                 .expect("walk_files yields paths under src")
                 .to_string_lossy()
                 .replace('\\', "/");
-            let obj = object_key(&self.prefix, key, &rel);
+            let obj = object_key(&self.prefix, key, &format!("gen/{generation}/{rel}"));
             upload_file(client, bucket, &obj, &entry)
                 .await
                 .with_context(|| format!("s3 upload {rel}"))?;
+            files.push(rel);
+        }
+        let current = object_key(&self.prefix, key, "current");
+        let body = serde_json::to_vec(&Manifest {
+            generation: generation.clone(),
+            files,
+        })?;
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(&current)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .context("s3 put current")?;
+        let generation_prefix = format!("{prefix}gen/{generation}/");
+        if let Err(error) = delete_prefix(client, bucket, &prefix, |object| {
+            object == current || object.starts_with(&generation_prefix)
+        })
+        .await
+        {
+            warn!("failed to prune old S3 state under {prefix}: {error}");
         }
         Ok(())
     }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let client = self.client().await?;
+        delete_prefix(
+            client,
+            &self.config.bucket,
+            &dir_prefix(&self.prefix, key),
+            |_| false,
+        )
+        .await
+    }
+}
+
+async fn list_keys(client: &aws_sdk_s3::Client, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut token = None;
+    loop {
+        let mut request = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        if let Some(value) = &token {
+            request = request.continuation_token(value);
+        }
+        let response = request.send().await.context("s3 list_objects_v2")?;
+        keys.extend(
+            response
+                .contents()
+                .iter()
+                .filter_map(|object| object.key().map(str::to_string)),
+        );
+        if response.is_truncated().unwrap_or(false) {
+            token = Some(
+                response
+                    .next_continuation_token()
+                    .context("s3 list truncated but returned no continuation token")?
+                    .to_string(),
+            );
+        } else {
+            break;
+        }
+    }
+    Ok(keys)
+}
+
+async fn download_file(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    object: &str,
+    dest: &Path,
+) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key(object)
+        .send()
+        .await
+        .with_context(|| format!("s3 get_object {object}"))?;
+    let bytes = response
+        .body
+        .collect()
+        .await
+        .context("s3 body collect")?
+        .into_bytes();
+    fs::write(dest, bytes)?;
+    Ok(())
+}
+
+async fn delete_prefix(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Result<()> {
+    for chunk in list_keys(client, bucket, prefix).await?.chunks(1000) {
+        let ids = chunk
+            .iter()
+            .filter(|key| !keep(key))
+            .map(|key| ObjectIdentifier::builder().key(key).build())
+            .collect::<Result<Vec<_>, _>>()
+            .context("building delete identifiers")?;
+        if ids.is_empty() {
+            continue;
+        }
+        let delete = Delete::builder()
+            .set_objects(Some(ids))
+            .build()
+            .context("building delete request")?;
+        let response = client
+            .delete_objects()
+            .bucket(bucket)
+            .delete(delete)
+            .send()
+            .await
+            .context("s3 delete_objects")?;
+        if !response.errors().is_empty() {
+            anyhow::bail!(
+                "s3 delete_objects partial failure: {} error(s)",
+                response.errors().len()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Threshold/part size for switching to multipart, mirroring the AWS CLI default.
@@ -370,6 +460,7 @@ mod it_tests {
 
     use super::*;
     use crate::config::S3Config;
+    use crate::sandbox::state::contract;
 
     // Gated: only runs when CICA_S3_IT is set (the CI s3-store job / explicit local run).
     fn it_config() -> Option<S3Config> {
@@ -390,45 +481,124 @@ mod it_tests {
         fs::write(p, c).unwrap();
     }
 
+    macro_rules! contract_test {
+        ($name:ident, $contract:ident) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(cfg) = it_config() else {
+                    return;
+                };
+                let store = S3StateStore::new(cfg);
+                let key = format!("contract/{}/{}", stringify!($name), Uuid::new_v4());
+                contract::$contract(&store, &key).await.unwrap();
+                store.delete(&key).await.unwrap();
+            }
+        };
+    }
+
+    contract_test!(push_then_pull_round_trips, push_then_pull_round_trips);
+    contract_test!(
+        push_smaller_tree_removes_stale_files,
+        push_smaller_tree_removes_stale_files
+    );
+    contract_test!(
+        push_empty_tree_reads_present_and_empty,
+        push_empty_tree_reads_present_and_empty
+    );
+    contract_test!(
+        pull_absent_key_leaves_dest_untouched,
+        pull_absent_key_leaves_dest_untouched
+    );
+    contract_test!(pull_replaces_dest_whole, pull_replaces_dest_whole);
+    contract_test!(
+        push_failure_leaves_prior_contents,
+        push_failure_leaves_prior_contents
+    );
+    contract_test!(delete_makes_key_absent, delete_makes_key_absent);
+    contract_test!(delete_absent_key_is_ok, delete_absent_key_is_ok);
+
     #[tokio::test]
-    async fn s3_round_trip_absent_and_replace() {
+    async fn pull_failure_leaves_prior_local_contents() {
         let Some(cfg) = it_config() else {
             return;
         };
         let store = S3StateStore::new(cfg);
+        let key = format!("pull-failure/{}", Uuid::new_v4());
+        let first = tempfile::tempdir().unwrap();
+        write(&first.path().join("good.txt"), "good");
+        store.push(first.path(), &key).await.unwrap();
+        let dest_parent = tempfile::tempdir().unwrap();
+        let dest = dest_parent.path().join("dest");
+        store.pull(&key, &dest).await.unwrap();
+        let second = tempfile::tempdir().unwrap();
+        write(&second.path().join("x.txt"), "x");
+        write(&second.path().join("y.txt"), "y");
+        store.push(second.path(), &key).await.unwrap();
+        let client = store.client().await.unwrap();
+        let prefix = dir_prefix(&store.prefix, &key);
+        let current = client
+            .get_object()
+            .bucket(&store.config.bucket)
+            .key(format!("{prefix}current"))
+            .send()
+            .await
+            .unwrap();
+        let manifest: Manifest =
+            serde_json::from_slice(&current.body.collect().await.unwrap().into_bytes()).unwrap();
+        client
+            .delete_object()
+            .bucket(&store.config.bucket)
+            .key(format!("{prefix}gen/{}/y.txt", manifest.generation))
+            .send()
+            .await
+            .unwrap();
 
-        // absent → false
-        let d0 = tempfile::tempdir().unwrap();
-        assert!(!store.pull("session/none", d0.path()).await.unwrap());
+        assert!(store.pull(&key, &dest).await.is_err());
+        assert_eq!(fs::read_to_string(dest.join("good.txt")).unwrap(), "good");
+        assert!(!dest.join("x.txt").exists());
+        store.delete(&key).await.unwrap();
+    }
 
-        // push a nested tree, pull it back byte-for-byte
+    #[tokio::test]
+    async fn pull_reads_legacy_flat_layout() {
+        let Some(cfg) = it_config() else {
+            return;
+        };
+        let store = S3StateStore::new(cfg);
+        let key = format!("legacy/{}", Uuid::new_v4());
+        let client = store.client().await.unwrap();
+        let prefix = dir_prefix(&store.prefix, &key);
+        for (rel, contents) in [("a.txt", "a"), ("sub/b.txt", "b")] {
+            client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(format!("{prefix}{rel}"))
+                .body(ByteStream::from(contents.as_bytes().to_vec()))
+                .send()
+                .await
+                .unwrap();
+        }
+        let parent = tempfile::tempdir().unwrap();
+        let dest = parent.path().join("dest");
+        assert!(store.pull(&key, &dest).await.unwrap());
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(dest.join("sub/b.txt")).unwrap(), "b");
+
         let src = tempfile::tempdir().unwrap();
-        write(&src.path().join("a.txt"), "alpha");
-        write(&src.path().join("sub/b.txt"), "beta");
-        store.push(src.path(), "session/x").await.unwrap();
-
-        let d1 = tempfile::tempdir().unwrap();
-        assert!(store.pull("session/x", d1.path()).await.unwrap());
-        assert_eq!(
-            fs::read_to_string(d1.path().join("a.txt")).unwrap(),
-            "alpha"
+        write(&src.path().join("new.txt"), "new");
+        store.push(src.path(), &key).await.unwrap();
+        let keys = list_keys(client, &store.config.bucket, &prefix)
+            .await
+            .unwrap();
+        assert!(
+            keys.iter()
+                .any(|object| object == &format!("{prefix}current"))
         );
-        assert_eq!(
-            fs::read_to_string(d1.path().join("sub/b.txt")).unwrap(),
-            "beta"
-        );
-
-        // push replaces prior contents
-        let src2 = tempfile::tempdir().unwrap();
-        write(&src2.path().join("new.txt"), "new");
-        store.push(src2.path(), "session/x").await.unwrap();
-        let d2 = tempfile::tempdir().unwrap();
-        store.pull("session/x", d2.path()).await.unwrap();
-        assert!(!d2.path().join("a.txt").exists());
-        assert_eq!(
-            fs::read_to_string(d2.path().join("new.txt")).unwrap(),
-            "new"
-        );
+        assert!(keys.iter().all(|object| {
+            let rel = object.strip_prefix(&prefix).unwrap();
+            rel == "current" || rel.starts_with("gen/")
+        }));
+        store.delete(&key).await.unwrap();
     }
 
     #[tokio::test]

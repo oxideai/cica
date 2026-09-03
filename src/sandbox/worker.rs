@@ -77,13 +77,8 @@ async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<Tur
 }
 
 /// Best-effort removal of a turn's blobs after the router has the result.
-/// `StateStore` has no delete; pushing an empty dir collapses the subtree.
 async fn cleanup(store: &dyn StateStore, turn_id: &str) {
-    let empty = scratch_dir(turn_id, "empty");
-    if std::fs::create_dir_all(&empty).is_ok() {
-        let _ = store.push(&empty, &turn_prefix(turn_id)).await;
-        let _ = std::fs::remove_dir_all(&empty);
-    }
+    let _ = store.delete(&turn_prefix(turn_id)).await;
 }
 
 pub async fn run_worker_turn(

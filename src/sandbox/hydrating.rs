@@ -168,6 +168,9 @@ mod tests {
         async fn push(&self, _src: &Path, _key: &str) -> Result<()> {
             anyhow::bail!("simulated S3 put timeout")
         }
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

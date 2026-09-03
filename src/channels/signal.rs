@@ -21,7 +21,6 @@ use super::{
     execute_action, execute_claude_query,
 };
 use crate::config::{Paths, SignalConfig};
-use crate::pairing::PairingStore;
 use crate::runtime::Runtime;
 use crate::setup;
 
@@ -509,14 +508,12 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(SignalChannel::new(client, sender.clone()));
 
-    let mut store = PairingStore::load(&rt.paths)?;
     let action = determine_action(
         &rt,
         channel.name(),
         &sender,
         &text,
         &image_paths,
-        &mut store,
         None, // Signal has no usernames
         display_name,
     )?;

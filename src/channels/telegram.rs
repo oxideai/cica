@@ -14,7 +14,6 @@ use super::{
     execute_action, execute_claude_query,
 };
 use crate::config::{Paths, TelegramConfig};
-use crate::pairing::PairingStore;
 use crate::runtime::Runtime;
 
 pub struct TelegramChannel {
@@ -236,14 +235,12 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(bot.clone(), msg.chat.id));
 
-    let mut store = PairingStore::load(&rt.paths)?;
     let action = determine_action(
         &rt,
         channel.name(),
         &user_id,
         text,
         &image_paths,
-        &mut store,
         username,
         display_name,
     )?;

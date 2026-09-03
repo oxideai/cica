@@ -67,17 +67,32 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         // --- Hydrate ---
         if let Some(bid) = &job.resume_session {
             let staging = self.staging();
-            if self.store.pull(&format!("session/{bid}"), &staging).await? {
-                artifacts.restore(home, &self.cwd, bid, &staging)?;
+            match self.store.pull(&format!("session/{bid}"), &staging).await {
+                Ok(true) => {
+                    if let Err(e) = artifacts.restore(home, &self.cwd, bid, &staging) {
+                        warn!("failed to restore session {bid} (backend will start fresh): {e}");
+                    }
+                }
+                Ok(false) => warn!(
+                    "session {bid} not in store (previous push failed?); backend will start fresh"
+                ),
+                Err(e) => warn!("failed to pull session {bid} (backend will start fresh): {e}"),
             }
             let _ = std::fs::remove_dir_all(&staging);
         }
-        // Memories: pull is authoritative when present; absent = keep local.
-        let _ = self.store.pull(&mem_key, &mem_dir).await?;
+        let memories_hydrated = match self.store.pull(&mem_key, &mem_dir).await {
+            Ok(_) => true,
+            Err(e) => {
+                warn!(
+                    "failed to pull {mem_key}; running without memories and not persisting them: {e}"
+                );
+                false
+            }
+        };
 
-        // Skills: published, read-only — pull the current set so the agent can
-        // read/execute them. Absence (router hasn't synced yet) is fine.
-        let _ = self.store.pull("skills", &self.cwd.join("skills")).await;
+        if let Err(e) = self.store.pull("skills", &self.cwd.join("skills")).await {
+            warn!("failed to pull skills (running without): {e}");
+        }
 
         // --- Run ---
         let result = self.inner.run_turn(job).await?;
@@ -101,7 +116,8 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
             }
             let _ = std::fs::remove_dir_all(&staging);
         }
-        if mem_dir.exists()
+        if memories_hydrated
+            && mem_dir.exists()
             && let Err(e) = self.store.push(&mem_dir, &mem_key).await
         {
             warn!("failed to persist memories (reply still delivered): {e}");
@@ -171,6 +187,84 @@ mod tests {
         async fn delete(&self, _key: &str) -> Result<()> {
             Ok(())
         }
+    }
+
+    struct FailingPullStore {
+        prefix: &'static str,
+        pushes: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl StateStore for FailingPullStore {
+        async fn pull(&self, key: &str, _dest: &Path) -> Result<bool> {
+            if key.starts_with(self.prefix) {
+                anyhow::bail!("simulated pull failure")
+            }
+            Ok(false)
+        }
+
+        async fn push(&self, _src: &Path, key: &str) -> Result<()> {
+            self.pushes.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn memories_pull_failure_runs_turn_and_skips_memories_push() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        write(&cwd.join("users/telegram_1/memories/new.md"), "new");
+        let store = Arc::new(FailingPullStore {
+            prefix: "mem/",
+            pushes: Mutex::new(Vec::new()),
+        });
+        let hp = HydratingProvider::new(
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            store.clone(),
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            cwd,
+        );
+
+        let result = hp.run_turn(job(None)).await.unwrap();
+
+        assert_eq!(result.response, "ok");
+        assert!(
+            store
+                .pushes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|key| !key.starts_with("mem/"))
+        );
+    }
+
+    #[tokio::test]
+    async fn session_pull_failure_still_runs_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FailingPullStore {
+            prefix: "session/",
+            pushes: Mutex::new(Vec::new()),
+        });
+        let hp = HydratingProvider::new(
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            store,
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            tmp.path().join("cwd"),
+        );
+
+        assert!(hp.run_turn(job(Some("sess"))).await.is_ok());
     }
 
     #[tokio::test]

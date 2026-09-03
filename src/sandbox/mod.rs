@@ -118,7 +118,7 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
             let launcher = worker::DockerLauncher::new(
                 image,
                 paths.config_file.clone(),
-                paths.skills_dir.clone(),
+                config.skills.is_none().then(|| paths.skills_dir.clone()),
                 state_store_dir,
             );
             Ok(Box::new(worker::LaunchedWorkerProvider::new(

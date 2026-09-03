@@ -168,7 +168,7 @@ impl Launcher for SubprocessLauncher {
 pub struct DockerLauncher {
     image: String,
     config_file: PathBuf,
-    skills_dir: PathBuf,
+    skills_dir: Option<PathBuf>,
     state_store_dir: PathBuf,
     env: Vec<(String, String)>,
 }
@@ -196,10 +196,11 @@ impl Drop for DockerContainerGuard {
 }
 
 impl DockerLauncher {
+    /// `skills_dir` is `None` when the state store carries the skills.
     pub fn new(
         image: String,
         config_file: PathBuf,
-        skills_dir: PathBuf,
+        skills_dir: Option<PathBuf>,
         state_store_dir: PathBuf,
     ) -> Self {
         Self {
@@ -235,11 +236,10 @@ impl DockerLauncher {
             "{}:/data/cica/config.toml:ro",
             self.config_file.display()
         ));
-        args.push("-v".into());
-        args.push(format!(
-            "{}:/data/cica/skills:ro",
-            self.skills_dir.display()
-        ));
+        if let Some(skills_dir) = &self.skills_dir {
+            args.push("-v".into());
+            args.push(format!("{}:/data/cica/skills:ro", skills_dir.display()));
+        }
         args.push("-v".into());
         args.push(format!(
             "{}:/data/cica/internal/state-store",
@@ -370,11 +370,11 @@ mod tests {
     }
 
     #[test]
-    fn docker_launcher_builds_run_args() {
+    fn docker_launcher_builds_run_args_with_skills_mount() {
         let l = DockerLauncher::new(
             "cica-worker:latest".into(),
             std::path::PathBuf::from("/host/config.toml"),
-            std::path::PathBuf::from("/host/skills"),
+            Some(std::path::PathBuf::from("/host/skills")),
             std::path::PathBuf::from("/host/state-store"),
         );
         let args = l.run_args("turn-123");
@@ -384,6 +384,18 @@ mod tests {
         assert!(args.contains(&"/host/state-store:/data/cica/internal/state-store".to_string()));
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, ["cica-worker:latest", "worker", "--turn", "turn-123"]);
+    }
+
+    #[test]
+    fn docker_launcher_builds_run_args_without_skills_mount() {
+        let l = DockerLauncher::new(
+            "cica-worker:latest".into(),
+            std::path::PathBuf::from("/host/config.toml"),
+            None,
+            std::path::PathBuf::from("/host/state-store"),
+        );
+        let args = l.run_args("turn-123");
+        assert!(!args.iter().any(|arg| arg.contains(":/data/cica/skills")));
     }
 
     #[tokio::test]
@@ -396,7 +408,7 @@ mod tests {
         let l = DockerLauncher::new(
             "cica-worker:latest".into(),
             std::path::PathBuf::from("/c"),
-            std::path::PathBuf::from("/s"),
+            Some(std::path::PathBuf::from("/s")),
             std::path::PathBuf::from("/st"),
         )
         .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
@@ -462,7 +474,7 @@ mod tests {
         let launcher = DockerLauncher::new(
             "cica-worker:latest".into(),
             config_file,
-            skills_dir.path().to_path_buf(),
+            Some(skills_dir.path().to_path_buf()),
             store_root.path().to_path_buf(),
         )
         .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);

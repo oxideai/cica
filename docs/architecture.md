@@ -94,6 +94,8 @@ S3 stores each tree as immutable objects under `<prefix>/<key>/gen/<uuid>/<relat
 2. **Run** — delegate to the inner provider (the actual agent invocation).
 3. **Dehydrate (best-effort)** — capture the resulting session artifacts and push to `session/<id>`; push updated memories to `mem/<channel>_<user_id>`.
 
+If a state pull fails, hydration logs the error and runs the turn without that state. A key that failed to pull is not pushed back during dehydration.
+
 Dehydration is best-effort: the worker returns the reply to the router *before* persisting, so a slow or failed push degrades resume quality but never drops the answer.
 
 ## Skills

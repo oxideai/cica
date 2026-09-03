@@ -25,10 +25,9 @@ fn turn_prefix(turn_id: &str) -> String {
     format!("turns/{turn_id}")
 }
 
-/// Attachments are shared per file name, not per turn: the same image referenced
-/// twice is uploaded once, and a resumed thread can still reach an earlier one.
-fn attachment_key(name: &str) -> String {
-    format!("attachments/{name}")
+/// Attachments are keyed by path, so one upload serves every turn that names it.
+fn attachment_key(path: &str) -> String {
+    format!("attachments/{path}")
 }
 
 fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
@@ -47,26 +46,24 @@ async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Resul
     Ok(())
 }
 
-/// Copy the turn's attachments into the store so a worker elsewhere can read them.
-///
-/// Best-effort, like session hydration: a missing or unreadable attachment costs
-/// the agent one image, and is not worth failing the whole turn over. It is
-/// warned about so the cause is visible rather than showing up as the agent
-/// saying it cannot see a screenshot.
-async fn push_attachments(store: &dyn StateStore, source_dir: &std::path::Path, job: &TurnJob) {
-    for name in &job.attachments {
-        let src = source_dir.join(name);
+async fn push_attachments(store: &dyn StateStore, base: &std::path::Path, job: &TurnJob) {
+    for relative in &job.attachments {
+        let src = base.join(relative);
         if !src.is_file() {
-            warn!("attachment {name} not found at {src:?}; the worker will not see it");
+            warn!("attachment {relative} not found at {src:?}; the worker will not see it");
             continue;
         }
+        let Some(file_name) = src.file_name() else {
+            warn!("attachment {relative} has no file name; the worker will not see it");
+            continue;
+        };
         let staging = std::env::temp_dir().join(format!("cica-attach-{}", Uuid::new_v4()));
         let copied = std::fs::create_dir_all(&staging)
-            .and_then(|_| std::fs::copy(&src, staging.join(name)).map(|_| ()));
+            .and_then(|_| std::fs::copy(&src, staging.join(file_name)).map(|_| ()));
         if let Err(e) = copied {
-            warn!("failed to stage attachment {name}: {e}");
-        } else if let Err(e) = store.push(&staging, &attachment_key(name)).await {
-            warn!("failed to push attachment {name} to the store: {e}");
+            warn!("failed to stage attachment {relative}: {e}");
+        } else if let Err(e) = store.push(&staging, &attachment_key(relative)).await {
+            warn!("failed to push attachment {relative} to the store: {e}");
         }
         let _ = std::fs::remove_dir_all(&staging);
     }
@@ -136,20 +133,15 @@ pub trait Launcher: Send + Sync {
 pub struct LaunchedWorkerProvider {
     store: Arc<dyn StateStore>,
     launcher: Box<dyn Launcher>,
-    /// Where this machine keeps downloaded Slack attachments.
-    attachments_dir: PathBuf,
+    base: PathBuf,
 }
 
 impl LaunchedWorkerProvider {
-    pub fn new(
-        store: Arc<dyn StateStore>,
-        launcher: Box<dyn Launcher>,
-        attachments_dir: PathBuf,
-    ) -> Self {
+    pub fn new(store: Arc<dyn StateStore>, launcher: Box<dyn Launcher>, base: PathBuf) -> Self {
         Self {
             store,
             launcher,
-            attachments_dir,
+            base,
         }
     }
 }
@@ -159,7 +151,7 @@ impl SandboxProvider for LaunchedWorkerProvider {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
         let turn_id = Uuid::new_v4().to_string();
 
-        push_attachments(self.store.as_ref(), &self.attachments_dir, &job).await;
+        push_attachments(self.store.as_ref(), &self.base, &job).await;
         push_job(self.store.as_ref(), &turn_id, &job).await?;
 
         if let Err(e) = self.launcher.launch(&turn_id).await {
@@ -398,7 +390,7 @@ mod tests {
             Box::new(FakeLauncher {
                 store: store.clone(),
             }),
-            std::env::temp_dir().join("cica-test-attachments"),
+            root.path().join("base"),
         );
         let job = TurnJob {
             channel: "telegram".into(),
@@ -528,7 +520,7 @@ mod tests {
         let provider = LaunchedWorkerProvider::new(
             store.clone(),
             Box::new(launcher),
-            std::env::temp_dir().join("cica-test-attachments"),
+            cfg_dir.path().join("base"),
         );
         let job = TurnJob {
             channel: "telegram".into(),

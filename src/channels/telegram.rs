@@ -247,7 +247,7 @@ async fn handle_message(
 
     if let Some(query_text) = execute_action(&rt, channel.as_ref(), &user_id, action).await? {
         let (text_with_images, attachment_names) =
-            build_text_with_images(&query_text, &image_paths);
+            build_text_with_images(&rt.paths.base, &query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), user_id);
         let channel_clone = channel.clone();
         let user_id_clone = user_id.clone();
@@ -269,4 +269,23 @@ async fn handle_message(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_telegram_attachments_dir;
+    use crate::channels::{assert_prompt_paths_resolve, build_text_with_images};
+
+    #[test]
+    fn telegram_download_location_resolves_in_the_prompt() {
+        let (_temp, paths) = crate::config::test_paths();
+        let attachment = get_telegram_attachments_dir(&paths)
+            .unwrap()
+            .join("AgAD.jpg");
+        std::fs::write(&attachment, "fixture").unwrap();
+
+        let prompt = build_text_with_images(&paths.base, "look", &[attachment]);
+
+        assert_prompt_paths_resolve(&paths.base, &prompt);
+    }
 }

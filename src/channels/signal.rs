@@ -520,7 +520,7 @@ async fn handle_message(
 
     if let Some(query_text) = execute_action(&rt, channel.as_ref(), &sender, action).await? {
         let (text_with_images, attachment_names) =
-            build_text_with_images(&query_text, &image_paths);
+            build_text_with_images(&rt.paths.base, &query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), sender);
         let channel_clone = channel.clone();
         let sender_clone = sender.clone();
@@ -693,4 +693,23 @@ pub async fn verify_account(paths: &Paths, phone_number: &str, code: &str) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_attachment_path;
+    use crate::channels::{assert_prompt_paths_resolve, build_text_with_images};
+
+    #[test]
+    fn signal_download_location_resolves_in_the_prompt() {
+        let (_temp, paths) = crate::config::test_paths();
+        let attachment = paths.signal_data_dir.join("attachments").join("123");
+        std::fs::create_dir_all(attachment.parent().unwrap()).unwrap();
+        std::fs::write(&attachment, "fixture").unwrap();
+        let attachment = get_attachment_path(&paths, "123").unwrap();
+
+        let prompt = build_text_with_images(&paths.base, "look", &[attachment]);
+
+        assert_prompt_paths_resolve(&paths.base, &prompt);
+    }
 }

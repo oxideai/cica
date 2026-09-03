@@ -922,7 +922,7 @@ fn find_job_id(
     }
 }
 
-/// Query the AI backend; on session expiry, clears it and retries fresh.
+/// Query the AI backend through the configured provider and persist the returned session id.
 pub async fn query_ai_with_session(
     store: &mut PairingStore,
     channel: &str,
@@ -945,7 +945,7 @@ pub async fn query_ai_with_session(
         channel: channel.to_string(),
         user_id: user_id.to_string(),
         prompt: text.to_string(),
-        system_prompt: Some(context_prompt.clone()),
+        system_prompt: Some(context_prompt),
         resume_session: existing_session,
         cwd: None,
         skip_permissions: true,
@@ -953,56 +953,7 @@ pub async fn query_ai_with_session(
         model: None,
     };
 
-    let qr = match provider.run_turn(job).await {
-        Ok(tr) => sandbox::query_result_from_turn(tr),
-        Err(e) => {
-            let error_msg = e.to_string();
-            // If session not found, clear it and retry without resuming
-            if error_msg.contains("No conversation found with session ID")
-                || error_msg.contains("session")
-            {
-                warn!("Session expired, starting fresh conversation");
-                store.sessions.remove(&session_key);
-                store.save()?;
-
-                audit::log_event("session_expired", Some(channel), Some(user_id), None);
-
-                let retry_job = TurnJob {
-                    session_id: session_key.clone(),
-                    channel: channel.to_string(),
-                    user_id: user_id.to_string(),
-                    prompt: text.to_string(),
-                    system_prompt: Some(context_prompt),
-                    resume_session: None,
-                    cwd: None,
-                    skip_permissions: true,
-                    backend: config.backend,
-                    model: None,
-                };
-
-                match provider.run_turn(retry_job).await {
-                    Ok(tr) => sandbox::query_result_from_turn(tr),
-                    Err(e) => {
-                        warn!("AI backend error on retry: {}", e);
-                        QueryResult {
-                            response: format!("Sorry, I encountered an error: {}", e),
-                            session_id: String::new(),
-                            duration_ms: None,
-                            cost_usd: None,
-                        }
-                    }
-                }
-            } else {
-                warn!("AI backend error: {}", e);
-                QueryResult {
-                    response: format!("Sorry, I encountered an error: {}", e),
-                    session_id: String::new(),
-                    duration_ms: None,
-                    cost_usd: None,
-                }
-            }
-        }
-    };
+    let qr = sandbox::query_result_from_turn(provider.run_turn(job).await?);
 
     if !qr.session_id.is_empty()
         && store.sessions.get(&session_key).map(|s| s.as_str()) != Some(&qr.session_id)

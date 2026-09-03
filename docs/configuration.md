@@ -159,4 +159,4 @@ Cica does not integrate a secret manager itself — in single-box mode, tokens a
 - `CICA_SKILLS_GIT_TOKEN` (env)
 - AWS credentials (via the provider chain)
 
-In cloud mode, inject these as environment variables from your platform's secret store rather than baking a `config.toml` — see your deployment's runbook. (For Root's deployment, that's the `sprout` repo.)
+In cloud mode, inject these as environment variables from your platform's secret store rather than baking a `config.toml` — see your deployment's runbook.

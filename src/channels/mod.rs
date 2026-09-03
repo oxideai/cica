@@ -163,11 +163,24 @@ pub fn determine_action(
 }
 
 /// Build a message combining text and image paths (@path syntax for Claude Code).
-pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> String {
+/// Returns the prompt text plus the attachment file names it references.
+///
+/// Both come from here so they cannot drift: the job carries exactly the files
+/// the prompt mentions, and the worker hydrates exactly those.
+pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> (String, Vec<String>) {
     let mut result = text.to_string();
+    let mut names = Vec::new();
 
     for (i, path) in image_paths.iter().enumerate() {
-        if let Some(path_str) = path.to_str() {
+        // Reference the attachment by its workspace-relative path. An absolute
+        // path here is the router's, and the turn may run on a worker whose
+        // filesystem does not have it — which is how a shared screenshot used to
+        // come back as "I'm unable to access the screenshot file".
+        let rel = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(crate::sandbox::attachment_path);
+        if let Some(path_str) = rel.as_deref().or_else(|| path.to_str()) {
             if result.is_empty() {
                 result = format!("@{}", path_str);
             } else if i == 0 {
@@ -175,10 +188,13 @@ pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> String {
             } else {
                 result = format!("{} @{}", result, path_str);
             }
+            if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
+                names.push(n.to_string());
+            }
         }
     }
 
-    result
+    (result, names)
 }
 
 /// Execute an action. Returns `Some(text)` for `QueryClaude` (caller handles with task manager).
@@ -303,6 +319,7 @@ pub async fn execute_claude_query(
     user_id: &str,
     messages: Vec<String>,
     session_key: Option<String>,
+    attachments: Vec<String>,
 ) {
     let combined_text = messages.join("\n\n");
     let _typing = channel.start_typing();
@@ -332,6 +349,7 @@ pub async fn execute_claude_query(
         &combined_text,
         context_prompt,
         session_key.as_deref(),
+        attachments,
     )
     .await
     {
@@ -865,6 +883,7 @@ pub async fn query_ai_with_session(
     text: &str,
     context_prompt: String,
     session_key_override: Option<&str>,
+    attachments: Vec<String>,
 ) -> Result<QueryResult> {
     let session_key = match session_key_override {
         Some(key) => key.to_string(),
@@ -879,7 +898,8 @@ pub async fn query_ai_with_session(
         text.to_string(),
         Some(context_prompt),
         existing_session.clone(),
-    );
+    )
+    .with_attachments(attachments);
 
     let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
 
@@ -1134,7 +1154,16 @@ mod runtime_store_tests {
         let (rt, entered, release) = runtime(&paths);
         let turn_rt = rt.clone();
         let turn = tokio::spawn(async move {
-            query_ai_with_session(&turn_rt, "telegram", "1", "hello", String::new(), None).await
+            query_ai_with_session(
+                &turn_rt,
+                "telegram",
+                "1",
+                "hello",
+                String::new(),
+                None,
+                Vec::new(),
+            )
+            .await
         });
         entered.await.unwrap();
         PairingStore::load(&paths)
@@ -1162,7 +1191,16 @@ mod runtime_store_tests {
         let (rt, entered, release) = runtime(&paths);
         let turn_rt = rt.clone();
         let turn = tokio::spawn(async move {
-            query_ai_with_session(&turn_rt, "telegram", "1", "hello", String::new(), None).await
+            query_ai_with_session(
+                &turn_rt,
+                "telegram",
+                "1",
+                "hello",
+                String::new(),
+                None,
+                Vec::new(),
+            )
+            .await
         });
         entered.await.unwrap();
         process_command(&rt, "telegram", "1", "/new", true).unwrap();
@@ -1181,7 +1219,16 @@ mod runtime_store_tests {
         let (_temp, paths) = crate::config::test_paths();
         let (rt, entered, release) = runtime(&paths);
         let turn = tokio::spawn(async move {
-            query_ai_with_session(&rt, "telegram", "1", "hello", String::new(), None).await
+            query_ai_with_session(
+                &rt,
+                "telegram",
+                "1",
+                "hello",
+                String::new(),
+                None,
+                Vec::new(),
+            )
+            .await
         });
         entered.await.unwrap();
         release.send(()).unwrap();
@@ -1194,5 +1241,49 @@ mod runtime_store_tests {
                 .unwrap(),
             "sess-1"
         );
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    #[test]
+    fn images_are_referenced_by_workspace_relative_path() {
+        let (text, names) = build_text_with_images(
+            "what is wrong here?",
+            &[PathBuf::from(
+                "/home/ubuntu/.config/cica/internal/slack_attachments/F1_shot.png",
+            )],
+        );
+
+        // The router's absolute path must not survive into the prompt: the turn may
+        // run on a worker whose filesystem has no such file.
+        assert!(!text.contains("/home/ubuntu"), "got: {text}");
+        assert!(
+            text.contains("@internal/slack_attachments/F1_shot.png"),
+            "got: {text}"
+        );
+        assert_eq!(names, vec!["F1_shot.png".to_string()]);
+    }
+
+    #[test]
+    fn names_match_every_referenced_file() {
+        let (text, names) = build_text_with_images(
+            "two",
+            &[
+                PathBuf::from("/router/internal/slack_attachments/A one.png"),
+                PathBuf::from("/router/internal/slack_attachments/B.png"),
+            ],
+        );
+        // A file name with spaces cannot be parsed back out of the prompt, which is
+        // why the names are returned alongside rather than re-derived from it.
+        assert_eq!(names, vec!["A one.png".to_string(), "B.png".to_string()]);
+        for n in &names {
+            assert!(
+                text.contains(&format!("internal/slack_attachments/{n}")),
+                "got: {text}"
+            );
+        }
     }
 }

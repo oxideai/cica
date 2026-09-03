@@ -610,7 +610,8 @@ async fn handle_message_event(
     if let Some(query_text) =
         execute_action(&state.rt, channel.as_ref(), &user_id_str, action).await?
     {
-        let text_with_images = build_text_with_images(&query_text, &image_paths);
+        let (text_with_images, attachment_names) =
+            build_text_with_images(&query_text, &image_paths);
         let channel_clone = channel.clone();
         let user_id_clone = user_id_str.clone();
         let session_key_clone = session_key.clone();
@@ -625,6 +626,7 @@ async fn handle_message_event(
                     &user_id_clone,
                     messages,
                     session_key_clone,
+                    attachment_names,
                 )
                 .await;
             })
@@ -842,7 +844,7 @@ async fn handle_app_mention_event(
             current_msg
         )
     };
-    let text_with_images = build_text_with_images(&full_text, &image_paths);
+    let (text_with_images, attachment_names) = build_text_with_images(&full_text, &image_paths);
 
     // Debounce per user so rapid messages from one person batch, but session is shared.
     let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);
@@ -854,7 +856,15 @@ async fn handle_app_mention_event(
     state
         .task_manager
         .process_message(user_key, text_with_images, move |messages| async move {
-            execute_claude_query(rt, channel_clone, &user_id_clone, messages, session_key).await;
+            execute_claude_query(
+                rt,
+                channel_clone,
+                &user_id_clone,
+                messages,
+                session_key,
+                attachment_names,
+            )
+            .await;
         })
         .await;
 

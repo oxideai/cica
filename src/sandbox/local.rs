@@ -93,6 +93,7 @@ mod tests {
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: Some("claude-opus-4-6".into()),
+            attachments: Vec::new(),
         }
     }
 

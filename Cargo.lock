@@ -970,9 +970,6 @@ dependencies = [
  "directories",
  "fastembed",
  "flate2",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
  "jsonrpsee",
  "mime_guess",
  "regex-lite",
@@ -993,7 +990,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
- "zerocopy",
  "zip",
 ]
 

@@ -5,7 +5,7 @@ pub mod telegram;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
@@ -162,25 +162,18 @@ pub fn determine_action(
     })
 }
 
-/// Build a message combining text and image paths (@path syntax for Claude Code).
-/// Returns the prompt text plus the attachment file names it references.
-///
-/// Both come from here so they cannot drift: the job carries exactly the files
-/// the prompt mentions, and the worker hydrates exactly those.
-pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> (String, Vec<String>) {
+/// Returns the prompt text plus the attachment paths it references.
+pub fn build_text_with_images(
+    base: &Path,
+    text: &str,
+    image_paths: &[PathBuf],
+) -> (String, Vec<String>) {
     let mut result = text.to_string();
-    let mut names = Vec::new();
+    let mut attachments = Vec::new();
 
     for (i, path) in image_paths.iter().enumerate() {
-        // Reference the attachment by its workspace-relative path. An absolute
-        // path here is the router's, and the turn may run on a worker whose
-        // filesystem does not have it — which is how a shared screenshot used to
-        // come back as "I'm unable to access the screenshot file".
-        let rel = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(crate::sandbox::attachment_path);
-        if let Some(path_str) = rel.as_deref().or_else(|| path.to_str()) {
+        let relative = path.strip_prefix(base).ok().and_then(Path::to_str);
+        if let Some(path_str) = relative.or_else(|| path.to_str()) {
             if result.is_empty() {
                 result = format!("@{}", path_str);
             } else if i == 0 {
@@ -188,13 +181,30 @@ pub fn build_text_with_images(text: &str, image_paths: &[PathBuf]) -> (String, V
             } else {
                 result = format!("{} @{}", result, path_str);
             }
-            if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
-                names.push(n.to_string());
+            if let Some(relative) = relative {
+                attachments.push(relative.to_string());
             }
         }
     }
 
-    (result, names)
+    (result, attachments)
+}
+
+#[cfg(test)]
+pub(crate) fn assert_prompt_paths_resolve(
+    base: &Path,
+    (prompt, attachments): &(String, Vec<String>),
+) {
+    for path in attachments {
+        assert!(
+            base.join(path).is_file(),
+            "attachment path does not resolve to a file: {path}"
+        );
+        assert!(
+            prompt.contains(&format!("@{path}")),
+            "prompt does not reference attachment path: {path}"
+        );
+    }
 }
 
 /// Execute an action. Returns `Some(text)` for `QueryClaude` (caller handles with task manager).
@@ -1249,41 +1259,84 @@ mod attachment_tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "attachment path does not resolve to a file: missing.png")]
+    fn prompt_path_must_resolve_to_a_file() {
+        let base = tempfile::tempdir().unwrap();
+        let prompt = (
+            "look\n\n@missing.png".to_string(),
+            vec!["missing.png".to_string()],
+        );
+
+        assert_prompt_paths_resolve(base.path(), &prompt);
+    }
+
+    #[test]
     fn images_are_referenced_by_workspace_relative_path() {
+        let base = PathBuf::from("/home/ubuntu/.config/cica");
         let (text, names) = build_text_with_images(
+            &base,
             "what is wrong here?",
             &[PathBuf::from(
                 "/home/ubuntu/.config/cica/internal/slack_attachments/F1_shot.png",
             )],
         );
 
-        // The router's absolute path must not survive into the prompt: the turn may
-        // run on a worker whose filesystem has no such file.
         assert!(!text.contains("/home/ubuntu"), "got: {text}");
         assert!(
             text.contains("@internal/slack_attachments/F1_shot.png"),
             "got: {text}"
         );
-        assert_eq!(names, vec!["F1_shot.png".to_string()]);
+        assert_eq!(
+            names,
+            vec!["internal/slack_attachments/F1_shot.png".to_string()]
+        );
     }
 
     #[test]
     fn names_match_every_referenced_file() {
+        let base = PathBuf::from("/router");
         let (text, names) = build_text_with_images(
+            &base,
             "two",
             &[
                 PathBuf::from("/router/internal/slack_attachments/A one.png"),
                 PathBuf::from("/router/internal/slack_attachments/B.png"),
             ],
         );
-        // A file name with spaces cannot be parsed back out of the prompt, which is
-        // why the names are returned alongside rather than re-derived from it.
-        assert_eq!(names, vec!["A one.png".to_string(), "B.png".to_string()]);
-        for n in &names {
-            assert!(
-                text.contains(&format!("internal/slack_attachments/{n}")),
-                "got: {text}"
-            );
-        }
+        assert_eq!(
+            names,
+            vec![
+                "internal/slack_attachments/A one.png".to_string(),
+                "internal/slack_attachments/B.png".to_string()
+            ]
+        );
+        assert!(text.contains("@internal/slack_attachments/A one.png"));
+        assert!(text.contains("@internal/slack_attachments/B.png"));
+    }
+
+    #[test]
+    fn telegram_image_uses_its_workspace_relative_path() {
+        let base = PathBuf::from("/workspace");
+        let (text, attachments) = build_text_with_images(
+            &base,
+            "photo",
+            &[base.join("internal/telegram_attachments/x.jpg")],
+        );
+
+        assert!(text.contains("@internal/telegram_attachments/x.jpg"));
+        assert_eq!(
+            attachments,
+            vec!["internal/telegram_attachments/x.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn image_outside_workspace_stays_absolute_and_is_not_shipped() {
+        let base = PathBuf::from("/workspace");
+        let outside = PathBuf::from("/tmp/x.jpg");
+        let (text, attachments) = build_text_with_images(&base, "photo", &[outside]);
+
+        assert!(text.contains("@/tmp/x.jpg"));
+        assert!(attachments.is_empty());
     }
 }

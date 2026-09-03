@@ -47,11 +47,6 @@ impl<P: SandboxProvider> HydratingProvider<P> {
             .join("memories")
     }
 
-    /// Where the agent expects to find Slack attachments on this machine.
-    fn attachments_dir(&self) -> PathBuf {
-        self.cwd.join(crate::sandbox::ATTACHMENTS_SUBDIR)
-    }
-
     fn staging(&self) -> PathBuf {
         std::env::temp_dir().join(format!("cica-hydrate-{}", uuid::Uuid::new_v4()))
     }
@@ -71,24 +66,38 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
 
         // --- Hydrate ---
 
-        // Attachments are downloaded by the router onto its own disk, so on a
-        // remote worker they have to be fetched before the agent looks for them.
-        // Best-effort: a missing image should cost the agent that image, not the turn.
-        if !job.attachments.is_empty() {
-            let dest = self.attachments_dir();
-            if let Err(e) = std::fs::create_dir_all(&dest) {
-                warn!("failed to create {dest:?} for attachments: {e}");
-            } else {
-                for name in &job.attachments {
-                    match self.store.pull(&format!("attachments/{name}"), &dest).await {
-                        Ok(true) => {}
-                        Ok(false) => warn!(
-                            "attachment {name} is not in the store; the agent will not see it"
-                        ),
-                        Err(e) => warn!("failed to pull attachment {name}: {e}"),
+        for relative in &job.attachments {
+            let staging = self.staging();
+            match self
+                .store
+                .pull(&format!("attachments/{relative}"), &staging)
+                .await
+            {
+                Ok(true) => {
+                    let source = Path::new(relative)
+                        .file_name()
+                        .map(|file_name| staging.join(file_name));
+                    let dest = self.cwd.join(relative);
+                    let moved = source
+                        .ok_or_else(|| anyhow::anyhow!("attachment path has no file name"))
+                        .and_then(|source| {
+                            let parent = dest
+                                .parent()
+                                .ok_or_else(|| anyhow::anyhow!("attachment path has no parent"))?;
+                            std::fs::create_dir_all(parent)?;
+                            std::fs::copy(source, &dest)?;
+                            Ok(())
+                        });
+                    if let Err(e) = moved {
+                        warn!("failed to hydrate attachment {relative}: {e}");
                     }
                 }
+                Ok(false) => {
+                    warn!("attachment {relative} is not in the store; the agent will not see it")
+                }
+                Err(e) => warn!("failed to pull attachment {relative}: {e}"),
             }
+            let _ = std::fs::remove_dir_all(&staging);
         }
 
         if let Some(bid) = &job.resume_session {
@@ -292,6 +301,56 @@ mod tests {
         );
 
         assert!(hp.run_turn(job(Some("sess"))).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn two_attachments_both_hydrate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemStateStore::new(tmp.path().join("store")));
+        let cwd = tmp.path().join("cwd");
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        write(&first.path().join("one.jpg"), "one");
+        write(&second.path().join("two.png"), "two");
+        store
+            .push(
+                first.path(),
+                "attachments/internal/telegram_attachments/one.jpg",
+            )
+            .await
+            .unwrap();
+        store
+            .push(
+                second.path(),
+                "attachments/internal/signal-data/attachments/two.png",
+            )
+            .await
+            .unwrap();
+        let hp = HydratingProvider::new(
+            StubProvider {
+                session_id: String::new(),
+                seen: Mutex::new(None),
+            },
+            store,
+            tmp.path().join("claude"),
+            tmp.path().join("cursor"),
+            cwd.clone(),
+        );
+        let job = job(None).with_attachments(vec![
+            "internal/telegram_attachments/one.jpg".into(),
+            "internal/signal-data/attachments/two.png".into(),
+        ]);
+
+        hp.run_turn(job).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("internal/telegram_attachments/one.jpg")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("internal/signal-data/attachments/two.png")).unwrap(),
+            "two"
+        );
     }
 
     #[tokio::test]

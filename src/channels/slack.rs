@@ -611,7 +611,7 @@ async fn handle_message_event(
         execute_action(&state.rt, channel.as_ref(), &user_id_str, action).await?
     {
         let (text_with_images, attachment_names) =
-            build_text_with_images(&query_text, &image_paths);
+            build_text_with_images(&state.rt.paths.base, &query_text, &image_paths);
         let channel_clone = channel.clone();
         let user_id_clone = user_id_str.clone();
         let session_key_clone = session_key.clone();
@@ -844,7 +844,8 @@ async fn handle_app_mention_event(
             current_msg
         )
     };
-    let (text_with_images, attachment_names) = build_text_with_images(&full_text, &image_paths);
+    let (text_with_images, attachment_names) =
+        build_text_with_images(&state.rt.paths.base, &full_text, &image_paths);
 
     // Debounce per user so rapid messages from one person batch, but session is shared.
     let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);
@@ -947,8 +948,22 @@ async fn handle_command_events(
 
 #[cfg(test)]
 mod tests {
-    use super::thinking_status;
+    use super::{get_slack_attachments_dir, thinking_status};
+    use crate::channels::{assert_prompt_paths_resolve, build_text_with_images};
     use std::time::Duration;
+
+    #[test]
+    fn slack_download_location_resolves_in_the_prompt() {
+        let (_temp, paths) = crate::config::test_paths();
+        let attachment = get_slack_attachments_dir(&paths)
+            .unwrap()
+            .join("F1_shot.png");
+        std::fs::write(&attachment, "fixture").unwrap();
+
+        let prompt = build_text_with_images(&paths.base, "look", &[attachment]);
+
+        assert_prompt_paths_resolve(&paths.base, &prompt);
+    }
 
     #[test]
     fn shows_no_minutes_under_a_minute() {

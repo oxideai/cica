@@ -250,7 +250,7 @@ fn default_skills_refresh_secs() -> u64 {
 /// the `CICA_SKILLS_GIT_TOKEN` env var, never from config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// Git repository URL (required), e.g. https://github.com/root-global/ai-skills.
+    /// Git repository URL (required), e.g. https://github.com/your-org/ai-skills.
     pub repo: String,
     /// Branch, tag, or sha to check out.
     #[serde(default = "default_skills_ref", rename = "ref")]
@@ -793,12 +793,12 @@ mod tests {
         let toml = r#"
 backend = "claude"
 [skills]
-repo = "https://github.com/root-global/ai-skills"
+repo = "https://github.com/your-org/ai-skills"
 ref = "v2.0"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         let s = cfg.skills.expect("skills present");
-        assert_eq!(s.repo, "https://github.com/root-global/ai-skills");
+        assert_eq!(s.repo, "https://github.com/your-org/ai-skills");
         assert_eq!(s.git_ref, "v2.0");
         assert_eq!(s.refresh_secs, 600);
     }

@@ -585,7 +585,6 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
     }
 
     if let (Some(ch), Some(uid)) = (channel_id, user_id) {
-        // Memory guidance — personal vs. org-wide routing.
         lines.push("## Memories".to_string());
         lines.push(format!(
             "You have a per-user memory store at: {}",
@@ -600,13 +599,6 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
         ));
         lines.push("Ask first; don't save trivia.".to_string());
         lines.push(String::new());
-        lines.push("**Durable org-wide** facts do NOT go in personal memory — offer to capture them in the shared knowledge corpus via the `propose-knowledge` skill (a Draft PR others review) instead.".to_string());
-        lines.push(String::new());
-        lines.push("Decide by **who the fact is about**, not by how the request was worded and not by matching a list of topics. \"Store that for future queries\" and \"add it to your memory\" are just as often facts about the organisation as about the asker. The test: picture a *different* colleague asking the same question next month — if they would need the answer, it belongs in the corpus, whoever happened to mention it.".to_string());
-        lines.push(String::new());
-        lines.push("Read `propose-knowledge` before saving anything. It owns this decision, including the genuinely ambiguous case, where you ask rather than guess.".to_string());
-        lines.push(String::new());
-
         // Search for relevant memories if we have a user message
         if let Some(query) = user_message {
             match MemoryIndex::open(paths) {
@@ -646,58 +638,26 @@ IMPORTANT: Do not modify the `state` fields of jobs with `last_status: "Running"
 mod memory_guidance_tests {
     use super::*;
 
-    #[test]
-    fn guidance_emits_token_and_routing_rule() {
-        let (_temp, paths) = config::test_paths();
-        let prompt = build_context_prompt_for_user(
+    fn prompt_for(paths: &Paths) -> String {
+        build_context_prompt_for_user(
             &Config::default(),
-            &paths,
+            paths,
             Some("Telegram"),
             Some("telegram"),
             Some("1"),
             None,
         )
-        .expect("prompt builds");
-        // Emits the placeholder token, not a router-absolute path.
-        assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
-        // Routes durable org facts to propose-knowledge, not personal memory.
-        assert!(prompt.contains("propose-knowledge"));
-        // The routing test is who the fact is about, and the agent must read the
-        // skill that owns the decision rather than deciding from this summary.
-        assert!(prompt.contains("who the fact is about"));
-        assert!(prompt.contains("Read `propose-knowledge` before saving anything"));
+        .expect("prompt builds")
     }
 
-    /// A list of topics gets pattern-matched instead of reasoned about. This one
-    /// named four -- feature location, schema gotcha, domain term, repo-routing
-    /// rule -- and any org-wide fact resembling none of them fell through to the
-    /// asker's private memory, where no colleague can see it and no review
-    /// happens. Keep the guidance a test, not a taxonomy.
     #[test]
-    fn org_wide_routing_does_not_enumerate_topics() {
+    fn guidance_emits_token_and_says_nothing_about_a_shared_corpus() {
         let (_temp, paths) = config::test_paths();
-        let prompt = build_context_prompt_for_user(
-            &Config::default(),
-            &paths,
-            Some("Telegram"),
-            Some("telegram"),
-            Some("1"),
-            None,
-        )
-        .expect("prompt builds");
-
-        for topic in [
-            "where a feature lives",
-            "a data/schema gotcha",
-            "a domain term",
-            "a repo-routing rule",
-        ] {
-            assert!(
-                !prompt.contains(topic),
-                "org-wide routing enumerates {topic:?}; a fact that matches no listed \
-                 topic falls through to personal memory"
-            );
-        }
+        let prompt = prompt_for(&paths);
+        // Emits the placeholder token, not a router-absolute path.
+        assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
+        assert!(!prompt.contains("propose-knowledge"));
+        assert!(!prompt.contains("org-wide"));
     }
 
     #[test]

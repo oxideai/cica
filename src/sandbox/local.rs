@@ -65,8 +65,7 @@ pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
         backend_session_id: qr.session_id,
         cost_usd: qr.cost_usd,
         duration_ms: qr.duration_ms,
-        // Nothing to ship: a local run already wrote its files where the
-        // channel can read them.
+        // A local run writes files where the channel can already read them.
         produced_files: Vec::new(),
     }
 }

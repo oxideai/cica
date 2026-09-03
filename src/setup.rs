@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tracing::{info, warn};
 
-use crate::config;
+use crate::config::Paths;
 use crate::memory;
 
 // ============================================================================
@@ -78,26 +78,22 @@ fn bun_download_url() -> Result<String> {
 }
 
 /// Check if Bun is available (either system or bundled)
-pub fn find_bun() -> Option<PathBuf> {
+pub fn find_bun(paths: &Paths) -> Option<PathBuf> {
     if let Ok(path) = which::which("bun") {
         return Some(path);
     }
 
-    if let Ok(paths) = config::paths() {
-        let bundled = paths.bun_dir.join("bun");
-        if bundled.exists() {
-            return Some(bundled);
-        }
+    let bundled = paths.bun_dir.join("bun");
+    if bundled.exists() {
+        return Some(bundled);
     }
 
     None
 }
 
-pub async fn ensure_bun() -> Result<PathBuf> {
-    let paths = config::paths()?;
-
-    if find_bun().is_some() && !needs_update(&paths.bun_dir, BUN_VERSION) {
-        return find_bun().ok_or_else(|| anyhow!("Bun not found"));
+pub async fn ensure_bun(paths: &Paths) -> Result<PathBuf> {
+    if find_bun(paths).is_some() && !needs_update(&paths.bun_dir, BUN_VERSION) {
+        return find_bun(paths).ok_or_else(|| anyhow!("Bun not found"));
     }
 
     if needs_update(&paths.bun_dir, BUN_VERSION) {
@@ -151,21 +147,18 @@ async fn download_and_extract_bun(url: &str, dest_dir: &Path) -> Result<()> {
     bail!("Could not find bun binary in archive")
 }
 
-pub fn find_claude_code() -> Option<PathBuf> {
-    if let Ok(paths) = config::paths() {
-        let entry = paths
-            .claude_code_dir
-            .join("node_modules/@anthropic-ai/claude-code/cli.js");
-        if entry.exists() {
-            return Some(entry);
-        }
+pub fn find_claude_code(paths: &Paths) -> Option<PathBuf> {
+    let entry = paths
+        .claude_code_dir
+        .join("node_modules/@anthropic-ai/claude-code/cli.js");
+    if entry.exists() {
+        return Some(entry);
     }
 
     None
 }
 
-pub async fn ensure_claude_code() -> Result<PathBuf> {
-    let paths = config::paths()?;
+pub async fn ensure_claude_code(paths: &Paths) -> Result<PathBuf> {
     let req = VersionReq::parse(CLAUDE_CODE_VERSION).with_context(|| {
         format!(
             "Invalid Claude Code version requirement: {}",
@@ -173,7 +166,7 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
         )
     })?;
 
-    if let Some(entry) = find_claude_code() {
+    if let Some(entry) = find_claude_code(paths) {
         match installed_claude_code_version(&paths.claude_code_dir) {
             Some(installed) if req.matches(&installed) => {
                 let resolved = installed.to_string();
@@ -194,7 +187,7 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
 
     std::fs::create_dir_all(&paths.claude_code_dir)?;
 
-    let bun = find_bun().ok_or_else(|| anyhow!("Bun not found - run ensure_bun first"))?;
+    let bun = find_bun(paths).ok_or_else(|| anyhow!("Bun not found - run ensure_bun first"))?;
     let pkg = format!("@anthropic-ai/claude-code@{}", CLAUDE_CODE_VERSION);
 
     info!("Installing Claude Code {}...", CLAUDE_CODE_VERSION);
@@ -210,7 +203,8 @@ pub async fn ensure_claude_code() -> Result<PathBuf> {
         bail!("Failed to install Claude Code");
     }
 
-    let entry = find_claude_code().ok_or_else(|| anyhow!("Claude Code installation failed"))?;
+    let entry =
+        find_claude_code(paths).ok_or_else(|| anyhow!("Claude Code installation failed"))?;
 
     let resolved = read_claude_code_manifest_version(&paths.claude_code_dir)
         .ok_or_else(|| anyhow!("Could not read the installed Claude Code version"))?;
@@ -332,8 +326,7 @@ fn signal_cli_download_url() -> String {
 }
 
 /// Bundled only — we don't use system Java.
-pub fn find_java() -> Option<PathBuf> {
-    let paths = config::paths().ok()?;
+pub fn find_java(paths: &Paths) -> Option<PathBuf> {
     let entries = std::fs::read_dir(&paths.java_dir).ok()?;
 
     for entry in entries.flatten() {
@@ -353,11 +346,9 @@ pub fn find_java() -> Option<PathBuf> {
     None
 }
 
-pub async fn ensure_java() -> Result<PathBuf> {
-    let paths = config::paths()?;
-
-    if find_java().is_some() && !needs_update(&paths.java_dir, JAVA_VERSION) {
-        return find_java().ok_or_else(|| anyhow!("Java not found"));
+pub async fn ensure_java(paths: &Paths) -> Result<PathBuf> {
+    if find_java(paths).is_some() && !needs_update(&paths.java_dir, JAVA_VERSION) {
+        return find_java(paths).ok_or_else(|| anyhow!("Java not found"));
     }
 
     if needs_update(&paths.java_dir, JAVA_VERSION) {
@@ -371,24 +362,21 @@ pub async fn ensure_java() -> Result<PathBuf> {
     download_and_extract_tarball(url, &paths.java_dir).await?;
 
     write_installed_version(&paths.java_dir, JAVA_VERSION)?;
-    find_java()
+    find_java(paths)
         .ok_or_else(|| anyhow!("Java installation failed - binary not found after extraction"))
 }
 
-pub fn find_signal_cli() -> Option<PathBuf> {
-    if let Ok(paths) = config::paths() {
-        let direct = paths.signal_cli_dir.join("bin").join("signal-cli");
-        if direct.exists() {
-            return Some(direct);
-        }
+pub fn find_signal_cli(paths: &Paths) -> Option<PathBuf> {
+    let direct = paths.signal_cli_dir.join("bin").join("signal-cli");
+    if direct.exists() {
+        return Some(direct);
+    }
 
-        // Check for extracted directory structure (e.g., signal-cli-0.13.12/bin/signal-cli)
-        if let Ok(entries) = std::fs::read_dir(&paths.signal_cli_dir) {
-            for entry in entries.flatten() {
-                let cli_path = entry.path().join("bin").join("signal-cli");
-                if cli_path.exists() {
-                    return Some(cli_path);
-                }
+    if let Ok(entries) = std::fs::read_dir(&paths.signal_cli_dir) {
+        for entry in entries.flatten() {
+            let cli_path = entry.path().join("bin").join("signal-cli");
+            if cli_path.exists() {
+                return Some(cli_path);
             }
         }
     }
@@ -396,11 +384,10 @@ pub fn find_signal_cli() -> Option<PathBuf> {
     None
 }
 
-pub async fn ensure_signal_cli() -> Result<PathBuf> {
-    let paths = config::paths()?;
-
-    if find_signal_cli().is_some() && !needs_update(&paths.signal_cli_dir, SIGNAL_CLI_VERSION) {
-        return find_signal_cli().ok_or_else(|| anyhow!("signal-cli not found"));
+pub async fn ensure_signal_cli(paths: &Paths) -> Result<PathBuf> {
+    if find_signal_cli(paths).is_some() && !needs_update(&paths.signal_cli_dir, SIGNAL_CLI_VERSION)
+    {
+        return find_signal_cli(paths).ok_or_else(|| anyhow!("signal-cli not found"));
     }
 
     if needs_update(&paths.signal_cli_dir, SIGNAL_CLI_VERSION) {
@@ -414,7 +401,7 @@ pub async fn ensure_signal_cli() -> Result<PathBuf> {
     download_and_extract_tarball(&url, &paths.signal_cli_dir).await?;
 
     write_installed_version(&paths.signal_cli_dir, SIGNAL_CLI_VERSION)?;
-    find_signal_cli().ok_or_else(|| {
+    find_signal_cli(paths).ok_or_else(|| {
         anyhow!("signal-cli installation failed - binary not found after extraction")
     })
 }
@@ -447,12 +434,10 @@ async fn download_and_extract_tarball(url: &str, dest_dir: &Path) -> Result<()> 
 
 const CURSOR_CLI_VERSION: &str = "2026.01.28-fd13201";
 
-pub fn find_cursor_cli() -> Option<PathBuf> {
-    if let Ok(paths) = config::paths() {
-        let bundled = paths.cursor_cli_dir.join("cursor-agent");
-        if bundled.exists() {
-            return Some(bundled);
-        }
+pub fn find_cursor_cli(paths: &Paths) -> Option<PathBuf> {
+    let bundled = paths.cursor_cli_dir.join("cursor-agent");
+    if bundled.exists() {
+        return Some(bundled);
     }
 
     // Cursor installs as both "agent" and "cursor-agent"
@@ -466,11 +451,10 @@ pub fn find_cursor_cli() -> Option<PathBuf> {
     None
 }
 
-pub async fn ensure_cursor_cli() -> Result<PathBuf> {
-    let paths = config::paths()?;
-
-    if find_cursor_cli().is_some() && !needs_update(&paths.cursor_cli_dir, CURSOR_CLI_VERSION) {
-        return find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI not found"));
+pub async fn ensure_cursor_cli(paths: &Paths) -> Result<PathBuf> {
+    if find_cursor_cli(paths).is_some() && !needs_update(&paths.cursor_cli_dir, CURSOR_CLI_VERSION)
+    {
+        return find_cursor_cli(paths).ok_or_else(|| anyhow!("Cursor CLI not found"));
     }
 
     if needs_update(&paths.cursor_cli_dir, CURSOR_CLI_VERSION) {
@@ -484,7 +468,7 @@ pub async fn ensure_cursor_cli() -> Result<PathBuf> {
     download_cursor_cli(&paths.cursor_cli_dir).await?;
 
     write_installed_version(&paths.cursor_cli_dir, CURSOR_CLI_VERSION)?;
-    find_cursor_cli().ok_or_else(|| anyhow!("Cursor CLI installation failed"))
+    find_cursor_cli(paths).ok_or_else(|| anyhow!("Cursor CLI installation failed"))
 }
 
 async fn download_cursor_cli(dest_dir: &Path) -> Result<()> {
@@ -640,8 +624,8 @@ pub async fn validate_cursor_api_key(api_key: &str) -> Result<()> {
 // Embedding Model (for memory search)
 // ============================================================================
 
-pub fn ensure_embedding_model() -> Result<()> {
-    memory::ensure_model_downloaded()
+pub fn ensure_embedding_model(paths: &Paths) -> Result<()> {
+    memory::ensure_model_downloaded(paths)
 }
 
 // ============================================================================
@@ -649,32 +633,32 @@ pub fn ensure_embedding_model() -> Result<()> {
 // ============================================================================
 
 /// Ensure all dependencies for the active backend are installed and up to date.
-pub async fn ensure_deps(config: &crate::config::Config) -> Result<()> {
+pub async fn ensure_deps(config: &crate::config::Config, paths: &Paths) -> Result<()> {
     use crate::config::AiBackend;
 
     match config.backend {
         AiBackend::Claude => {
-            ensure_bun().await?;
-            ensure_claude_code().await?;
+            ensure_bun(paths).await?;
+            ensure_claude_code(paths).await?;
         }
         AiBackend::Cursor => {
-            ensure_bun().await?;
-            ensure_cursor_cli().await?;
+            ensure_bun(paths).await?;
+            ensure_cursor_cli(paths).await?;
         }
     }
 
     if config.channels.signal.is_some() {
-        ensure_java().await?;
-        ensure_signal_cli().await?;
+        ensure_java(paths).await?;
+        ensure_signal_cli(paths).await?;
     }
 
-    ensure_embedding_model()?;
+    ensure_embedding_model(paths)?;
     Ok(())
 }
 
 /// Run `bun install` for a skill directory if it has a package.json with
 /// dependencies but no node_modules. Called at runtime when skills are discovered.
-pub fn ensure_skill_deps(skill_dir: &Path) {
+pub fn ensure_skill_deps(bun: &Path, skill_dir: &Path) {
     let pkg_json = skill_dir.join("package.json");
     let node_modules = skill_dir.join("node_modules");
 
@@ -692,11 +676,6 @@ pub fn ensure_skill_deps(skill_dir: &Path) {
         return;
     }
 
-    let bun = match find_bun() {
-        Some(b) => b,
-        None => return,
-    };
-
     let skill_name = skill_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -704,7 +683,7 @@ pub fn ensure_skill_deps(skill_dir: &Path) {
 
     info!("Installing dependencies for skill: {}", skill_name);
 
-    match std::process::Command::new(&bun)
+    match std::process::Command::new(bun)
         .arg("install")
         .current_dir(skill_dir)
         .stdout(Stdio::null())

@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::backends::QueryResult;
-use crate::config::{self, Config};
+use crate::config::{ClaudeConfig, Paths};
 use crate::setup;
 
 pub const MODELS: &[(&str, &str)] = &[
@@ -54,13 +54,15 @@ fn is_missing_conversation(stderr: &str) -> bool {
     stderr.to_lowercase().contains("no conversation found")
 }
 
-pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<QueryResult> {
-    let config = Config::load()?;
-    let paths = config::paths()?;
-
-    let use_vertex = config.claude.use_vertex;
-    let vertex_project_id = config.claude.vertex_project_id.as_deref();
-    let credential = config.claude.api_key.as_deref();
+pub async fn query_with_options(
+    claude: &ClaudeConfig,
+    paths: &Paths,
+    prompt: &str,
+    options: QueryOptions,
+) -> Result<QueryResult> {
+    let use_vertex = claude.use_vertex;
+    let vertex_project_id = claude.vertex_project_id.as_deref();
+    let credential = claude.api_key.as_deref();
 
     if use_vertex {
         let project_id = vertex_project_id
@@ -73,10 +75,10 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
         })?;
     }
 
-    let bun = setup::find_bun()
+    let bun = setup::find_bun(paths)
         .ok_or_else(|| anyhow!("Bun not found. Run `cica init` to set up Claude."))?;
 
-    let claude_code = setup::find_claude_code()
+    let claude_code = setup::find_claude_code(paths)
         .ok_or_else(|| anyhow!("Claude Code not found. Run `cica init` to set up Claude."))?;
 
     match options.model.as_deref() {
@@ -131,14 +133,10 @@ pub async fn query_with_options(prompt: &str, options: QueryOptions) -> Result<Q
             );
             cmd.env(
                 "CLOUD_ML_REGION",
-                config
-                    .claude
-                    .vertex_region
-                    .as_deref()
-                    .unwrap_or("europe-west1"),
+                claude.vertex_region.as_deref().unwrap_or("europe-west1"),
             );
             // Long-lived auth: service account key file (recommended for servers; no gcloud expiry)
-            if let Some(ref cred_path) = config.claude.vertex_credentials_path {
+            if let Some(ref cred_path) = claude.vertex_credentials_path {
                 let path = std::path::Path::new(cred_path);
                 let abs = if path.is_relative() {
                     paths.base.join(cred_path)

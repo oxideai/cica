@@ -1,12 +1,13 @@
 //! Persistent storage for cron jobs.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config;
+use crate::config::Paths;
 
 use super::schedule::CronSchedule;
 
@@ -162,36 +163,38 @@ impl CronJob {
 /// Follows PairingStore pattern with JSON file persistence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CronStore {
+    #[serde(skip)]
+    path: PathBuf,
     /// All jobs indexed by ID.
     pub jobs: HashMap<JobId, CronJob>,
 }
 
 impl CronStore {
     /// Load cron store from disk.
-    pub fn load() -> Result<Self> {
-        let paths = config::paths()?;
+    pub fn load(paths: &Paths) -> Result<Self> {
         let path = paths.base.join("cron.json");
 
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                path,
+                ..Self::default()
+            });
         }
 
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read cron file: {:?}", path))?;
 
-        let store: Self = serde_json::from_str(&content)
+        let mut store: Self = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse cron file: {:?}", path))?;
+        store.path = path;
 
         Ok(store)
     }
 
     /// Save cron store to disk.
     pub fn save(&self) -> Result<()> {
-        let paths = config::paths()?;
-        let path = paths.base.join("cron.json");
-
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        std::fs::write(&self.path, content)?;
 
         Ok(())
     }

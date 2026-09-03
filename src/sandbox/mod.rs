@@ -17,7 +17,7 @@ pub use local::{LocalProcessProvider, query_result_from_turn};
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::config::{AiBackend, Config};
+use crate::config::{AiBackend, Config, Paths};
 
 /// A single agent turn to execute.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -54,25 +54,22 @@ pub trait SandboxProvider: Send + Sync {
 
 /// Build the configured provider. Errors when the configuration is invalid
 /// (e.g. `provider = subprocess` without a store).
-pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>> {
+pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn SandboxProvider>> {
     use crate::config::ProviderKind;
 
-    let store = state::default_store(config)?;
+    let store = state::default_store(config, paths)?;
 
     match config.deployment.provider.unwrap_or(ProviderKind::Local) {
         ProviderKind::Local => {
-            let local = LocalProcessProvider::new();
+            let local = LocalProcessProvider::new(config.clone(), paths.clone());
             match store {
-                Some(store) => {
-                    let paths = crate::config::paths()?;
-                    Ok(Box::new(hydrating::HydratingProvider::new(
-                        local,
-                        store,
-                        paths.claude_home,
-                        paths.cursor_home,
-                        paths.base,
-                    )))
-                }
+                Some(store) => Ok(Box::new(hydrating::HydratingProvider::new(
+                    local,
+                    store,
+                    paths.claude_home.clone(),
+                    paths.cursor_home.clone(),
+                    paths.base.clone(),
+                ))),
                 None => Ok(Box::new(local)),
             }
         }
@@ -90,17 +87,16 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
             let store = store.ok_or_else(|| {
                 anyhow::anyhow!("`provider = docker` requires [deployment].store to be set")
             })?;
-            let paths = crate::config::paths()?;
             let image = config
                 .deployment
                 .docker_image
                 .clone()
                 .unwrap_or_else(|| "cica-worker:latest".to_string());
-            let state_store_dir = state::resolved_state_path(config)?;
+            let state_store_dir = state::resolved_state_path(config, paths);
             let launcher = worker::DockerLauncher::new(
                 image,
-                paths.config_file,
-                paths.skills_dir,
+                paths.config_file.clone(),
+                paths.skills_dir.clone(),
                 state_store_dir,
             );
             Ok(Box::new(worker::LaunchedWorkerProvider::new(
@@ -138,12 +134,12 @@ pub fn try_default_provider(config: &Config) -> Result<Box<dyn SandboxProvider>>
 /// the router still starts (per the spec's "router-still-starts" choice).
 /// Note the trade-off: a misconfigured `provider = subprocess` (e.g. missing
 /// store) silently runs in-process instead of dispatching to a worker.
-pub fn default_provider(config: &Config) -> Box<dyn SandboxProvider> {
-    match try_default_provider(config) {
+pub fn default_provider(config: &Config, paths: &Paths) -> Box<dyn SandboxProvider> {
+    match try_default_provider(config, paths) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("invalid provider configuration ({e}); using in-process provider");
-            Box::new(LocalProcessProvider::new())
+            Box::new(LocalProcessProvider::new(config.clone(), paths.clone()))
         }
     }
 }
@@ -154,70 +150,78 @@ mod tests {
 
     #[test]
     fn default_provider_is_constructible() {
+        let (_temp, paths) = crate::config::test_paths();
         let cfg = Config::default();
-        let _p = default_provider(&cfg);
+        let _p = default_provider(&cfg, &paths);
     }
 
     #[test]
     fn subprocess_provider_requires_a_store() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Subprocess);
         // No store configured → must be an error, not a silent local fallback.
-        assert!(try_default_provider(&cfg).is_err());
+        assert!(try_default_provider(&cfg, &paths).is_err());
     }
 
     #[test]
     fn subprocess_provider_built_when_store_present() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind, StoreKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Subprocess);
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-prov-test".into());
-        assert!(try_default_provider(&cfg).is_ok());
+        assert!(try_default_provider(&cfg, &paths).is_ok());
     }
 
     #[test]
     fn docker_provider_requires_a_store() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Docker);
-        assert!(try_default_provider(&cfg).is_err());
+        assert!(try_default_provider(&cfg, &paths).is_err());
     }
 
     #[test]
     fn docker_provider_built_when_store_present() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind, StoreKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Docker);
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-docker-test".into());
-        assert!(try_default_provider(&cfg).is_ok());
+        assert!(try_default_provider(&cfg, &paths).is_ok());
     }
 
     #[cfg(not(feature = "fargate"))]
     #[test]
     fn fargate_provider_requires_feature() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind, StoreKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Fargate);
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-fargate-test".into());
         // Feature off → must error even though a store is present.
-        assert!(try_default_provider(&cfg).is_err());
+        assert!(try_default_provider(&cfg, &paths).is_err());
     }
 
     #[test]
     fn fargate_provider_requires_a_store() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, ProviderKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Fargate);
-        assert!(try_default_provider(&cfg).is_err());
+        assert!(try_default_provider(&cfg, &paths).is_err());
     }
 
     #[cfg(feature = "fargate")]
     #[test]
     fn fargate_provider_built_when_feature_and_store_and_section() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::{Config, FargateConfig, ProviderKind, StoreKind};
         let mut cfg = Config::default();
         cfg.deployment.provider = Some(ProviderKind::Fargate);
@@ -229,7 +233,7 @@ mod tests {
             ..Default::default()
         });
         // Lazy ECS client: building the provider does not connect.
-        assert!(try_default_provider(&cfg).is_ok());
+        assert!(try_default_provider(&cfg, &paths).is_ok());
     }
 
     #[test]

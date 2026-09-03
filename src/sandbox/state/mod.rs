@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 
-use crate::config::{Config, StoreKind};
+use crate::config::{Config, Paths, StoreKind};
 
 /// A durable store of directory trees, addressed by string keys.
 ///
@@ -33,19 +33,19 @@ pub trait StateStore: Send + Sync {
 /// The filesystem path of the state store: `[deployment].state_path` if set,
 /// else `internal/state-store`. Shared so the `FilesystemStateStore` and the
 /// Docker host-mount always agree on the same directory.
-pub fn resolved_state_path(config: &Config) -> Result<PathBuf> {
+pub fn resolved_state_path(config: &Config, paths: &Paths) -> PathBuf {
     match &config.deployment.state_path {
-        Some(p) => Ok(PathBuf::from(p)),
-        None => Ok(crate::config::paths()?.internal_dir.join("state-store")),
+        Some(p) => PathBuf::from(p),
+        None => paths.internal_dir.join("state-store"),
     }
 }
 
 /// Build the configured store, or `None` if deployment.store is unset.
-pub fn default_store(config: &Config) -> Result<Option<Arc<dyn StateStore>>> {
+pub fn default_store(config: &Config, paths: &Paths) -> Result<Option<Arc<dyn StateStore>>> {
     match config.deployment.store {
         None => Ok(None),
         Some(StoreKind::Filesystem) => Ok(Some(Arc::new(FilesystemStateStore::new(
-            resolved_state_path(config)?,
+            resolved_state_path(config, paths),
         )))),
         Some(StoreKind::S3) => {
             #[cfg(feature = "s3")]
@@ -156,29 +156,33 @@ mod tests {
 
     #[test]
     fn default_store_none_when_unconfigured() {
+        let (_temp, paths) = crate::config::test_paths();
         let cfg = Config::default();
-        assert!(default_store(&cfg).unwrap().is_none());
+        assert!(default_store(&cfg, &paths).unwrap().is_none());
     }
 
     #[test]
     fn default_store_some_for_filesystem() {
+        let (_temp, paths) = crate::config::test_paths();
         let mut cfg = Config::default();
         cfg.deployment.store = Some(StoreKind::Filesystem);
         cfg.deployment.state_path = Some("/tmp/cica-state-test".to_string());
-        assert!(default_store(&cfg).unwrap().is_some());
+        assert!(default_store(&cfg, &paths).unwrap().is_some());
     }
 
     #[cfg(not(feature = "s3"))]
     #[test]
     fn s3_store_requires_feature() {
+        let (_temp, paths) = crate::config::test_paths();
         let mut cfg = Config::default();
         cfg.deployment.store = Some(StoreKind::S3);
-        assert!(default_store(&cfg).is_err());
+        assert!(default_store(&cfg, &paths).is_err());
     }
 
     #[cfg(feature = "s3")]
     #[test]
     fn s3_store_built_lazily_when_feature_on() {
+        let (_temp, paths) = crate::config::test_paths();
         use crate::config::S3Config;
         let mut cfg = Config::default();
         cfg.deployment.store = Some(StoreKind::S3);
@@ -187,15 +191,16 @@ mod tests {
             ..Default::default()
         });
         // Lazy client: constructing the store does not connect, so this is Ok without AWS.
-        assert!(default_store(&cfg).unwrap().is_some());
+        assert!(default_store(&cfg, &paths).unwrap().is_some());
     }
 
     #[cfg(feature = "s3")]
     #[test]
     fn s3_store_without_section_errors() {
+        let (_temp, paths) = crate::config::test_paths();
         let mut cfg = Config::default();
         cfg.deployment.store = Some(StoreKind::S3);
         cfg.deployment.s3 = None;
-        assert!(default_store(&cfg).is_err());
+        assert!(default_store(&cfg, &paths).is_err());
     }
 }

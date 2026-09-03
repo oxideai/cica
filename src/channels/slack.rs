@@ -12,18 +12,18 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::{self, SlackConfig};
+use crate::config::{self, Paths, SlackConfig};
 use crate::pairing::PairingStore;
 use crate::skills;
 
-fn get_slack_attachments_dir() -> Result<PathBuf> {
-    let paths = config::paths()?;
+fn get_slack_attachments_dir(paths: &Paths) -> Result<PathBuf> {
     let dir = paths.internal_dir.join("slack_attachments");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
 async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBuf> {
+    let paths = config::paths()?;
     let url = file
         .url_private_download
         .as_ref()
@@ -33,7 +33,7 @@ async fn download_slack_file(file: &SlackFile, bot_token: &str) -> Result<PathBu
     let file_name = file.name.as_deref().unwrap_or("unknown");
     let file_id = &file.id;
 
-    let attachments_dir = get_slack_attachments_dir()?;
+    let attachments_dir = get_slack_attachments_dir(&paths)?;
     let local_path = attachments_dir.join(format!("{}_{}", file_id, file_name));
 
     if local_path.exists() {
@@ -72,6 +72,20 @@ async fn set_suggested_prompts(
     channel_id: &SlackChannelId,
     thread_ts: &SlackTs,
 ) {
+    let config = match config::Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!("Failed to load config: {}", error);
+            return;
+        }
+    };
+    let paths = match config::paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            warn!("Failed to resolve paths: {}", error);
+            return;
+        }
+    };
     let session = client.open_session(token);
 
     // Build prompts from available skills (up to 4, Slack's limit).
@@ -82,7 +96,10 @@ async fn set_suggested_prompts(
         "What can you help me with?".to_string(),
     ));
 
-    if let Ok(available_skills) = skills::discover_skills() {
+    if let Ok(available_skills) = skills::discover_skills(
+        &paths,
+        config::prep_skill_deps_locally(config.deployment.provider),
+    ) {
         for skill in available_skills.iter().take(3) {
             prompts.push(SlackAssistantPrompt::new(
                 skill.description.clone(),
@@ -483,6 +500,7 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     state: SlackUserState,
 ) -> Result<()> {
+    let paths = config::paths()?;
     if event.sender.bot_id.is_some() {
         return Ok(());
     }
@@ -590,7 +608,7 @@ async fn handle_message_event(
         None => format!("{}:{}", channel.name(), user_id),
     };
 
-    let mut store = PairingStore::load()?;
+    let mut store = PairingStore::load(&paths)?;
 
     let action = determine_action(
         channel.name(),
@@ -691,6 +709,8 @@ async fn handle_app_mention_event(
     client: Arc<SlackHyperClient>,
     state: SlackUserState,
 ) -> Result<()> {
+    let config = config::Config::load()?;
+    let paths = config::paths()?;
     let user_id = event.user.clone();
     let channel_id = event.channel.clone();
 
@@ -719,12 +739,10 @@ async fn handle_app_mention_event(
     );
 
     let user_id_str = user_id.to_string();
-    let mut store = PairingStore::load()?;
+    let mut store = PairingStore::load(&paths)?;
 
     if !store.is_approved("slack", &user_id_str) {
-        let settings = crate::config::Config::load()
-            .map(|c: crate::config::Config| c.channel_settings("slack"))
-            .unwrap_or_default();
+        let settings = config.channel_settings("slack");
 
         if !settings.auto_approve {
             send_ephemeral_message(
@@ -742,7 +760,9 @@ async fn handle_app_mention_event(
         store.auto_approve("slack", &user_id_str, username, display_name)?;
     }
 
-    let onboarding_complete = crate::onboarding::is_complete_for_user("slack", &user_id_str)?;
+    let settings = config.channel_settings("slack");
+    let onboarding_complete =
+        crate::onboarding::is_complete_for_user(&paths, &settings, "slack", &user_id_str)?;
     if !onboarding_complete {
         send_ephemeral_message(
             &client,

@@ -20,7 +20,7 @@ use super::{
     Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
-use crate::config::{self, SignalConfig};
+use crate::config::{self, Paths, SignalConfig};
 use crate::pairing::PairingStore;
 use crate::setup;
 
@@ -108,12 +108,12 @@ struct SignalDaemon {
 }
 
 impl SignalDaemon {
-    fn pid_file_path() -> Result<PathBuf> {
-        Ok(config::paths()?.signal_data_dir.join(PID_FILE_NAME))
+    fn pid_file_path(paths: &Paths) -> PathBuf {
+        paths.signal_data_dir.join(PID_FILE_NAME)
     }
 
-    fn check_existing() -> Option<u32> {
-        let pid_file = Self::pid_file_path().ok()?;
+    fn check_existing(paths: &Paths) -> Option<u32> {
+        let pid_file = Self::pid_file_path(paths);
         if !pid_file.exists() {
             return None;
         }
@@ -144,12 +144,11 @@ impl SignalDaemon {
         reqwest::get(&url).await.is_ok()
     }
 
-    async fn start(phone_number: &str) -> Result<Self> {
-        let paths = config::paths()?;
-        let pid_file = Self::pid_file_path()?;
+    async fn start(paths: &Paths, phone_number: &str) -> Result<Self> {
+        let pid_file = Self::pid_file_path(paths);
 
         // Check if daemon is already running
-        if let Some(pid) = Self::check_existing() {
+        if let Some(pid) = Self::check_existing(paths) {
             // Verify it's actually responding
             if Self::is_daemon_ready().await {
                 bail!(
@@ -169,8 +168,9 @@ impl SignalDaemon {
             }
         }
 
-        let java = setup::find_java().ok_or_else(|| anyhow!("Java not found. Run setup first."))?;
-        let signal_cli = setup::find_signal_cli()
+        let java =
+            setup::find_java(paths).ok_or_else(|| anyhow!("Java not found. Run setup first."))?;
+        let signal_cli = setup::find_signal_cli(paths)
             .ok_or_else(|| anyhow!("signal-cli not found. Run setup first."))?;
 
         let signal_cli_home = signal_cli
@@ -329,12 +329,13 @@ struct Attachment {
 }
 
 pub async fn run(config: SignalConfig) -> Result<()> {
+    let paths = config::paths()?;
     info!("Starting Signal bot for {}...", config.phone_number);
 
     let task_manager = UserTaskManager::new();
 
     loop {
-        let mut daemon = match SignalDaemon::start(&config.phone_number).await {
+        let mut daemon = match SignalDaemon::start(&paths, &config.phone_number).await {
             Ok(d) => d,
             Err(e) => {
                 error!("Failed to start signal-cli daemon: {:#}", e);
@@ -423,8 +424,7 @@ async fn receive_messages(client: &HttpClient) -> Result<Vec<SignalMessage>> {
     Ok(messages)
 }
 
-fn get_attachment_path(attachment_id: &str) -> Option<PathBuf> {
-    let paths = config::paths().ok()?;
+fn get_attachment_path(paths: &Paths, attachment_id: &str) -> Option<PathBuf> {
     let attachment_path = paths
         .signal_data_dir
         .join("attachments")
@@ -448,6 +448,7 @@ async fn handle_message(
     msg: SignalMessage,
     task_manager: Arc<UserTaskManager>,
 ) -> Result<()> {
+    let paths = config::paths()?;
     let envelope = match msg.envelope {
         Some(e) => e,
         None => return Ok(()),
@@ -480,7 +481,7 @@ async fn handle_message(
                 .map(|ct| is_image_content_type(ct))
                 .unwrap_or(false)
         })
-        .filter_map(|a| a.id.as_ref().and_then(|id| get_attachment_path(id)))
+        .filter_map(|a| a.id.as_ref().and_then(|id| get_attachment_path(&paths, id)))
         .collect();
 
     if text.is_empty() && image_paths.is_empty() {
@@ -500,7 +501,7 @@ async fn handle_message(
 
     let channel: Arc<dyn Channel> = Arc::new(SignalChannel::new(client, sender.clone()));
 
-    let mut store = PairingStore::load()?;
+    let mut store = PairingStore::load(&paths)?;
     let action = determine_action(
         channel.name(),
         &sender,
@@ -541,13 +542,14 @@ pub enum RegistrationResult {
 }
 
 pub async fn register_account(
+    paths: &Paths,
     phone_number: &str,
     captcha: Option<&str>,
     use_voice: bool,
 ) -> Result<RegistrationResult> {
-    let paths = config::paths()?;
-    let java = setup::find_java().ok_or_else(|| anyhow!("Java not found"))?;
-    let signal_cli = setup::find_signal_cli().ok_or_else(|| anyhow!("signal-cli not found"))?;
+    let java = setup::find_java(paths).ok_or_else(|| anyhow!("Java not found"))?;
+    let signal_cli =
+        setup::find_signal_cli(paths).ok_or_else(|| anyhow!("signal-cli not found"))?;
 
     std::fs::create_dir_all(&paths.signal_data_dir)?;
 
@@ -635,10 +637,10 @@ pub async fn register_account(
     bail!("Registration failed: {}", combined.trim());
 }
 
-pub async fn verify_account(phone_number: &str, code: &str) -> Result<()> {
-    let paths = config::paths()?;
-    let java = setup::find_java().ok_or_else(|| anyhow!("Java not found"))?;
-    let signal_cli = setup::find_signal_cli().ok_or_else(|| anyhow!("signal-cli not found"))?;
+pub async fn verify_account(paths: &Paths, phone_number: &str, code: &str) -> Result<()> {
+    let java = setup::find_java(paths).ok_or_else(|| anyhow!("Java not found"))?;
+    let signal_cli =
+        setup::find_signal_cli(paths).ok_or_else(|| anyhow!("signal-cli not found"))?;
 
     let java_home = java
         .parent()

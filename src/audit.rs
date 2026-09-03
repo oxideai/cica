@@ -6,14 +6,22 @@
 //! All public functions are fire-and-forget: failures are logged via `warn!`
 //! but never block message delivery.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rusqlite::Connection;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
-use crate::config::{self, Config};
-
 static DB: Mutex<Option<Connection>> = Mutex::new(None);
+struct Settings {
+    db_path: PathBuf,
+    enabled: bool,
+}
+static SETTINGS: OnceLock<Settings> = OnceLock::new();
+
+pub fn init(db_path: PathBuf, enabled: bool) {
+    let _ = SETTINGS.set(Settings { db_path, enabled });
+}
 
 fn with_db<F, R>(f: F) -> Result<R>
 where
@@ -31,13 +39,16 @@ where
 }
 
 fn open_db() -> Result<Connection> {
-    let path = config::paths()?.audit_db;
+    let path = &SETTINGS
+        .get()
+        .ok_or_else(|| anyhow!("audit not initialised"))?
+        .db_path;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let conn = Connection::open(&path)
+    let conn = Connection::open(path)
         .with_context(|| format!("Failed to open audit database: {:?}", path))?;
 
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -88,7 +99,7 @@ fn open_db() -> Result<Connection> {
 }
 
 fn is_enabled() -> bool {
-    Config::load().map(|c| c.audit).unwrap_or(true)
+    SETTINGS.get().is_some_and(|settings| settings.enabled)
 }
 
 /// Log a user↔assistant message exchange. Errors are swallowed.

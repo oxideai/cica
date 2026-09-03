@@ -8,6 +8,7 @@ use std::path::PathBuf;
 // ============================================================================
 
 /// All paths used by Cica
+#[derive(Debug, Clone)]
 pub struct Paths {
     pub base: PathBuf,
     pub config_file: PathBuf,
@@ -32,30 +33,34 @@ pub fn paths() -> Result<Paths> {
         .map(|dirs| dirs.config_dir().to_path_buf())
         .context("Could not determine config directory")?;
 
-    let internal_dir = base.join("internal");
-    let deps_dir = internal_dir.join("deps");
-
-    Ok(Paths {
-        config_file: base.join("config.toml"),
-        pairing_file: base.join("pairing.json"),
-        memory_dir: base.join("memory"),
-        skills_dir: base.join("skills"),
-        internal_dir: internal_dir.clone(),
-        deps_dir: deps_dir.clone(),
-        bun_dir: deps_dir.join("bun"),
-        java_dir: deps_dir.join("java"),
-        signal_cli_dir: deps_dir.join("signal-cli"),
-        claude_code_dir: deps_dir.join("claude-code"),
-        claude_home: internal_dir.join("claude-home"),
-        signal_data_dir: internal_dir.join("signal-data"),
-        cursor_cli_dir: deps_dir.join("cursor-cli"),
-        cursor_home: internal_dir.join("cursor-home"),
-        audit_db: base.join("audit.db"),
-        base,
-    })
+    Ok(Paths::for_base(base))
 }
 
 impl Paths {
+    pub fn for_base(base: PathBuf) -> Self {
+        let internal_dir = base.join("internal");
+        let deps_dir = internal_dir.join("deps");
+
+        Self {
+            config_file: base.join("config.toml"),
+            pairing_file: base.join("pairing.json"),
+            memory_dir: base.join("memory"),
+            skills_dir: base.join("skills"),
+            internal_dir: internal_dir.clone(),
+            deps_dir: deps_dir.clone(),
+            bun_dir: deps_dir.join("bun"),
+            java_dir: deps_dir.join("java"),
+            signal_cli_dir: deps_dir.join("signal-cli"),
+            claude_code_dir: deps_dir.join("claude-code"),
+            claude_home: internal_dir.join("claude-home"),
+            signal_data_dir: internal_dir.join("signal-data"),
+            cursor_cli_dir: deps_dir.join("cursor-cli"),
+            cursor_home: internal_dir.join("cursor-home"),
+            audit_db: base.join("audit.db"),
+            base,
+        }
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.base)?;
         std::fs::create_dir_all(&self.memory_dir)?;
@@ -96,6 +101,13 @@ Example: "I can't access your calendar directly, but we could create a calendar 
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_paths() -> (tempfile::TempDir, Paths) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = Paths::for_base(temp.path().to_path_buf());
+    (temp, paths)
 }
 
 fn default_true() -> bool {

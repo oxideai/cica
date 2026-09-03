@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, ffi::sqlite3_auto_extension};
 use std::ffi::c_char;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
 use tracing::{debug, info, warn};
 
-use crate::config;
+use crate::config::Paths;
 use crate::onboarding::user_dir;
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -30,11 +30,7 @@ fn ensure_sqlite_vec_init() {
 
 static EMBEDDING_MODEL: Mutex<Option<fastembed::TextEmbedding>> = Mutex::new(None);
 
-fn embedding_cache_dir() -> Result<PathBuf> {
-    Ok(config::paths()?.internal_dir.join("models"))
-}
-
-fn with_embedding_model<F, R>(f: F) -> Result<R>
+fn with_embedding_model<F, R>(cache_dir: &Path, f: F) -> Result<R>
 where
     F: FnOnce(&mut fastembed::TextEmbedding) -> Result<R>,
 {
@@ -43,11 +39,10 @@ where
         .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
     if guard.is_none() {
-        let cache_dir = embedding_cache_dir()?;
         info!("Loading embedding model...");
         let model = fastembed::TextEmbedding::try_new(
             fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
-                .with_cache_dir(cache_dir)
+                .with_cache_dir(cache_dir.to_path_buf())
                 .with_show_download_progress(false),
         )
         .context("Failed to initialize embedding model")?;
@@ -64,17 +59,13 @@ where
 pub const MEMORIES_DIR_TOKEN: &str = "{MEMORIES_DIR}";
 
 /// Get the memories directory for a user
-pub fn memories_dir(channel: &str, user_id: &str) -> Result<PathBuf> {
-    Ok(user_dir(channel, user_id)?.join("memories"))
+pub fn memories_dir(paths: &Paths, channel: &str, user_id: &str) -> PathBuf {
+    user_dir(paths, channel, user_id).join("memories")
 }
 
 /// Ensure the embedding model is downloaded (called during setup)
-pub fn ensure_model_downloaded() -> Result<()> {
-    with_embedding_model(|_| Ok(()))
-}
-
-fn memory_db_path() -> Result<PathBuf> {
-    Ok(config::paths()?.base.join("memory.db"))
+pub fn ensure_model_downloaded(paths: &Paths) -> Result<()> {
+    with_embedding_model(&paths.internal_dir.join("models"), |_| Ok(()))
 }
 
 /// Memory search result
@@ -88,14 +79,15 @@ pub struct MemorySearchResult {
 /// Memory index manager
 pub struct MemoryIndex {
     db: Connection,
+    paths: Paths,
 }
 
 impl MemoryIndex {
     /// Open or create the memory index database
-    pub fn open() -> Result<Self> {
+    pub fn open(paths: &Paths) -> Result<Self> {
         ensure_sqlite_vec_init();
 
-        let db_path = memory_db_path()?;
+        let db_path = paths.base.join("memory.db");
 
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -145,12 +137,15 @@ impl MemoryIndex {
             )?;
         }
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            paths: paths.clone(),
+        })
     }
 
     /// Index all memory files for a user
     pub fn index_user_memories(&mut self, channel: &str, user_id: &str) -> Result<()> {
-        let memories_path = memories_dir(channel, user_id)?;
+        let memories_path = memories_dir(&self.paths, channel, user_id);
 
         if !memories_path.exists() {
             debug!("No memories directory for {}:{}", channel, user_id);
@@ -240,11 +235,12 @@ impl MemoryIndex {
 
             let chunks = chunk_text(&content);
             let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-            let embeddings = with_embedding_model(|model| {
-                model
-                    .embed(chunk_texts.clone(), None)
-                    .context("Failed to generate embeddings")
-            })?;
+            let embeddings =
+                with_embedding_model(&self.paths.internal_dir.join("models"), |model| {
+                    model
+                        .embed(chunk_texts.clone(), None)
+                        .context("Failed to generate embeddings")
+                })?;
 
             for (i, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
                 self.db.execute(
@@ -275,7 +271,7 @@ impl MemoryIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        let query_bytes = with_embedding_model(|model| {
+        let query_bytes = with_embedding_model(&self.paths.internal_dir.join("models"), |model| {
             let embeddings = model
                 .embed(vec![query.to_string()], None)
                 .context("Failed to generate query embedding")?;

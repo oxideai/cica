@@ -5,7 +5,14 @@ use crate::channels;
 use crate::pairing::PairingStore;
 
 pub fn run(code: &str) -> Result<()> {
-    let mut store = PairingStore::load()?;
+    let paths = crate::config::paths()?;
+    crate::audit::init(
+        paths.audit_db.clone(),
+        crate::config::Config::load()
+            .map(|config| config.audit)
+            .unwrap_or(true),
+    );
+    let mut store = PairingStore::load(&paths)?;
 
     let request = store.approve(code)?;
 

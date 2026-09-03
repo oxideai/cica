@@ -76,22 +76,15 @@ pub struct TurnResult {
     pub backend_session_id: String,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<u64>,
-    /// File names the agent produced and named with an `[attachment:...]`
-    /// marker, relative to the turn's `out/` prefix in the store.
-    ///
-    /// A worker writes them inside a container the router cannot see, so they
-    /// travel through the store the same way inbound attachments do. Defaulted
-    /// so a result written by an older worker still deserializes.
+    /// Names of files the agent marked `[attachment:...]`, stored under the
+    /// turn's `out/` key. Defaulted so a result from an older worker still
+    /// deserializes.
     #[serde(default)]
     pub produced_files: Vec<String>,
 }
 
-/// Paths named by `[attachment:/path/to/file]` markers, in the order they
-/// appear, without checking whether any of them exist.
-///
-/// The check has to happen on whichever machine holds the file: the worker that
-/// wrote it, or the router after pulling it. Sharing the parser keeps those two
-/// readings of the same marker from drifting apart.
+/// Paths named by `[attachment:/path/to/file]` markers, in order, whether or
+/// not they exist on this machine.
 pub fn attachment_markers(text: &str) -> Vec<String> {
     const OPEN: &str = "[attachment:";
     let mut out = Vec::new();

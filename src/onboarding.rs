@@ -662,17 +662,10 @@ mod memory_guidance_tests {
         assert!(prompt.contains(crate::memory::MEMORIES_DIR_TOKEN));
         // Routes durable org facts to propose-knowledge, not personal memory.
         assert!(prompt.contains("propose-knowledge"));
-        // The routing test is who the fact is about, and the agent must read the
-        // skill that owns the decision rather than deciding from this summary.
         assert!(prompt.contains("who the fact is about"));
         assert!(prompt.contains("Read `propose-knowledge` before saving anything"));
     }
 
-    /// A list of topics gets pattern-matched instead of reasoned about. This one
-    /// named four -- feature location, schema gotcha, domain term, repo-routing
-    /// rule -- and any org-wide fact resembling none of them fell through to the
-    /// asker's private memory, where no colleague can see it and no review
-    /// happens. Keep the guidance a test, not a taxonomy.
     #[test]
     fn org_wide_routing_does_not_enumerate_topics() {
         let (_temp, paths) = config::test_paths();

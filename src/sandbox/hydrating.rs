@@ -140,13 +140,11 @@ mod tests {
 
     fn job(resume: Option<&str>) -> TurnJob {
         TurnJob {
-            session_id: "telegram:1".into(),
             channel: "telegram".into(),
             user_id: "1".into(),
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: resume.map(|s| s.to_string()),
-            cwd: None,
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,

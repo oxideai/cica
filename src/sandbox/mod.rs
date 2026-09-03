@@ -22,8 +22,6 @@ use crate::config::{AiBackend, Config, Paths};
 /// A single agent turn to execute.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnJob {
-    /// Logical cica session key (e.g. "telegram:123").
-    pub session_id: String,
     pub channel: String,
     pub user_id: String,
     /// The user/cron prompt to send to the agent.
@@ -32,10 +30,34 @@ pub struct TurnJob {
     pub system_prompt: Option<String>,
     /// Backend session id to resume, if any.
     pub resume_session: Option<String>,
-    pub cwd: Option<String>,
     pub skip_permissions: bool,
     pub backend: AiBackend,
+    /// Model alias or full id selected by the router.
     pub model: Option<String>,
+}
+
+impl TurnJob {
+    /// The router's turn contract: backend and model are decided here, from the router's
+    /// config, and the worker honours them regardless of its own environment.
+    pub fn new(
+        config: &Config,
+        channel: &str,
+        user_id: &str,
+        prompt: String,
+        system_prompt: Option<String>,
+        resume_session: Option<String>,
+    ) -> Self {
+        Self {
+            channel: channel.to_string(),
+            user_id: user_id.to_string(),
+            prompt,
+            system_prompt,
+            resume_session,
+            skip_permissions: true,
+            backend: config.backend,
+            model: config.model_for(config.backend),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -217,20 +239,18 @@ mod tests {
     #[test]
     fn turn_job_and_result_round_trip_json() {
         let job = TurnJob {
-            session_id: "telegram:1".into(),
             channel: "telegram".into(),
             user_id: "1".into(),
             prompt: "hi".into(),
             system_prompt: Some("ctx".into()),
             resume_session: Some("sess-1".into()),
-            cwd: None,
             skip_permissions: true,
             backend: crate::config::AiBackend::Claude,
             model: None,
         };
         let json = serde_json::to_string(&job).unwrap();
         let back: TurnJob = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.session_id, "telegram:1");
+        assert_eq!(back.channel, "telegram");
         assert_eq!(back.resume_session.as_deref(), Some("sess-1"));
 
         let result = TurnResult {
@@ -242,5 +262,37 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let back: TurnResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.backend_session_id, "sess-2");
+    }
+
+    #[test]
+    fn new_job_takes_backend_and_model_from_config() {
+        let mut cfg = Config {
+            backend: AiBackend::Claude,
+            ..Default::default()
+        };
+        cfg.claude.model = Some("opus".into());
+        cfg.cursor.model = Some("auto".into());
+        let job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        assert_eq!(job.backend, AiBackend::Claude);
+        assert_eq!(job.model.as_deref(), Some("opus"));
+        assert!(job.skip_permissions);
+
+        cfg.backend = AiBackend::Cursor;
+        let job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        assert_eq!(job.backend, AiBackend::Cursor);
+        assert_eq!(job.model.as_deref(), Some("auto"));
+        assert!(job.skip_permissions);
+    }
+
+    #[test]
+    fn turn_job_ignores_fields_an_older_router_sends() {
+        let json = r#"{
+            "session_id":"telegram:1","channel":"telegram","user_id":"1",
+            "prompt":"hi","system_prompt":null,"resume_session":"sess-1",
+            "cwd":"/tmp/work","skip_permissions":true,"backend":"claude","model":null
+        }"#;
+        let job: TurnJob = serde_json::from_str(json).unwrap();
+        assert_eq!(job.channel, "telegram");
+        assert_eq!(job.resume_session.as_deref(), Some("sess-1"));
     }
 }

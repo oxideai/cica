@@ -11,8 +11,9 @@ use crate::config::{AiBackend, Config, Paths};
 pub struct QueryOptions {
     pub system_prompt: Option<String>,
     pub resume_session: Option<String>,
-    pub cwd: Option<String>,
     pub skip_permissions: bool,
+    /// Alias or full id. `None` = the backend CLI's own default.
+    pub model: Option<String>,
 }
 
 /// Result returned by all AI backends.
@@ -38,10 +39,11 @@ fn fake_result(prompt: &str) -> QueryResult {
 }
 
 pub async fn query_with_options(
+    backend: AiBackend,
     config: &Config,
     paths: &Paths,
     prompt: &str,
-    options: QueryOptions,
+    mut options: QueryOptions,
 ) -> Result<QueryResult> {
     // Test hook: a deterministic response without invoking the real backend CLI.
     // Inert unless `CICA_FAKE_BACKEND` is set (used only by the Docker CI test).
@@ -49,44 +51,23 @@ pub async fn query_with_options(
         return Ok(fake_result(prompt));
     }
 
-    match config.backend {
-        AiBackend::Claude => query_claude(config, paths, prompt, options).await,
-        AiBackend::Cursor => query_cursor(config, paths, prompt, options).await,
+    options.model = effective_model(options.model, backend, config);
+    match backend {
+        AiBackend::Claude => {
+            claude::query_with_options(&config.claude, paths, prompt, options).await
+        }
+        AiBackend::Cursor => {
+            cursor::query_with_options(&config.cursor, paths, prompt, options).await
+        }
     }
 }
 
-async fn query_claude(
+fn effective_model(
+    requested: Option<String>,
+    backend: AiBackend,
     config: &Config,
-    paths: &Paths,
-    prompt: &str,
-    options: QueryOptions,
-) -> Result<QueryResult> {
-    let claude_options = claude::QueryOptions {
-        system_prompt: options.system_prompt,
-        resume_session: options.resume_session,
-        cwd: options.cwd,
-        skip_permissions: options.skip_permissions,
-        model: config.claude.model.clone(),
-    };
-
-    claude::query_with_options(&config.claude, paths, prompt, claude_options).await
-}
-
-async fn query_cursor(
-    config: &Config,
-    paths: &Paths,
-    prompt: &str,
-    options: QueryOptions,
-) -> Result<QueryResult> {
-    let cursor_options = cursor::QueryOptions {
-        context: options.system_prompt,
-        resume_session: options.resume_session,
-        cwd: options.cwd,
-        force: options.skip_permissions,
-        model: config.cursor.model.clone(),
-    };
-
-    cursor::query_with_options(&config.cursor, paths, prompt, cursor_options).await
+) -> Option<String> {
+    requested.or_else(|| config.model_for(backend))
 }
 
 #[cfg(test)]
@@ -99,5 +80,34 @@ mod tests {
         assert_eq!(r.response, "fake-response: ping");
         assert_eq!(r.session_id, "");
         assert_eq!(r.cost_usd, None);
+    }
+
+    #[test]
+    fn effective_model_prefers_the_job() {
+        let mut cfg = Config::default();
+        cfg.claude.model = Some("configured".into());
+        assert_eq!(
+            effective_model(Some("requested".into()), AiBackend::Claude, &cfg).as_deref(),
+            Some("requested")
+        );
+    }
+
+    #[test]
+    fn effective_model_falls_back_per_backend() {
+        let mut cfg = Config::default();
+        cfg.claude.model = Some("claude-model".into());
+        cfg.cursor.model = Some("cursor-model".into());
+        assert_eq!(
+            effective_model(None, AiBackend::Claude, &cfg).as_deref(),
+            Some("claude-model")
+        );
+        assert_eq!(
+            effective_model(None, AiBackend::Cursor, &cfg).as_deref(),
+            Some("cursor-model")
+        );
+        cfg.claude.model = None;
+        cfg.cursor.model = None;
+        assert_eq!(effective_model(None, AiBackend::Claude, &cfg), None);
+        assert_eq!(effective_model(None, AiBackend::Cursor, &cfg), None);
     }
 }

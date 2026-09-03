@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,6 +21,9 @@ use uuid::Uuid;
 use crate::atomic::Staging;
 use crate::config::S3Config;
 use crate::sandbox::state::StateStore;
+
+// Give concurrent pushes time to finish publishing their generation.
+const PRUNE_MIN_AGE: Duration = Duration::from_secs(3600);
 
 #[derive(Deserialize, Serialize)]
 struct Manifest {
@@ -179,11 +183,7 @@ impl StateStore for S3StateStore {
             .send()
             .await
             .context("s3 put current")?;
-        let generation_prefix = format!("{prefix}gen/{generation}/");
-        if let Err(error) = delete_prefix(client, bucket, &prefix, |object| {
-            object == current || object.starts_with(&generation_prefix)
-        })
-        .await
+        if let Err(error) = prune_generations(client, bucket, &prefix, &current, &generation).await
         {
             warn!("failed to prune old S3 state under {prefix}: {error}");
         }
@@ -203,6 +203,18 @@ impl StateStore for S3StateStore {
 }
 
 async fn list_keys(client: &aws_sdk_s3::Client, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+    Ok(list_objects(client, bucket, prefix)
+        .await?
+        .into_iter()
+        .filter_map(|object| object.key)
+        .collect())
+}
+
+async fn list_objects(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Vec<aws_sdk_s3::types::Object>> {
     let mut keys = Vec::new();
     let mut token = None;
     loop {
@@ -211,12 +223,7 @@ async fn list_keys(client: &aws_sdk_s3::Client, bucket: &str, prefix: &str) -> R
             request = request.continuation_token(value);
         }
         let response = request.send().await.context("s3 list_objects_v2")?;
-        keys.extend(
-            response
-                .contents()
-                .iter()
-                .filter_map(|object| object.key().map(str::to_string)),
-        );
+        keys.extend(response.contents().iter().cloned());
         if response.is_truncated().unwrap_or(false) {
             token = Some(
                 response
@@ -229,6 +236,131 @@ async fn list_keys(client: &aws_sdk_s3::Client, bucket: &str, prefix: &str) -> R
         }
     }
     Ok(keys)
+}
+
+fn generation_id<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
+    let rel = key.strip_prefix(prefix)?.strip_prefix("gen/")?;
+    let (generation, file) = rel.split_once('/')?;
+    (!generation.is_empty() && !file.is_empty()).then_some(generation)
+}
+
+fn prunable<'a, S: AsRef<str>>(
+    generations: &'a [(S, Option<SystemTime>)],
+    own: &str,
+    protected: &str,
+    now: SystemTime,
+    min_age: Duration,
+) -> Vec<&'a str> {
+    generations
+        .iter()
+        .filter_map(|(id, newest)| {
+            let id = id.as_ref();
+            (id != own
+                && id != protected
+                && newest.is_some_and(|modified| {
+                    now.duration_since(modified).is_ok_and(|age| age > min_age)
+                }))
+            .then_some(id)
+        })
+        .collect()
+}
+
+async fn prune_generations(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+    current: &str,
+    own: &str,
+) -> Result<()> {
+    let objects = list_objects(client, bucket, prefix).await?;
+    let mut generations = std::collections::HashMap::new();
+    for object in &objects {
+        let Some(key) = object.key() else {
+            continue;
+        };
+        let Some(id) = generation_id(key, prefix) else {
+            continue;
+        };
+        let modified = object
+            .last_modified()
+            .cloned()
+            .and_then(|value| SystemTime::try_from(value).ok());
+        generations
+            .entry(id.to_string())
+            .and_modify(|newest: &mut Option<SystemTime>| {
+                *newest = match (*newest, modified) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    _ => None,
+                };
+            })
+            .or_insert(modified);
+    }
+    let generations = generations.into_iter().collect::<Vec<_>>();
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key(current)
+        .send()
+        .await
+        .context("s3 re-read current before prune")?;
+    let manifest: Manifest = serde_json::from_slice(
+        &response
+            .body
+            .collect()
+            .await
+            .context("s3 current body collect before prune")?
+            .into_bytes(),
+    )
+    .context("parsing s3 current before prune")?;
+    let prunable = prunable(
+        &generations,
+        own,
+        &manifest.generation,
+        SystemTime::now(),
+        PRUNE_MIN_AGE,
+    );
+    let keys = objects
+        .into_iter()
+        .filter_map(|object| object.key)
+        .filter(|key| {
+            if key == current {
+                return false;
+            }
+            generation_id(key, prefix).is_none_or(|id| prunable.contains(&id))
+        })
+        .collect::<Vec<_>>();
+    delete_keys(client, bucket, &keys).await
+}
+
+async fn delete_keys(client: &aws_sdk_s3::Client, bucket: &str, keys: &[String]) -> Result<()> {
+    for chunk in keys.chunks(1000) {
+        let ids = chunk
+            .iter()
+            .map(|key| ObjectIdentifier::builder().key(key).build())
+            .collect::<Result<Vec<_>, _>>()
+            .context("building delete identifiers")?;
+        if ids.is_empty() {
+            continue;
+        }
+        let delete = Delete::builder()
+            .set_objects(Some(ids))
+            .build()
+            .context("building delete request")?;
+        let response = client
+            .delete_objects()
+            .bucket(bucket)
+            .delete(delete)
+            .send()
+            .await
+            .context("s3 delete_objects")?;
+        if !response.errors().is_empty() {
+            anyhow::bail!(
+                "s3 delete_objects partial failure: {} error(s)",
+                response.errors().len()
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn download_file(
@@ -263,35 +395,12 @@ async fn delete_prefix(
     prefix: &str,
     keep: impl Fn(&str) -> bool,
 ) -> Result<()> {
-    for chunk in list_keys(client, bucket, prefix).await?.chunks(1000) {
-        let ids = chunk
-            .iter()
-            .filter(|key| !keep(key))
-            .map(|key| ObjectIdentifier::builder().key(key).build())
-            .collect::<Result<Vec<_>, _>>()
-            .context("building delete identifiers")?;
-        if ids.is_empty() {
-            continue;
-        }
-        let delete = Delete::builder()
-            .set_objects(Some(ids))
-            .build()
-            .context("building delete request")?;
-        let response = client
-            .delete_objects()
-            .bucket(bucket)
-            .delete(delete)
-            .send()
-            .await
-            .context("s3 delete_objects")?;
-        if !response.errors().is_empty() {
-            anyhow::bail!(
-                "s3 delete_objects partial failure: {} error(s)",
-                response.errors().len()
-            );
-        }
-    }
-    Ok(())
+    let keys = list_keys(client, bucket, prefix)
+        .await?
+        .into_iter()
+        .filter(|key| !keep(key))
+        .collect::<Vec<_>>();
+    delete_keys(client, bucket, &keys).await
 }
 
 /// Threshold/part size for switching to multipart, mirroring the AWS CLI default.
@@ -602,6 +711,70 @@ mod it_tests {
     }
 
     #[tokio::test]
+    async fn concurrent_push_never_deletes_the_live_generation() {
+        let Some(cfg) = it_config() else {
+            return;
+        };
+        let store = S3StateStore::new(cfg);
+        let key = format!("concurrent/{}", Uuid::new_v4());
+        let first = tempfile::tempdir().unwrap();
+        write(&first.path().join("first.txt"), "first");
+        store.push(first.path(), &key).await.unwrap();
+
+        let client = store.client().await.unwrap();
+        let prefix = dir_prefix(&store.prefix, &key);
+        let second_generation = Uuid::new_v4().to_string();
+        let second_files = ["a.txt", "sub/b.txt"];
+        for (rel, contents) in [(second_files[0], "a"), (second_files[1], "b")] {
+            client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(format!("{prefix}gen/{second_generation}/{rel}"))
+                .body(ByteStream::from(contents.as_bytes().to_vec()))
+                .send()
+                .await
+                .unwrap();
+        }
+        let current = format!("{prefix}current");
+        client
+            .put_object()
+            .bucket(&store.config.bucket)
+            .key(&current)
+            .body(ByteStream::from(
+                serde_json::to_vec(&Manifest {
+                    generation: second_generation.clone(),
+                    files: second_files
+                        .iter()
+                        .map(|file| (*file).to_string())
+                        .collect(),
+                })
+                .unwrap(),
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        let third = tempfile::tempdir().unwrap();
+        write(&third.path().join("third.txt"), "third");
+        store.push(third.path(), &key).await.unwrap();
+
+        let keys = list_keys(client, &store.config.bucket, &prefix)
+            .await
+            .unwrap();
+        for rel in second_files {
+            assert!(keys.contains(&format!("{prefix}gen/{second_generation}/{rel}")));
+        }
+        let dest = tempfile::tempdir().unwrap();
+        assert!(store.pull(&key, dest.path()).await.unwrap());
+        assert_eq!(
+            fs::read_to_string(dest.path().join("third.txt")).unwrap(),
+            "third"
+        );
+        assert!(!dest.path().join("a.txt").exists());
+        store.delete(&key).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn s3_multipart_round_trip_large_file() {
         let Some(cfg) = it_config() else {
             return;
@@ -622,7 +795,32 @@ mod it_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
     use super::*;
+
+    #[test]
+    fn prunable_keeps_own_protected_young_and_unknown_generations() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let generations = [
+            ("own", Some(now - Duration::from_secs(7_200))),
+            ("protected", Some(now - Duration::from_secs(7_200))),
+            ("young", Some(now - Duration::from_secs(3_599))),
+            ("unknown", None),
+            ("old", Some(now - Duration::from_secs(3_601))),
+        ];
+
+        assert_eq!(
+            prunable(
+                &generations,
+                "own",
+                "protected",
+                now,
+                Duration::from_secs(3_600),
+            ),
+            vec!["old"]
+        );
+    }
 
     #[test]
     fn object_key_joins_and_skips_empty_prefix() {

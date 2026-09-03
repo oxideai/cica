@@ -2,6 +2,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -65,11 +66,20 @@ pub async fn query_with_options(
         })?;
     }
 
-    let bun = setup::find_bun(paths)
-        .ok_or_else(|| anyhow!("Bun not found. Run `cica init` to set up Claude."))?;
-
     let claude_code = setup::find_claude_code(paths)
         .ok_or_else(|| anyhow!("Claude Code not found. Run `cica init` to set up Claude."))?;
+
+    // A native binary is executed directly. Only the legacy script entry needs
+    // bun, so a missing bun is only fatal in that case -- it is not a reason to
+    // refuse a turn an installed native binary could serve.
+    let (program, prefix_args): (PathBuf, Vec<PathBuf>) = match &claude_code {
+        setup::ClaudeCode::Native(exe) => (exe.clone(), Vec::new()),
+        setup::ClaudeCode::Script(js) => {
+            let bun = setup::find_bun(paths)
+                .ok_or_else(|| anyhow!("Bun not found. Run `cica init` to set up Claude."))?;
+            (bun, vec![PathBuf::from("run"), js.clone()])
+        }
+    };
 
     match options.model.as_deref() {
         Some(model) => info!("Claude model requested: {}", model),
@@ -77,13 +87,11 @@ pub async fn query_with_options(
     }
 
     info!("Querying Claude: {}", prompt);
-    debug!("Using bun: {:?}", bun);
     debug!("Using claude_code: {:?}", claude_code);
 
     let build_command = |resume_session: Option<&str>| {
-        let mut cmd = Command::new(&bun);
-        cmd.arg("run")
-            .arg(&claude_code)
+        let mut cmd = Command::new(&program);
+        cmd.args(&prefix_args)
             .args(["-p", "--output-format", "json"])
             .env("HOME", &paths.claude_home);
 

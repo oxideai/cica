@@ -47,6 +47,11 @@ impl<P: SandboxProvider> HydratingProvider<P> {
             .join("memories")
     }
 
+    /// Where the agent expects to find Slack attachments on this machine.
+    fn attachments_dir(&self) -> PathBuf {
+        self.cwd.join(crate::sandbox::ATTACHMENTS_SUBDIR)
+    }
+
     fn staging(&self) -> PathBuf {
         std::env::temp_dir().join(format!("cica-hydrate-{}", uuid::Uuid::new_v4()))
     }
@@ -65,6 +70,27 @@ impl<P: SandboxProvider> SandboxProvider for HydratingProvider<P> {
         };
 
         // --- Hydrate ---
+
+        // Attachments are downloaded by the router onto its own disk, so on a
+        // remote worker they have to be fetched before the agent looks for them.
+        // Best-effort: a missing image should cost the agent that image, not the turn.
+        if !job.attachments.is_empty() {
+            let dest = self.attachments_dir();
+            if let Err(e) = std::fs::create_dir_all(&dest) {
+                warn!("failed to create {dest:?} for attachments: {e}");
+            } else {
+                for name in &job.attachments {
+                    match self.store.pull(&format!("attachments/{name}"), &dest).await {
+                        Ok(true) => {}
+                        Ok(false) => warn!(
+                            "attachment {name} is not in the store; the agent will not see it"
+                        ),
+                        Err(e) => warn!("failed to pull attachment {name}: {e}"),
+                    }
+                }
+            }
+        }
+
         if let Some(bid) = &job.resume_session {
             let staging = self.staging();
             match self.store.pull(&format!("session/{bid}"), &staging).await {
@@ -164,6 +190,7 @@ mod tests {
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,
+            attachments: Vec::new(),
         }
     }
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::sandbox::state::StateStore;
@@ -24,6 +25,12 @@ fn turn_prefix(turn_id: &str) -> String {
     format!("turns/{turn_id}")
 }
 
+/// Attachments are shared per file name, not per turn: the same image referenced
+/// twice is uploaded once, and a resumed thread can still reach an earlier one.
+fn attachment_key(name: &str) -> String {
+    format!("attachments/{name}")
+}
+
 fn scratch_dir(turn_id: &str, kind: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "cica-turn-{turn_id}-{kind}-{}",
@@ -38,6 +45,31 @@ async fn push_job(store: &dyn StateStore, turn_id: &str, job: &TurnJob) -> Resul
     store.push(&dir, &job_key(turn_id)).await?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// Copy the turn's attachments into the store so a worker elsewhere can read them.
+///
+/// Best-effort, like session hydration: a missing or unreadable attachment costs
+/// the agent one image, and is not worth failing the whole turn over. It is
+/// warned about so the cause is visible rather than showing up as the agent
+/// saying it cannot see a screenshot.
+async fn push_attachments(store: &dyn StateStore, source_dir: &std::path::Path, job: &TurnJob) {
+    for name in &job.attachments {
+        let src = source_dir.join(name);
+        if !src.is_file() {
+            warn!("attachment {name} not found at {src:?}; the worker will not see it");
+            continue;
+        }
+        let staging = std::env::temp_dir().join(format!("cica-attach-{}", Uuid::new_v4()));
+        let copied = std::fs::create_dir_all(&staging)
+            .and_then(|_| std::fs::copy(&src, staging.join(name)).map(|_| ()));
+        if let Err(e) = copied {
+            warn!("failed to stage attachment {name}: {e}");
+        } else if let Err(e) = store.push(&staging, &attachment_key(name)).await {
+            warn!("failed to push attachment {name} to the store: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+    }
 }
 
 async fn pull_job(store: &dyn StateStore, turn_id: &str) -> Result<TurnJob> {
@@ -104,11 +136,21 @@ pub trait Launcher: Send + Sync {
 pub struct LaunchedWorkerProvider {
     store: Arc<dyn StateStore>,
     launcher: Box<dyn Launcher>,
+    /// Where this machine keeps downloaded Slack attachments.
+    attachments_dir: PathBuf,
 }
 
 impl LaunchedWorkerProvider {
-    pub fn new(store: Arc<dyn StateStore>, launcher: Box<dyn Launcher>) -> Self {
-        Self { store, launcher }
+    pub fn new(
+        store: Arc<dyn StateStore>,
+        launcher: Box<dyn Launcher>,
+        attachments_dir: PathBuf,
+    ) -> Self {
+        Self {
+            store,
+            launcher,
+            attachments_dir,
+        }
     }
 }
 
@@ -117,6 +159,7 @@ impl SandboxProvider for LaunchedWorkerProvider {
     async fn run_turn(&self, job: TurnJob) -> Result<TurnResult> {
         let turn_id = Uuid::new_v4().to_string();
 
+        push_attachments(self.store.as_ref(), &self.attachments_dir, &job).await;
         push_job(self.store.as_ref(), &turn_id, &job).await?;
 
         if let Err(e) = self.launcher.launch(&turn_id).await {
@@ -287,6 +330,7 @@ mod tests {
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -354,6 +398,7 @@ mod tests {
             Box::new(FakeLauncher {
                 store: store.clone(),
             }),
+            std::env::temp_dir().join("cica-test-attachments"),
         );
         let job = TurnJob {
             channel: "telegram".into(),
@@ -364,6 +409,7 @@ mod tests {
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,
+            attachments: Vec::new(),
         };
         let result = provider.run_turn(job).await.unwrap();
         assert_eq!(result.backend_session_id, "sess");
@@ -479,7 +525,11 @@ mod tests {
         )
         .with_env(vec![("CICA_FAKE_BACKEND".into(), "echo".into())]);
 
-        let provider = LaunchedWorkerProvider::new(store.clone(), Box::new(launcher));
+        let provider = LaunchedWorkerProvider::new(
+            store.clone(),
+            Box::new(launcher),
+            std::env::temp_dir().join("cica-test-attachments"),
+        );
         let job = TurnJob {
             channel: "telegram".into(),
             user_id: "1".into(),
@@ -489,6 +539,7 @@ mod tests {
             skip_permissions: true,
             backend: AiBackend::Cursor,
             model: None,
+            attachments: Vec::new(),
         };
 
         let result = provider.run_turn(job).await.expect("docker turn failed");

@@ -19,6 +19,18 @@ use async_trait::async_trait;
 
 use crate::config::{AiBackend, Config, Paths};
 
+/// Where attachments live, relative to the workspace root.
+///
+/// The prompt names an attachment by this path and the worker hydrates it to the
+/// same place. They must agree, so both read it from here.
+pub const ATTACHMENTS_SUBDIR: &str = "internal/slack_attachments";
+
+/// The path to quote in a prompt for `name` — relative, because the machine that
+/// writes the prompt is often not the machine that opens the file.
+pub fn attachment_path(name: &str) -> String {
+    format!("{ATTACHMENTS_SUBDIR}/{name}")
+}
+
 /// A single agent turn to execute.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnJob {
@@ -34,6 +46,15 @@ pub struct TurnJob {
     pub backend: AiBackend,
     /// Model alias or full id selected by the router.
     pub model: Option<String>,
+    /// File names of Slack attachments this turn refers to, relative to
+    /// `internal/slack_attachments/`.
+    ///
+    /// The router downloads attachments to its own disk, so a worker on another
+    /// machine cannot open them. Naming them here lets the dispatcher copy each
+    /// one into the state store and the worker pull it back before the turn.
+    /// Defaulted so jobs written by an older router still deserialize.
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 impl TurnJob {
@@ -56,7 +77,14 @@ impl TurnJob {
             skip_permissions: true,
             backend: config.backend,
             model: config.model_for(config.backend),
+            attachments: Vec::new(),
         }
+    }
+
+    /// Name the Slack attachments this turn refers to, so they travel with it.
+    pub fn with_attachments(mut self, attachments: Vec<String>) -> Self {
+        self.attachments = attachments;
+        self
     }
 }
 
@@ -103,6 +131,7 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
             Ok(Box::new(worker::LaunchedWorkerProvider::new(
                 store,
                 Box::new(worker::SubprocessLauncher::new(self_exe)),
+                paths.internal_dir.join("slack_attachments"),
             )))
         }
         ProviderKind::Docker => {
@@ -124,6 +153,7 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
             Ok(Box::new(worker::LaunchedWorkerProvider::new(
                 store,
                 Box::new(launcher),
+                paths.internal_dir.join("slack_attachments"),
             )))
         }
         ProviderKind::Fargate => {
@@ -138,6 +168,7 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
                 Ok(Box::new(worker::LaunchedWorkerProvider::new(
                     store,
                     Box::new(fargate::FargateLauncher::new(fc)),
+                    paths.internal_dir.join("slack_attachments"),
                 )))
             }
             #[cfg(not(feature = "fargate"))]
@@ -247,6 +278,7 @@ mod tests {
             skip_permissions: true,
             backend: crate::config::AiBackend::Claude,
             model: None,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&job).unwrap();
         let back: TurnJob = serde_json::from_str(&json).unwrap();
@@ -294,5 +326,37 @@ mod tests {
         let job: TurnJob = serde_json::from_str(json).unwrap();
         assert_eq!(job.channel, "telegram");
         assert_eq!(job.resume_session.as_deref(), Some("sess-1"));
+    }
+}
+
+#[cfg(test)]
+mod attachment_compat_tests {
+    use super::*;
+
+    #[test]
+    fn a_job_written_by_an_older_router_still_deserializes() {
+        // Jobs already sitting in the state store predate the field.
+        let old = r#"{"channel":"slack","user_id":"U1","prompt":"hi","system_prompt":null,
+                      "resume_session":null,"skip_permissions":true,"backend":"claude","model":null}"#;
+        let job: TurnJob = serde_json::from_str(old).expect("old job deserializes");
+        assert!(job.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachments_survive_a_round_trip() {
+        let old = r#"{"channel":"slack","user_id":"U1","prompt":"hi","system_prompt":null,
+                      "resume_session":null,"skip_permissions":true,"backend":"claude","model":null}"#;
+        let job: TurnJob = serde_json::from_str(old).unwrap();
+        let job = job.with_attachments(vec!["F1_shot.png".into()]);
+        let back: TurnJob = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        assert_eq!(back.attachments, vec!["F1_shot.png".to_string()]);
+    }
+
+    #[test]
+    fn the_prompt_path_and_the_hydration_dir_agree() {
+        assert_eq!(
+            attachment_path("x.png"),
+            format!("{ATTACHMENTS_SUBDIR}/x.png")
+        );
     }
 }

@@ -284,13 +284,11 @@ mod tests {
 
     fn sample_job() -> TurnJob {
         TurnJob {
-            session_id: "telegram:1".into(),
             channel: "telegram".into(),
             user_id: "1".into(),
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: None,
-            cwd: None,
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,
@@ -303,7 +301,7 @@ mod tests {
         let store = FilesystemStateStore::new(root.path().to_path_buf());
         push_job(&store, "t1", &sample_job()).await.unwrap();
         let back = pull_job(&store, "t1").await.unwrap();
-        assert_eq!(back.session_id, "telegram:1");
+        assert_eq!(back.channel, "telegram");
         assert_eq!(back.prompt, "hi");
     }
 
@@ -363,13 +361,11 @@ mod tests {
             }),
         );
         let job = TurnJob {
-            session_id: "telegram:1".into(),
             channel: "telegram".into(),
             user_id: "1".into(),
             prompt: "hi".into(),
             system_prompt: None,
             resume_session: None,
-            cwd: None,
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: None,
@@ -478,13 +474,11 @@ mod tests {
 
         let provider = LaunchedWorkerProvider::new(store.clone(), Box::new(launcher));
         let job = TurnJob {
-            session_id: "telegram:1".into(),
             channel: "telegram".into(),
             user_id: "1".into(),
             prompt: "ping".into(),
             system_prompt: None,
             resume_session: None,
-            cwd: None,
             skip_permissions: true,
             backend: AiBackend::Cursor,
             model: None,

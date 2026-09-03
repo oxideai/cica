@@ -843,18 +843,14 @@ pub async fn execute_cron_job(
         Some(&job.prompt),
     )?;
 
-    let turn = TurnJob {
-        session_id: format!("{}:{}", channel, user_id),
-        channel: channel.to_string(),
-        user_id: user_id.to_string(),
-        prompt: job.prompt.clone(),
-        system_prompt: Some(context_prompt),
-        resume_session: None,
-        cwd: None,
-        skip_permissions: true,
-        backend: rt.config.backend,
-        model: None,
-    };
+    let turn = TurnJob::new(
+        &rt.config,
+        channel,
+        user_id,
+        job.prompt.clone(),
+        Some(context_prompt),
+        None,
+    );
 
     let tr = rt.provider.run_turn(turn).await?;
 
@@ -876,18 +872,14 @@ pub async fn query_ai_with_session(
     };
     let existing_session = lock(&rt.pairing).sessions.get(&session_key).cloned();
 
-    let job = TurnJob {
-        session_id: session_key.clone(),
-        channel: channel.to_string(),
-        user_id: user_id.to_string(),
-        prompt: text.to_string(),
-        system_prompt: Some(context_prompt),
-        resume_session: existing_session.clone(),
-        cwd: None,
-        skip_permissions: true,
-        backend: rt.config.backend,
-        model: None,
-    };
+    let job = TurnJob::new(
+        &rt.config,
+        channel,
+        user_id,
+        text.to_string(),
+        Some(context_prompt),
+        existing_session.clone(),
+    );
 
     let qr = sandbox::query_result_from_turn(rt.provider.run_turn(job).await?);
 
@@ -922,7 +914,9 @@ pub async fn handle_onboarding(
         ..Default::default()
     };
 
-    let qr = backends::query_with_options(&rt.config, &rt.paths, message, options).await?;
+    let qr =
+        backends::query_with_options(rt.config.backend, &rt.config, &rt.paths, message, options)
+            .await?;
     Ok(qr.response)
 }
 

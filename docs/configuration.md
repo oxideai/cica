@@ -138,9 +138,9 @@ These overlay config at load time (env wins over file). The cloud worker uses th
 |---|---|---|
 | `CICA_CLAUDE_API_KEY` | `claude.api_key` | |
 | `CICA_CURSOR_API_KEY` | `cursor.api_key` | |
-| `CICA_CLAUDE_MODEL` | `claude.model` | Alias (`"sonnet"`, `"opus"`) or full model ID. |
-| `CICA_CURSOR_MODEL` | `cursor.model` | |
-| `CICA_BACKEND` | `backend` | `claude` or `cursor`. |
+| `CICA_CLAUDE_MODEL` | `claude.model` | Alias (`"sonnet"`, `"opus"`) or full model ID; workers use it only as a fallback. |
+| `CICA_CURSOR_MODEL` | `cursor.model` | Workers use it only as a fallback. |
+| `CICA_BACKEND` | `backend` | `claude` or `cursor`; workers do not use it for turns. |
 | `CICA_STORE` | `deployment.store` | `s3` or `filesystem`. |
 | `CICA_S3_BUCKET` | `deployment.s3.bucket` | |
 | `CICA_S3_REGION` | `deployment.s3.region` | |

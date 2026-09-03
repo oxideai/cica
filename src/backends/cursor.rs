@@ -7,7 +7,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::backends::QueryResult;
+use crate::backends::{QueryOptions, QueryResult};
 use crate::config::{CursorConfig, Paths};
 use crate::setup;
 
@@ -94,15 +94,6 @@ struct CursorEvent {
     is_error: Option<bool>,
 }
 
-#[derive(Default)]
-pub struct QueryOptions {
-    pub context: Option<String>,
-    pub resume_session: Option<String>,
-    pub cwd: Option<String>,
-    pub model: Option<String>,
-    pub force: bool,
-}
-
 pub async fn query_with_options(
     cursor: &CursorConfig,
     paths: &Paths,
@@ -116,7 +107,7 @@ pub async fn query_with_options(
     let cursor_cli = setup::find_cursor_cli(paths)
         .ok_or_else(|| anyhow!("Cursor CLI not found. Run `cica init` to set up Cursor."))?;
 
-    let full_prompt = match &options.context {
+    let full_prompt = match &options.system_prompt {
         Some(context) => format!("<context>\n{}\n</context>\n\n{}", context, prompt),
         None => prompt.to_string(),
     };
@@ -132,25 +123,18 @@ pub async fn query_with_options(
         .args(["--api-key", api_key])
         .env("HOME", &paths.cursor_home);
 
-    if options.force {
+    if options.skip_permissions {
         cmd.arg("--force");
     }
 
-    let model = options
-        .model
-        .or_else(|| cursor.model.clone())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = options.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     cmd.args(["--model", &model]);
 
     if let Some(ref session_id) = options.resume_session {
         cmd.args(["--resume", session_id]);
     }
 
-    if let Some(ref cwd) = options.cwd {
-        cmd.current_dir(cwd);
-    } else {
-        cmd.current_dir(&paths.base);
-    }
+    cmd.current_dir(&paths.base);
 
     cmd.arg(&full_prompt);
 

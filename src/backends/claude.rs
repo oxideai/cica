@@ -6,7 +6,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::backends::QueryResult;
+use crate::backends::{QueryOptions, QueryResult};
 use crate::config::{ClaudeConfig, Paths};
 use crate::setup;
 
@@ -37,16 +37,6 @@ fn served_models(usage: &Option<serde_json::Map<String, serde_json::Value>>) -> 
     let mut ids: Vec<&str> = usage.keys().map(String::as_str).collect();
     ids.sort_unstable();
     Some(ids.join(", "))
-}
-
-#[derive(Default)]
-pub struct QueryOptions {
-    pub system_prompt: Option<String>,
-    pub resume_session: Option<String>,
-    pub cwd: Option<String>,
-    pub skip_permissions: bool,
-    /// Model alias ("sonnet", "opus") or full model ID (e.g. "claude-sonnet-4-5-20250929")
-    pub model: Option<String>,
 }
 
 // Claude Code's wording: "No conversation found with session ID: <uuid>".
@@ -117,11 +107,7 @@ pub async fn query_with_options(
             cmd.args(["--model", model]);
         }
 
-        if let Some(ref cwd) = options.cwd {
-            cmd.current_dir(cwd);
-        } else {
-            cmd.current_dir(&paths.base);
-        }
+        cmd.current_dir(&paths.base);
 
         cmd.arg(prompt);
 

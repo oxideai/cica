@@ -291,18 +291,14 @@ async fn execute_job<C: Clock>(
 
     let result = match context_prompt {
         Ok(ctx) => {
-            let turn = TurnJob {
-                session_id: format!("{}:{}", job.channel, job.user_id),
-                channel: job.channel.clone(),
-                user_id: job.user_id.clone(),
-                prompt: job.prompt.clone(),
-                system_prompt: Some(ctx),
-                resume_session: None,
-                cwd: None,
-                skip_permissions: true,
-                backend: config.backend,
-                model: None,
-            };
+            let turn = TurnJob::new(
+                config,
+                &job.channel,
+                &job.user_id,
+                job.prompt.clone(),
+                Some(ctx),
+                None,
+            );
             provider
                 .run_turn(turn)
                 .await

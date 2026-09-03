@@ -563,6 +563,13 @@ impl Config {
             AiBackend::Cursor => self.is_cursor_configured(),
         }
     }
+
+    pub fn model_for(&self, backend: AiBackend) -> Option<String> {
+        match backend {
+            AiBackend::Claude => self.claude.model.clone(),
+            AiBackend::Cursor => self.cursor.model.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

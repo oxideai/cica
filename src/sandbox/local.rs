@@ -26,8 +26,14 @@ impl SandboxProvider for LocalProcessProvider {
         let dir = crate::memory::memories_dir(&self.paths, &job.channel, &job.user_id);
         let _ = std::fs::create_dir_all(&dir);
         let options = job_to_query_options(&self.paths, &job);
-        let qr =
-            backends::query_with_options(&self.config, &self.paths, &job.prompt, options).await?;
+        let qr = backends::query_with_options(
+            job.backend,
+            &self.config,
+            &self.paths,
+            &job.prompt,
+            options,
+        )
+        .await?;
         Ok(turn_result_from_query(qr))
     }
 }
@@ -48,8 +54,8 @@ fn job_to_query_options(paths: &Paths, job: &TurnJob) -> backends::QueryOptions 
     backends::QueryOptions {
         system_prompt,
         resume_session: job.resume_session.clone(),
-        cwd: job.cwd.clone(),
         skip_permissions: job.skip_permissions,
+        model: job.model.clone(),
     }
 }
 
@@ -79,13 +85,11 @@ mod tests {
 
     fn sample_job() -> TurnJob {
         TurnJob {
-            session_id: "telegram:42".into(),
             channel: "telegram".into(),
             user_id: "42".into(),
             prompt: "hello".into(),
             system_prompt: Some("ctx".into()),
             resume_session: Some("sess-1".into()),
-            cwd: Some("/tmp/work".into()),
             skip_permissions: true,
             backend: AiBackend::Claude,
             model: Some("claude-opus-4-6".into()),
@@ -99,8 +103,8 @@ mod tests {
         let opts = job_to_query_options(&paths, &job);
         assert_eq!(opts.system_prompt.as_deref(), Some("ctx"));
         assert_eq!(opts.resume_session.as_deref(), Some("sess-1"));
-        assert_eq!(opts.cwd.as_deref(), Some("/tmp/work"));
         assert!(opts.skip_permissions);
+        assert_eq!(opts.model.as_deref(), Some("claude-opus-4-6"));
     }
 
     #[test]
@@ -171,5 +175,51 @@ mod tests {
         let sp = opts.system_prompt.unwrap();
         assert!(!sp.contains("{MEMORIES_DIR}"));
         assert!(sp.contains("/notes.md"));
+    }
+
+    #[tokio::test]
+    async fn job_backend_selects_cursor_on_a_claude_config() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut cfg = Config {
+            backend: AiBackend::Claude,
+            ..Default::default()
+        };
+        cfg.claude.api_key = Some("k".into());
+        cfg.cursor.api_key = None;
+        let provider = LocalProcessProvider::new(cfg.clone(), paths);
+        let mut job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        job.backend = AiBackend::Cursor;
+        let error = provider.run_turn(job).await.unwrap_err().to_string();
+        assert!(error.contains("No Cursor API key configured"));
+        assert!(!error.contains("Claude"));
+    }
+
+    #[tokio::test]
+    async fn job_backend_selects_claude_on_a_cursor_config() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut cfg = Config {
+            backend: AiBackend::Cursor,
+            ..Default::default()
+        };
+        cfg.cursor.api_key = Some("k".into());
+        cfg.claude.api_key = None;
+        let provider = LocalProcessProvider::new(cfg.clone(), paths);
+        let mut job = TurnJob::new(&cfg, "telegram", "1", "hi".into(), None, None);
+        job.backend = AiBackend::Claude;
+        let error = provider.run_turn(job).await.unwrap_err().to_string();
+        assert!(error.contains("No credential configured"));
+    }
+
+    #[test]
+    fn job_model_reaches_query_options() {
+        let (_temp, paths) = crate::config::test_paths();
+        let mut job = sample_job();
+        job.model = Some("claude-opus-4-6".into());
+        assert_eq!(
+            job_to_query_options(&paths, &job).model.as_deref(),
+            Some("claude-opus-4-6")
+        );
+        job.model = None;
+        assert_eq!(job_to_query_options(&paths, &job).model, None);
     }
 }

@@ -267,12 +267,15 @@ impl LaunchedWorkerProvider {
         }
     }
 
-    /// Where produced files land on this machine. A subdirectory of the
-    /// attachments dir because it is the same thing from the channel's point of
-    /// view -- a local file to attach -- and keeping it separate stops an
-    /// outbound file from overwriting an inbound one of the same name.
+    /// Where produced files land on this machine: alongside each channel's
+    /// inbound attachment directory under `internal/`, but its own, so an
+    /// outbound file cannot overwrite an inbound one of the same name.
+    ///
+    /// Derived from `base` rather than taking a path of its own, because #56
+    /// made attachment paths relative to the workspace root and left this
+    /// provider holding only `base`.
     fn produced_dir(&self) -> PathBuf {
-        self.attachments_dir.join("outbound")
+        self.base.join("internal").join("worker_outputs")
     }
 }
 

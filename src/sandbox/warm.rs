@@ -77,6 +77,10 @@ impl<P: SandboxProvider> WarmHydratingProvider<P> {
         }
     }
 
+    pub async fn warm_up(&self) {
+        self.refresh_skills().await;
+    }
+
     async fn refresh_skills(&self) {
         let head = match self.store.get_record("skills/head").await {
             Ok(Some(bytes)) => serde_json::from_slice::<SkillsHead>(&bytes).map_err(Into::into),

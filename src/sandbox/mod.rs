@@ -10,6 +10,7 @@ mod fargate;
 pub mod hydrating;
 mod local;
 pub mod state;
+pub mod warm;
 pub mod worker;
 
 pub use local::{LocalProcessProvider, query_result_from_turn};
@@ -222,6 +223,15 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
 
     let store = state::default_store(config, paths)?;
 
+    let timing = worker::Timing {
+        idle: std::time::Duration::from_secs(config.deployment.worker_idle_secs),
+        start_timeout: std::time::Duration::from_secs(config.deployment.worker_start_timeout_secs),
+        turn_timeout: std::time::Duration::from_secs(config.deployment.turn_timeout_secs),
+        max_age: std::time::Duration::from_secs(config.deployment.worker_max_age_secs),
+        ..Default::default()
+    };
+    let policy_hash = config.deployment.policy_hash();
+    let worker_cap = config.deployment.worker_cap;
     match config.deployment.provider.unwrap_or(ProviderKind::Local) {
         ProviderKind::Local => {
             let local = LocalProcessProvider::new(config.clone(), paths.clone());
@@ -245,6 +255,9 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
                 store,
                 Box::new(worker::SubprocessLauncher::new(self_exe, paths.clone())),
                 paths.base.clone(),
+                timing,
+                policy_hash,
+                worker_cap,
             )))
         }
         ProviderKind::Docker => {
@@ -267,6 +280,9 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
                 store,
                 Box::new(launcher),
                 paths.base.clone(),
+                timing,
+                policy_hash,
+                worker_cap,
             )))
         }
         ProviderKind::Fargate => {
@@ -282,6 +298,9 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
                     store,
                     Box::new(fargate::FargateLauncher::new(fc)),
                     paths.base.clone(),
+                    timing,
+                    policy_hash,
+                    worker_cap,
                 )))
             }
             #[cfg(not(feature = "fargate"))]

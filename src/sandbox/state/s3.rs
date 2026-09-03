@@ -445,6 +445,7 @@ async fn download_file(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn delete_prefix(
     client: &aws_sdk_s3::Client,
     bucket: &str,

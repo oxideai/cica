@@ -87,6 +87,11 @@ All of `[deployment]` is optional; absent means single-box. See [architecture.md
 | `state_path` | string | `internal/state-store` | Root path for the filesystem store. |
 | `provider` | `"local"` \| `"subprocess"` \| `"docker"` \| `"fargate"` | `local` | Where a turn executes. |
 | `docker_image` | string | `cica-worker:latest` | Worker image for `provider = "docker"`. |
+| `worker_idle_secs` | u64 | `600` | Drain a worker after this long without a turn. |
+| `worker_start_timeout_secs` | u64 | `180` | Allow a launched worker this long to become live. |
+| `turn_timeout_secs` | u64 | `900` | Per-turn worker deadline. |
+| `worker_cap` | usize | `32` | Maximum warm workers owned by one router. |
+| `worker_max_age_secs` | u64 | `86400` | Stop accepting turns after this age, then drain. |
 
 ### `[deployment.s3]` (when `store = "s3"`)
 | Key | Type | Default | Meaning |
@@ -109,13 +114,12 @@ Requires a build with `--features fargate`.
 | `security_groups` | string[] | `[]` | Security groups for the task. |
 | `assign_public_ip` | bool | `false` | Assign a public IP (default: private subnets + NAT). |
 | `region` | string | AWS chain | Region. |
-| `container_name` | string | `cica-worker` | Which container in the task-def to override with `worker --turn <id>`. |
+| `container_name` | string | `cica-worker` | Which container in the task definition runs the worker loop. |
 | `poll_interval_secs` | u64 | `5` | DescribeTasks poll interval. |
-| `timeout_secs` | u64 | `900` | Max wait for the task to stop before bailing. |
 
 ## Worker command
 
-`cica worker --turn <id>` runs one store-backed turn. Launchers may also pass these path overrides:
+Launchers run `cica worker --session <affinity_id> --worker-id <id> --idle-secs <n> --turn-timeout-secs <n>`. The hidden `--turn <id>` compatibility mode remains available for old routers during rollout. Launchers may also pass these path overrides:
 
 | Flag | Meaning |
 |---|---|
@@ -123,8 +127,6 @@ Requires a build with `--features fargate`.
 | `--deps <dir>` | Shared dependency directory. |
 | `--skills <dir>` | Shared read-only skills directory. |
 | `--config <file>` | Configuration file to load. Relative paths in the file resolve from its parent directory. |
-
-The launcher contract also reserves `--session`, `--worker-id`, `--idle-secs`, and `--turn-timeout-secs` for persistent workers. The worker loop is not enabled yet.
 
 ## Skills git-sync
 
@@ -156,6 +158,11 @@ These overlay config at load time (env wins over file). The cloud worker uses th
 | `CICA_BACKEND` | `backend` | `claude` or `cursor`; workers do not use it for turns. |
 | `CICA_STORE` | `deployment.store` | `s3` or `filesystem`. |
 | `CICA_STATE_PATH` | `deployment.state_path` | Filesystem state-store root; Docker workers receive `/data/cica/internal/state-store`. |
+| `CICA_WORKER_IDLE_SECS` | `deployment.worker_idle_secs` | |
+| `CICA_WORKER_START_TIMEOUT_SECS` | `deployment.worker_start_timeout_secs` | |
+| `CICA_TURN_TIMEOUT_SECS` | `deployment.turn_timeout_secs` | |
+| `CICA_WORKER_CAP` | `deployment.worker_cap` | |
+| `CICA_WORKER_MAX_AGE_SECS` | `deployment.worker_max_age_secs` | |
 | `CICA_S3_BUCKET` | `deployment.s3.bucket` | |
 | `CICA_S3_REGION` | `deployment.s3.region` | |
 | `CICA_SKILLS_GIT_TOKEN` | — | Git credential for the skills sync loop. Env-only. |

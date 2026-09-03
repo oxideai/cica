@@ -20,6 +20,7 @@ use crate::sandbox::state::{clear_dir, copy_dir_all, copy_path};
 pub trait SessionArtifacts {
     fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool>;
     fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()>;
+    fn forget(&self, home: &Path, session_id: &str) -> Result<()>;
 }
 
 /// Slugify a working directory the way Claude Code names its project dir:
@@ -130,6 +131,35 @@ impl SessionArtifacts for ClaudeSessionArtifacts {
     fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()> {
         ClaudeSessionArtifacts::restore(home, cwd, session_id, staging)
     }
+    fn forget(&self, home: &Path, session_id: &str) -> Result<()> {
+        let dot = home.join(".claude");
+        let projects = dot.join("projects");
+        if projects.is_dir() {
+            for entry in fs::read_dir(projects)? {
+                let path = entry?.path().join(format!("{session_id}.jsonl"));
+                if path.is_file() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+        let env = dot.join("session-env").join(session_id);
+        if env.is_dir() {
+            fs::remove_dir_all(env)?;
+        } else if env.is_file() {
+            fs::remove_file(env)?;
+        }
+        let todos = dot.join("todos");
+        if todos.is_dir() {
+            let prefix = format!("{session_id}-");
+            for entry in fs::read_dir(todos)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Capture/restore of Cursor session state.
@@ -194,6 +224,19 @@ impl SessionArtifacts for CursorSessionArtifacts {
             let src = staged_dir.join(f);
             if src.is_file() {
                 fs::copy(&src, dest.join(f))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn forget(&self, home: &Path, session_id: &str) -> Result<()> {
+        let chats = home.join(".cursor").join("chats");
+        if chats.is_dir() {
+            for entry in fs::read_dir(chats)? {
+                let path = entry?.path().join(session_id);
+                if path.is_dir() {
+                    fs::remove_dir_all(path)?;
+                }
             }
         }
         Ok(())
@@ -384,6 +427,36 @@ mod tests {
             .restore(home.path(), Path::new("/x"), "any", staging.path())
             .unwrap();
         assert!(!home.path().join(".cursor").exists());
+    }
+
+    #[test]
+    fn claude_forget_removes_only_the_named_session() {
+        let home = tempfile::tempdir().unwrap();
+        let dot = home.path().join(".claude");
+        write(&dot.join("projects/a/one.jsonl"), "one");
+        write(&dot.join("projects/a/two.jsonl"), "two");
+        write(&dot.join("session-env/one/value"), "env");
+        write(&dot.join("todos/one-agent.json"), "[]");
+        write(&dot.join("todos/two-agent.json"), "[]");
+        ClaudeSessionArtifacts.forget(home.path(), "one").unwrap();
+        assert!(!dot.join("projects/a/one.jsonl").exists());
+        assert!(!dot.join("session-env/one").exists());
+        assert!(!dot.join("todos/one-agent.json").exists());
+        assert!(dot.join("projects/a/two.jsonl").exists());
+        assert!(dot.join("todos/two-agent.json").exists());
+    }
+
+    #[test]
+    fn cursor_forget_removes_only_the_named_session() {
+        let home = tempfile::tempdir().unwrap();
+        let chats = home.path().join(".cursor/chats");
+        write(&chats.join("a/one/store.db"), "one");
+        write(&chats.join("a/two/store.db"), "two");
+        write(&chats.join("b/one/store.db"), "one");
+        CursorSessionArtifacts.forget(home.path(), "one").unwrap();
+        assert!(!chats.join("a/one").exists());
+        assert!(!chats.join("b/one").exists());
+        assert!(chats.join("a/two/store.db").exists());
     }
 
     #[test]

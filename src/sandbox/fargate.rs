@@ -12,9 +12,7 @@ use tokio::sync::OnceCell;
 use tokio::time::{Duration, Instant, sleep};
 
 use crate::config::FargateConfig;
-use crate::sandbox::worker::Launcher;
-#[cfg(test)]
-use crate::sandbox::worker::{Handle, LauncherKind, Status, StopOutcome, WorkerSpec};
+use crate::sandbox::worker::{Handle, Launcher, LauncherKind, Status, StopOutcome, WorkerSpec};
 
 /// A request to start one worker task. Pure data, built from config + turn id.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +52,6 @@ pub(crate) trait EcsClient: Send + Sync {
     /// Best-effort stop (on timeout). The caller logs errors; not fatal.
     async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()>;
     /// Lists task ARNs started with an idempotency token.
-    #[cfg(test)]
     async fn list_tasks(&self, cluster: &str, started_by: &str) -> Result<Vec<String>>;
 }
 
@@ -190,7 +187,6 @@ impl EcsClient for AwsEcsClient {
         Ok(())
     }
 
-    #[cfg(test)]
     async fn list_tasks(&self, cluster: &str, started_by: &str) -> Result<Vec<String>> {
         let response = self
             .client()
@@ -227,22 +223,6 @@ impl FargateLauncher {
         Self { ecs, config }
     }
 
-    /// The RunTask request for `turn_id`. Pure, for testing.
-    pub(crate) fn run_task_request(&self, turn_id: &str) -> RunTaskRequest {
-        RunTaskRequest {
-            cluster: self.config.cluster.clone(),
-            task_definition: self.config.task_definition.clone(),
-            subnets: self.config.subnets.clone(),
-            security_groups: self.config.security_groups.clone(),
-            assign_public_ip: self.config.assign_public_ip,
-            container_name: self.config.container_name.clone(),
-            command: vec!["worker".into(), "--turn".into(), turn_id.into()],
-            client_token: None,
-            started_by: None,
-        }
-    }
-
-    #[cfg(test)]
     fn worker_task_request(&self, spec: &WorkerSpec) -> RunTaskRequest {
         RunTaskRequest {
             cluster: self.config.cluster.clone(),
@@ -257,7 +237,6 @@ impl FargateLauncher {
         }
     }
 
-    #[cfg(test)]
     async fn describe(&self, arn: &str) -> Result<Option<TaskStatus>> {
         self.ecs
             .describe_task(&self.config.cluster, arn, &self.config.container_name)
@@ -267,7 +246,6 @@ impl FargateLauncher {
 
 #[async_trait]
 impl Launcher for FargateLauncher {
-    #[cfg(test)]
     async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
         let arn = self.ecs.run_task(&self.worker_task_request(spec)).await?;
         let deadline = Instant::now() + spec.start_timeout;
@@ -306,7 +284,6 @@ impl Launcher for FargateLauncher {
         }
     }
 
-    #[cfg(test)]
     async fn status(&self, handle: &Handle) -> Result<Status> {
         Ok(match self.describe(&handle.id).await? {
             None => Status::NotFound,
@@ -316,7 +293,6 @@ impl Launcher for FargateLauncher {
         })
     }
 
-    #[cfg(test)]
     async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
         if self.describe(&handle.id).await?.is_none() {
             return Ok(StopOutcome::NotFound);
@@ -339,7 +315,6 @@ impl Launcher for FargateLauncher {
         }
     }
 
-    #[cfg(test)]
     async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
         Ok(self
             .ecs
@@ -351,39 +326,6 @@ impl Launcher for FargateLauncher {
                 kind: LauncherKind::Fargate,
                 id,
             }))
-    }
-
-    async fn launch(&self, turn_id: &str) -> Result<()> {
-        let arn = self.ecs.run_task(&self.run_task_request(turn_id)).await?;
-        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_secs);
-        let interval = Duration::from_secs(self.config.poll_interval_secs);
-        loop {
-            let st = self
-                .ecs
-                .describe_task(&self.config.cluster, &arn, &self.config.container_name)
-                .await?
-                .context("worker task disappeared")?;
-            if st.last_status == "STOPPED" {
-                return match st.exit_code {
-                    Some(0) => Ok(()),
-                    other => bail!(
-                        "worker task stopped (exit {other:?}, reason {:?})",
-                        st.stopped_reason
-                    ),
-                };
-            }
-            if Instant::now() >= deadline {
-                if let Err(e) = self
-                    .ecs
-                    .stop_task(&self.config.cluster, &arn, "cica turn timeout")
-                    .await
-                {
-                    tracing::warn!("failed to stop timed-out task {arn}: {e}");
-                }
-                bail!("worker task timed out after {}s", self.config.timeout_secs);
-            }
-            sleep(interval).await;
-        }
     }
 }
 
@@ -404,7 +346,6 @@ mod tests {
             region: None,
             container_name: "cica-worker".into(),
             poll_interval_secs: 0, // no real waiting in tests
-            timeout_secs: 60,
         }
     }
 
@@ -420,16 +361,6 @@ mod tests {
             Self {
                 statuses: Mutex::new(statuses.into()),
                 run_ok: true,
-                stop_called: AtomicBool::new(false),
-                requests: Mutex::new(Vec::new()),
-                listed: Vec::new(),
-            }
-        }
-
-        fn failing_run() -> Self {
-            Self {
-                statuses: Mutex::new(VecDeque::new()),
-                run_ok: false,
                 stop_called: AtomicBool::new(false),
                 requests: Mutex::new(Vec::new()),
                 listed: Vec::new(),
@@ -511,20 +442,8 @@ mod tests {
             idle: Duration::from_secs(600),
             turn_timeout: Duration::from_secs(900),
             start_timeout: Duration::from_secs(180),
+            policy_hash: "policy".into(),
         }
-    }
-
-    #[test]
-    fn run_task_request_carries_turn_command_and_network() {
-        let l = FargateLauncher::with_client(Box::new(FakeEcs::new(vec![])), cfg());
-        let req = l.run_task_request("turn-123");
-        assert_eq!(req.cluster, "cica");
-        assert_eq!(req.task_definition, "cica-worker");
-        assert_eq!(req.subnets, vec!["subnet-a"]);
-        assert_eq!(req.security_groups, vec!["sg-1"]);
-        assert!(!req.assign_public_ip);
-        assert_eq!(req.container_name, "cica-worker");
-        assert_eq!(req.command, vec!["worker", "--turn", "turn-123"]);
     }
 
     #[test]
@@ -632,35 +551,5 @@ mod tests {
 
         let launcher = FargateLauncher::with_client(Box::new(FakeEcs::new(vec![])), cfg());
         assert!(launcher.reconcile(&spec()).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn launch_ok_when_task_stops_zero() {
-        let fake = FakeEcs::new(vec![status("RUNNING", None), status("STOPPED", Some(0))]);
-        let l = FargateLauncher::with_client(Box::new(fake), cfg());
-        assert!(l.launch("t1").await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn launch_errors_when_task_stops_nonzero() {
-        let fake = FakeEcs::new(vec![status("STOPPED", Some(1))]);
-        let l = FargateLauncher::with_client(Box::new(fake), cfg());
-        assert!(l.launch("t1").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn launch_errors_when_run_task_fails() {
-        let l = FargateLauncher::with_client(Box::new(FakeEcs::failing_run()), cfg());
-        assert!(l.launch("t1").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn launch_times_out_and_stops_task() {
-        let mut c = cfg();
-        c.timeout_secs = 0; // first not-stopped poll is already past deadline
-        let fake = std::sync::Arc::new(FakeEcs::new(vec![status("RUNNING", None)]));
-        let l = FargateLauncher::with_client(Box::new(ArcEcs(fake.clone())), c);
-        assert!(l.launch("t1").await.is_err());
-        assert!(fake.stop_called.load(Ordering::SeqCst));
     }
 }

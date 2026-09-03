@@ -113,6 +113,19 @@ Requires a build with `--features fargate`.
 | `poll_interval_secs` | u64 | `5` | DescribeTasks poll interval. |
 | `timeout_secs` | u64 | `900` | Max wait for the task to stop before bailing. |
 
+## Worker command
+
+`cica worker --turn <id>` runs one store-backed turn. Launchers may also pass these path overrides:
+
+| Flag | Meaning |
+|---|---|
+| `--home <dir>` | Worker-local mutable data root. |
+| `--deps <dir>` | Shared dependency directory. |
+| `--skills <dir>` | Shared read-only skills directory. |
+| `--config <file>` | Configuration file to load. Relative paths in the file resolve from its parent directory. |
+
+The launcher contract also reserves `--session`, `--worker-id`, `--idle-secs`, and `--turn-timeout-secs` for persistent workers. The worker loop is not enabled yet.
+
 ## Skills git-sync
 
 ### `[skills]`

@@ -243,7 +243,7 @@ pub fn try_default_provider(config: &Config, paths: &Paths) -> Result<Box<dyn Sa
             let self_exe = std::env::current_exe()?;
             Ok(Box::new(worker::LaunchedWorkerProvider::new(
                 store,
-                Box::new(worker::SubprocessLauncher::new(self_exe)),
+                Box::new(worker::SubprocessLauncher::new(self_exe, paths.clone())),
                 paths.base.clone(),
             )))
         }

@@ -1,12 +1,16 @@
 //! Worker dispatch: run a turn in a one-shot `cica worker` child process,
 //! exchanging the job and result through the `StateStore` keyed by a turn id.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
+#[cfg(test)]
+use tokio::time::{Instant, sleep};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -236,10 +240,96 @@ pub async fn run_worker_turn(
     Ok(())
 }
 
-/// Runs the worker for a `turn_id` to completion. `Ok` = clean exit 0;
-/// `Err` = launch failure or non-zero exit. Job/result travel via the store.
+/// Configuration passed to a persistent worker process.
+#[derive(Debug, Clone)]
+#[cfg(test)]
+pub struct WorkerSpec {
+    pub session: String,
+    pub worker_id: String,
+    pub launch_token: String,
+    pub idle: Duration,
+    pub turn_timeout: Duration,
+    pub start_timeout: Duration,
+}
+
+#[cfg(test)]
+impl WorkerSpec {
+    /// Returns the stable worker command-line contract.
+    pub fn args(&self) -> Vec<String> {
+        vec![
+            "worker".into(),
+            "--session".into(),
+            self.session.clone(),
+            "--worker-id".into(),
+            self.worker_id.clone(),
+            "--idle-secs".into(),
+            self.idle.as_secs().to_string(),
+            "--turn-timeout-secs".into(),
+            self.turn_timeout.as_secs().to_string(),
+        ]
+    }
+}
+
+/// Platform used to create a worker handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg(test)]
+pub enum LauncherKind {
+    Subprocess,
+    Docker,
+    Fargate,
+}
+
+/// Serializable identity of a worker on its launch platform.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg(test)]
+pub struct Handle {
+    pub kind: LauncherKind,
+    pub id: String,
+}
+
+/// Observed worker state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
+pub enum Status {
+    Running,
+    Stopped,
+    NotFound,
+    Unknown,
+}
+
+/// Result of waiting for a worker to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
+pub enum StopOutcome {
+    Terminated,
+    NotFound,
+    Unknown,
+}
+
+/// Creates, observes, and stops workers while retaining one-shot dispatch.
 #[async_trait]
 pub trait Launcher: Send + Sync {
+    /// Starts a worker and returns only after the platform reports it running.
+    #[cfg(test)]
+    async fn start(&self, _spec: &WorkerSpec) -> Result<Handle> {
+        anyhow::bail!("persistent workers are not supported by this launcher")
+    }
+    /// Reads the current platform state for a worker handle.
+    #[cfg(test)]
+    async fn status(&self, _handle: &Handle) -> Result<Status> {
+        Ok(Status::Unknown)
+    }
+    /// Requests termination and waits no longer than `deadline`.
+    #[cfg(test)]
+    async fn stop_and_wait(&self, _handle: &Handle, _deadline: Duration) -> Result<StopOutcome> {
+        Ok(StopOutcome::Unknown)
+    }
+    /// Finds a worker previously started with the spec's launch token.
+    #[cfg(test)]
+    async fn reconcile(&self, _spec: &WorkerSpec) -> Result<Option<Handle>> {
+        Ok(None)
+    }
+    /// Runs a one-shot worker turn to completion.
     async fn launch(&self, turn_id: &str) -> Result<()>;
 }
 
@@ -328,25 +418,225 @@ impl SandboxProvider for LaunchedWorkerProvider {
 /// Launcher that spawns `cica worker --turn <id>` as a local child process.
 pub struct SubprocessLauncher {
     self_exe: PathBuf,
+    router_paths: crate::config::Paths,
 }
 
 impl SubprocessLauncher {
-    pub fn new(self_exe: PathBuf) -> Self {
-        Self { self_exe }
+    pub fn new(self_exe: PathBuf, router_paths: crate::config::Paths) -> Self {
+        Self {
+            self_exe,
+            router_paths,
+        }
     }
+
+    fn worker_home(&self, worker_id: &str) -> PathBuf {
+        self.router_paths
+            .internal_dir
+            .join("workers")
+            .join(worker_id)
+    }
+
+    fn isolation_args(&self, home: &Path) -> Vec<String> {
+        vec![
+            "--home".into(),
+            home.display().to_string(),
+            "--deps".into(),
+            self.router_paths.deps_dir.display().to_string(),
+            "--skills".into(),
+            self.router_paths.skills_dir.display().to_string(),
+            "--config".into(),
+            self.router_paths.config_file.display().to_string(),
+        ]
+    }
+}
+
+#[cfg(test)]
+async fn process_start_time(pid: u32) -> Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return Ok(None);
+        }
+        let info = unsafe { info.assume_init() };
+        Ok(Some(format!(
+            "{}:{}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        )))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let fields = stat
+            .rsplit_once(')')
+            .context("invalid /proc pid stat")?
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        Ok(fields.get(19).map(|value| (*value).to_string()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let output = Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .await
+            .context("reading process start time")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!value.is_empty()).then_some(value))
+    }
+}
+
+#[cfg(test)]
+fn read_pid_file(path: &Path) -> Result<(u32, String)> {
+    let value = std::fs::read_to_string(path)
+        .with_context(|| format!("reading subprocess handle {}", path.display()))?;
+    let (pid, start_time) = value
+        .trim()
+        .split_once(':')
+        .context("invalid subprocess handle")?;
+    Ok((
+        pid.parse().context("invalid subprocess pid")?,
+        start_time.into(),
+    ))
+}
+
+#[cfg(test)]
+fn signal_process(pid: u32, signal: i32) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(pid as i32, signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+async fn subprocess_matches(path: &Path) -> Result<Option<u32>> {
+    let (pid, expected) = match read_pid_file(path) {
+        Ok(value) => value,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if signal_process(pid, 0).is_err() {
+        return Ok(None);
+    }
+    Ok((process_start_time(pid).await?.as_deref() == Some(expected.as_str())).then_some(pid))
 }
 
 #[async_trait]
 impl Launcher for SubprocessLauncher {
+    #[cfg(test)]
+    async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
+        let home = self.worker_home(&spec.worker_id);
+        std::fs::create_dir_all(&home)?;
+        let mut args = spec.args();
+        args.extend(self.isolation_args(&home));
+        let mut child = Command::new(&self.self_exe)
+            .args(args)
+            .kill_on_drop(false)
+            .spawn()
+            .context("spawning cica worker")?;
+        let pid = child.id().context("spawned worker has no pid")?;
+        let start_time = process_start_time(pid)
+            .await?
+            .context("worker exited before its start time could be read")?;
+        let pid_file = home.join(format!("launch.{}.pid", spec.launch_token));
+        std::fs::write(&pid_file, format!("{pid}:{start_time}"))?;
+        sleep(Duration::from_secs(2)).await;
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("worker exited during startup with status {status}");
+        }
+        Ok(Handle {
+            kind: LauncherKind::Subprocess,
+            id: pid_file.display().to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    async fn status(&self, handle: &Handle) -> Result<Status> {
+        Ok(
+            if subprocess_matches(Path::new(&handle.id)).await?.is_some() {
+                Status::Running
+            } else {
+                Status::NotFound
+            },
+        )
+    }
+
+    #[cfg(test)]
+    async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
+        let path = Path::new(&handle.id);
+        let Some(pid) = subprocess_matches(path).await? else {
+            return Ok(StopOutcome::NotFound);
+        };
+        if signal_process(pid, libc::SIGTERM).is_err() {
+            return Ok(StopOutcome::NotFound);
+        }
+        let until = Instant::now() + deadline;
+        while Instant::now() < until {
+            if subprocess_matches(path).await?.is_none() {
+                return Ok(StopOutcome::Terminated);
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        let _ = signal_process(pid, libc::SIGKILL);
+        sleep(Duration::from_millis(50)).await;
+        Ok(if subprocess_matches(path).await?.is_none() {
+            StopOutcome::Terminated
+        } else {
+            StopOutcome::Unknown
+        })
+    }
+
+    #[cfg(test)]
+    async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
+        let path = self
+            .worker_home(&spec.worker_id)
+            .join(format!("launch.{}.pid", spec.launch_token));
+        Ok(subprocess_matches(&path).await?.map(|_| Handle {
+            kind: LauncherKind::Subprocess,
+            id: path.display().to_string(),
+        }))
+    }
+
     async fn launch(&self, turn_id: &str) -> Result<()> {
+        let home = self.worker_home(&Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&home)?;
         let status = Command::new(&self.self_exe)
             .arg("worker")
             .arg("--turn")
             .arg(turn_id)
+            .args(self.isolation_args(&home))
             .kill_on_drop(true)
             .status()
             .await
-            .context("spawning cica worker")?;
+            .context("spawning cica worker");
+        let _ = std::fs::remove_dir_all(&home);
+        let status = status?;
         if !status.success() {
             anyhow::bail!("worker exited with status {status}");
         }
@@ -447,10 +737,146 @@ impl DockerLauncher {
         args.push(turn_id.into());
         args
     }
+
+    #[cfg(test)]
+    fn worker_name(spec: &WorkerSpec) -> String {
+        let slug = spec.session.chars().take(24).collect::<String>();
+        format!("cica-{slug}-{}", spec.launch_token)
+    }
+
+    #[cfg(test)]
+    fn worker_run_args(&self, spec: &WorkerSpec) -> Vec<String> {
+        let name = Self::worker_name(spec);
+        let mut args = vec![
+            "run".into(),
+            "-d".into(),
+            "--rm".into(),
+            "--name".into(),
+            name,
+            "--label".into(),
+            format!("cica.session={}", spec.session),
+            "--label".into(),
+            format!("cica.launch_token={}", spec.launch_token),
+            "-e".into(),
+            "CICA_STATE_PATH=/data/cica/internal/state-store".into(),
+        ];
+        for (key, value) in &self.env {
+            args.extend(["-e".into(), format!("{key}={value}")]);
+        }
+        args.extend([
+            "-v".into(),
+            format!("{}:/data/cica/config.toml:ro", self.config_file.display()),
+        ]);
+        if let Some(skills_dir) = &self.skills_dir {
+            args.extend([
+                "-v".into(),
+                format!("{}:/data/cica/skills:ro", skills_dir.display()),
+            ]);
+        }
+        args.extend([
+            "-v".into(),
+            format!(
+                "{}:/data/cica/internal/state-store",
+                self.state_store_dir.display()
+            ),
+            self.image.clone(),
+        ]);
+        args.extend(spec.args());
+        args
+    }
+
+    #[cfg(test)]
+    async fn inspect_running(name: &str) -> Result<Option<bool>> {
+        let output = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", name])
+            .output()
+            .await
+            .context("running docker inspect")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim() == "true",
+        ))
+    }
 }
 
 #[async_trait]
 impl Launcher for DockerLauncher {
+    #[cfg(test)]
+    async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
+        let name = Self::worker_name(spec);
+        let output = Command::new("docker")
+            .args(self.worker_run_args(spec))
+            .output()
+            .await
+            .context("starting cica worker container")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker run failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        sleep(Duration::from_secs(2)).await;
+        if Self::inspect_running(&name).await? != Some(true) {
+            anyhow::bail!("worker container {name} exited during startup");
+        }
+        Ok(Handle {
+            kind: LauncherKind::Docker,
+            id: name,
+        })
+    }
+
+    #[cfg(test)]
+    async fn status(&self, handle: &Handle) -> Result<Status> {
+        Ok(match Self::inspect_running(&handle.id).await? {
+            Some(true) => Status::Running,
+            Some(false) => Status::Stopped,
+            None => Status::NotFound,
+        })
+    }
+
+    #[cfg(test)]
+    async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
+        if Self::inspect_running(&handle.id).await?.is_none() {
+            return Ok(StopOutcome::NotFound);
+        }
+        let status = Command::new("docker")
+            .args(["stop", "-t", &deadline.as_secs().to_string(), &handle.id])
+            .status()
+            .await
+            .context("stopping cica worker container")?;
+        if !status.success() && Self::inspect_running(&handle.id).await?.is_some() {
+            return Ok(StopOutcome::Unknown);
+        }
+        Ok(match Self::inspect_running(&handle.id).await? {
+            None | Some(false) => StopOutcome::Terminated,
+            Some(true) => StopOutcome::Unknown,
+        })
+    }
+
+    #[cfg(test)]
+    async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=cica.launch_token={}", spec.launch_token),
+            ])
+            .output()
+            .await
+            .context("reconciling cica worker container")?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            return Ok(None);
+        }
+        let name = Self::worker_name(spec);
+        Ok(Some(Handle {
+            kind: LauncherKind::Docker,
+            id: name,
+        }))
+    }
+
     async fn launch(&self, turn_id: &str) -> Result<()> {
         let mut guard = DockerContainerGuard::new(format!("cica-turn-{turn_id}"));
         let status = Command::new("docker")
@@ -470,7 +896,7 @@ impl Launcher for DockerLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AiBackend;
+    use crate::config::{AiBackend, Paths};
     use crate::sandbox::state::FilesystemStateStore;
 
     fn sample_job() -> TurnJob {
@@ -500,6 +926,173 @@ mod tests {
             duration_ms: None,
             produced_files: Vec::new(),
         }
+    }
+
+    fn worker_spec() -> WorkerSpec {
+        WorkerSpec {
+            session: "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".into(),
+            worker_id: "worker-1".into(),
+            launch_token: "token-1".into(),
+            idle: Duration::from_secs(600),
+            turn_timeout: Duration::from_secs(900),
+            start_timeout: Duration::from_secs(180),
+        }
+    }
+
+    #[test]
+    fn worker_spec_builds_worker_args() {
+        assert_eq!(worker_spec().start_timeout, Duration::from_secs(180));
+        assert_eq!(
+            worker_spec().args(),
+            [
+                "worker",
+                "--session",
+                "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+                "--worker-id",
+                "worker-1",
+                "--idle-secs",
+                "600",
+                "--turn-timeout-secs",
+                "900"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn subprocess_worker_starts_reconciles_and_stops() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("worker.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = Paths::for_base(root.path().join("router"));
+        let launcher = SubprocessLauncher::new(script, paths);
+        let spec = worker_spec();
+
+        let handle = launcher.start(&spec).await.unwrap();
+        assert_eq!(launcher.status(&handle).await.unwrap(), Status::Running);
+        assert_eq!(
+            launcher.reconcile(&spec).await.unwrap(),
+            Some(handle.clone())
+        );
+        assert_eq!(
+            launcher
+                .stop_and_wait(&handle, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            StopOutcome::Terminated
+        );
+        assert_eq!(launcher.status(&handle).await.unwrap(), Status::NotFound);
+    }
+
+    #[tokio::test]
+    async fn subprocess_reconcile_rejects_changed_start_time() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("worker.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = Paths::for_base(root.path().join("router"));
+        let launcher = SubprocessLauncher::new(script, paths);
+        let spec = worker_spec();
+        let handle = launcher.start(&spec).await.unwrap();
+        let (pid, _) = read_pid_file(Path::new(&handle.id)).unwrap();
+        std::fs::write(&handle.id, format!("{pid}:different start time")).unwrap();
+
+        assert!(launcher.reconcile(&spec).await.unwrap().is_none());
+        let _ = signal_process(pid, libc::SIGKILL);
+    }
+
+    #[tokio::test]
+    async fn subprocess_turns_use_distinct_worker_homes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(binary) = std::env::var_os("CICA_BIN") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let router = Paths::for_base(root.path().join("router"));
+        std::fs::create_dir_all(&router.base).unwrap();
+        let state = router.internal_dir.join("state-store");
+        std::fs::write(
+            &router.config_file,
+            format!(
+                "backend = \"cursor\"\n[deployment]\nstore = \"filesystem\"\nstate_path = {:?}\n",
+                state.display().to_string()
+            ),
+        )
+        .unwrap();
+        let wrapper = root.path().join("cica-test-worker");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nCICA_FAKE_BACKEND=1 exec {:?} \"$@\"\n",
+                PathBuf::from(binary).display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Arc::new(FilesystemStateStore::new(state));
+        push_job(store.as_ref(), "turn-a", &sample_job())
+            .await
+            .unwrap();
+        push_job(store.as_ref(), "turn-b", &sample_job())
+            .await
+            .unwrap();
+        let launcher = Arc::new(SubprocessLauncher::new(wrapper, router.clone()));
+        let first = {
+            let launcher = launcher.clone();
+            tokio::spawn(async move { launcher.launch("turn-a").await })
+        };
+        let second = {
+            let launcher = launcher.clone();
+            tokio::spawn(async move { launcher.launch("turn-b").await })
+        };
+        let workers = router.internal_dir.join("workers");
+        let mut distinct = false;
+        while !first.is_finished() || !second.is_finished() {
+            distinct = std::fs::read_dir(&workers)
+                .map(|entries| entries.filter_map(|entry| entry.ok()).count() >= 2)
+                .unwrap_or(false);
+            if distinct {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        assert!(distinct);
+        assert!(
+            pull_result(store.as_ref(), "turn-a")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            pull_result(store.as_ref(), "turn-b")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn docker_worker_run_args_carry_identity_and_contract() {
+        let launcher = DockerLauncher::new(
+            "image".into(),
+            PathBuf::from("/config"),
+            Some(PathBuf::from("/skills")),
+            PathBuf::from("/state"),
+        );
+        let args = launcher.worker_run_args(&worker_spec());
+
+        assert!(args.contains(&"cica.session=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".into()));
+        assert!(args.contains(&"cica.launch_token=token-1".into()));
+        assert!(args.contains(&"cica-abcdefghijklmnopqrstuvwx-token-1".into()));
+        assert_eq!(&args[args.len() - 9..], worker_spec().args());
     }
 
     #[tokio::test]

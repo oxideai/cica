@@ -45,7 +45,31 @@ enum Commands {
     Worker {
         /// The turn id whose job/result live in the state store
         #[arg(long)]
-        turn: String,
+        turn: Option<String>,
+        /// Affinity assigned to a persistent worker
+        #[arg(long)]
+        session: Option<String>,
+        /// Stable worker identifier
+        #[arg(long)]
+        worker_id: Option<String>,
+        /// Worker idle limit in seconds
+        #[arg(long)]
+        idle_secs: Option<u64>,
+        /// Per-turn limit in seconds
+        #[arg(long)]
+        turn_timeout_secs: Option<u64>,
+        /// Isolated worker data directory
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+        /// Shared dependency directory
+        #[arg(long)]
+        deps: Option<std::path::PathBuf>,
+        /// Shared skills directory
+        #[arg(long)]
+        skills: Option<std::path::PathBuf>,
+        /// Configuration file
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
 }
 
@@ -71,7 +95,28 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => cmd::init::run().await,
         Some(Commands::Approve { code }) => cmd::approve::run(&code),
         Some(Commands::Paths) => cmd::paths::run(),
-        Some(Commands::Worker { turn }) => cmd::worker::run(&turn).await,
+        Some(Commands::Worker {
+            turn,
+            session,
+            worker_id,
+            idle_secs,
+            turn_timeout_secs,
+            home,
+            deps,
+            skills,
+            config,
+        }) => {
+            let _ = (worker_id, idle_secs, turn_timeout_secs);
+            cmd::worker::run(
+                turn.as_deref(),
+                session.as_deref(),
+                home,
+                deps,
+                skills,
+                config,
+            )
+            .await
+        }
         None => cmd::run::run().await,
     }
 }

@@ -13,6 +13,8 @@ use tokio::time::{Duration, Instant, sleep};
 
 use crate::config::FargateConfig;
 use crate::sandbox::worker::Launcher;
+#[cfg(test)]
+use crate::sandbox::worker::{Handle, LauncherKind, Status, StopOutcome, WorkerSpec};
 
 /// A request to start one worker task. Pure data, built from config + turn id.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +26,8 @@ pub(crate) struct RunTaskRequest {
     pub assign_public_ip: bool,
     pub container_name: String,
     pub command: Vec<String>,
+    pub client_token: Option<String>,
+    pub started_by: Option<String>,
 }
 
 /// A task's observed status (subset DescribeTasks gives us).
@@ -46,9 +50,12 @@ pub(crate) trait EcsClient: Send + Sync {
         cluster: &str,
         task_arn: &str,
         container_name: &str,
-    ) -> Result<TaskStatus>;
+    ) -> Result<Option<TaskStatus>>;
     /// Best-effort stop (on timeout). The caller logs errors; not fatal.
     async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()>;
+    /// Lists task ARNs started with an idempotency token.
+    #[cfg(test)]
+    async fn list_tasks(&self, cluster: &str, started_by: &str) -> Result<Vec<String>>;
 }
 
 /// Real `EcsClient` over aws-sdk-ecs, with a lazily-built client.
@@ -119,6 +126,8 @@ impl EcsClient for AwsEcsClient {
             .launch_type(LaunchType::Fargate)
             .network_configuration(net)
             .overrides(overrides)
+            .set_client_token(req.client_token.clone())
+            .set_started_by(req.started_by.clone())
             .send()
             .await
             .context("ecs run_task")?;
@@ -143,7 +152,7 @@ impl EcsClient for AwsEcsClient {
         cluster: &str,
         task_arn: &str,
         container_name: &str,
-    ) -> Result<TaskStatus> {
+    ) -> Result<Option<TaskStatus>> {
         let resp = self
             .client()
             .await?
@@ -153,20 +162,19 @@ impl EcsClient for AwsEcsClient {
             .send()
             .await
             .context("ecs describe_tasks")?;
-        let task = resp
-            .tasks()
-            .first()
-            .context("ecs describe_tasks returned no task")?;
+        let Some(task) = resp.tasks().first() else {
+            return Ok(None);
+        };
         let exit_code = task
             .containers()
             .iter()
             .find(|c| c.name() == Some(container_name))
             .and_then(|c| c.exit_code());
-        Ok(TaskStatus {
+        Ok(Some(TaskStatus {
             last_status: task.last_status().unwrap_or("UNKNOWN").to_string(),
             exit_code,
             stopped_reason: task.stopped_reason().map(|s| s.to_string()),
-        })
+        }))
     }
 
     async fn stop_task(&self, cluster: &str, task_arn: &str, reason: &str) -> Result<()> {
@@ -180,6 +188,24 @@ impl EcsClient for AwsEcsClient {
             .await
             .context("ecs stop_task")?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn list_tasks(&self, cluster: &str, started_by: &str) -> Result<Vec<String>> {
+        let response = self
+            .client()
+            .await?
+            .list_tasks()
+            .cluster(cluster)
+            .started_by(started_by)
+            .send()
+            .await
+            .context("ecs list_tasks")?;
+        Ok(response
+            .task_arns()
+            .iter()
+            .map(ToString::to_string)
+            .collect())
     }
 }
 
@@ -211,12 +237,122 @@ impl FargateLauncher {
             assign_public_ip: self.config.assign_public_ip,
             container_name: self.config.container_name.clone(),
             command: vec!["worker".into(), "--turn".into(), turn_id.into()],
+            client_token: None,
+            started_by: None,
         }
+    }
+
+    #[cfg(test)]
+    fn worker_task_request(&self, spec: &WorkerSpec) -> RunTaskRequest {
+        RunTaskRequest {
+            cluster: self.config.cluster.clone(),
+            task_definition: self.config.task_definition.clone(),
+            subnets: self.config.subnets.clone(),
+            security_groups: self.config.security_groups.clone(),
+            assign_public_ip: self.config.assign_public_ip,
+            container_name: self.config.container_name.clone(),
+            command: spec.args(),
+            client_token: Some(spec.launch_token.clone()),
+            started_by: Some(spec.launch_token.clone()),
+        }
+    }
+
+    #[cfg(test)]
+    async fn describe(&self, arn: &str) -> Result<Option<TaskStatus>> {
+        self.ecs
+            .describe_task(&self.config.cluster, arn, &self.config.container_name)
+            .await
     }
 }
 
 #[async_trait]
 impl Launcher for FargateLauncher {
+    #[cfg(test)]
+    async fn start(&self, spec: &WorkerSpec) -> Result<Handle> {
+        let arn = self.ecs.run_task(&self.worker_task_request(spec)).await?;
+        let deadline = Instant::now() + spec.start_timeout;
+        let mut interval = Duration::from_secs(self.config.poll_interval_secs);
+        loop {
+            if Instant::now() >= deadline {
+                let _ = self
+                    .ecs
+                    .stop_task(&self.config.cluster, &arn, "cica worker startup timeout")
+                    .await;
+                bail!(
+                    "worker task not running after {}s",
+                    spec.start_timeout.as_secs()
+                );
+            }
+            let task = self
+                .describe(&arn)
+                .await?
+                .context("worker task disappeared during startup")?;
+            match task.last_status.as_str() {
+                "RUNNING" => {
+                    return Ok(Handle {
+                        kind: LauncherKind::Fargate,
+                        id: arn,
+                    });
+                }
+                "STOPPED" => bail!(
+                    "worker task stopped during startup (exit {:?}, reason {:?})",
+                    task.exit_code,
+                    task.stopped_reason
+                ),
+                _ => {}
+            }
+            sleep(interval.min(deadline.saturating_duration_since(Instant::now()))).await;
+            interval = (interval.saturating_mul(2)).min(Duration::from_secs(30));
+        }
+    }
+
+    #[cfg(test)]
+    async fn status(&self, handle: &Handle) -> Result<Status> {
+        Ok(match self.describe(&handle.id).await? {
+            None => Status::NotFound,
+            Some(task) if task.last_status == "RUNNING" => Status::Running,
+            Some(task) if task.last_status == "STOPPED" => Status::Stopped,
+            Some(_) => Status::Unknown,
+        })
+    }
+
+    #[cfg(test)]
+    async fn stop_and_wait(&self, handle: &Handle, deadline: Duration) -> Result<StopOutcome> {
+        if self.describe(&handle.id).await?.is_none() {
+            return Ok(StopOutcome::NotFound);
+        }
+        self.ecs
+            .stop_task(&self.config.cluster, &handle.id, "cica worker shutdown")
+            .await?;
+        let until = Instant::now() + deadline;
+        let mut interval = Duration::from_secs(self.config.poll_interval_secs);
+        loop {
+            match self.describe(&handle.id).await? {
+                None => return Ok(StopOutcome::NotFound),
+                Some(task) if task.last_status == "STOPPED" => {
+                    return Ok(StopOutcome::Terminated);
+                }
+                _ if Instant::now() >= until => return Ok(StopOutcome::Unknown),
+                _ => sleep(interval).await,
+            }
+            interval = (interval.saturating_mul(2)).min(Duration::from_secs(30));
+        }
+    }
+
+    #[cfg(test)]
+    async fn reconcile(&self, spec: &WorkerSpec) -> Result<Option<Handle>> {
+        Ok(self
+            .ecs
+            .list_tasks(&self.config.cluster, &spec.launch_token)
+            .await?
+            .into_iter()
+            .next()
+            .map(|id| Handle {
+                kind: LauncherKind::Fargate,
+                id,
+            }))
+    }
+
     async fn launch(&self, turn_id: &str) -> Result<()> {
         let arn = self.ecs.run_task(&self.run_task_request(turn_id)).await?;
         let deadline = Instant::now() + Duration::from_secs(self.config.timeout_secs);
@@ -225,7 +361,8 @@ impl Launcher for FargateLauncher {
             let st = self
                 .ecs
                 .describe_task(&self.config.cluster, &arn, &self.config.container_name)
-                .await?;
+                .await?
+                .context("worker task disappeared")?;
             if st.last_status == "STOPPED" {
                 return match st.exit_code {
                     Some(0) => Ok(()),
@@ -254,8 +391,8 @@ impl Launcher for FargateLauncher {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn cfg() -> FargateConfig {
         FargateConfig {
@@ -275,6 +412,8 @@ mod tests {
         statuses: Mutex<VecDeque<TaskStatus>>,
         run_ok: bool,
         stop_called: AtomicBool,
+        requests: Mutex<Vec<RunTaskRequest>>,
+        listed: Vec<String>,
     }
     impl FakeEcs {
         fn new(statuses: Vec<TaskStatus>) -> Self {
@@ -282,6 +421,8 @@ mod tests {
                 statuses: Mutex::new(statuses.into()),
                 run_ok: true,
                 stop_called: AtomicBool::new(false),
+                requests: Mutex::new(Vec::new()),
+                listed: Vec::new(),
             }
         }
 
@@ -290,30 +431,67 @@ mod tests {
                 statuses: Mutex::new(VecDeque::new()),
                 run_ok: false,
                 stop_called: AtomicBool::new(false),
+                requests: Mutex::new(Vec::new()),
+                listed: Vec::new(),
             }
         }
     }
+
+    struct ArcEcs(Arc<FakeEcs>);
+
+    #[async_trait]
+    impl EcsClient for ArcEcs {
+        async fn run_task(&self, request: &RunTaskRequest) -> Result<String> {
+            self.0.run_task(request).await
+        }
+
+        async fn describe_task(
+            &self,
+            cluster: &str,
+            arn: &str,
+            container: &str,
+        ) -> Result<Option<TaskStatus>> {
+            self.0.describe_task(cluster, arn, container).await
+        }
+
+        async fn stop_task(&self, cluster: &str, arn: &str, reason: &str) -> Result<()> {
+            self.0.stop_task(cluster, arn, reason).await
+        }
+
+        async fn list_tasks(&self, cluster: &str, started_by: &str) -> Result<Vec<String>> {
+            self.0.list_tasks(cluster, started_by).await
+        }
+    }
+
     #[async_trait]
     impl EcsClient for FakeEcs {
-        async fn run_task(&self, _req: &RunTaskRequest) -> Result<String> {
+        async fn run_task(&self, req: &RunTaskRequest) -> Result<String> {
+            self.requests.lock().unwrap().push(req.clone());
             if self.run_ok {
                 Ok("arn:task/1".into())
             } else {
                 bail!("run_task failed")
             }
         }
-        async fn describe_task(&self, _c: &str, _a: &str, _container: &str) -> Result<TaskStatus> {
+        async fn describe_task(
+            &self,
+            _c: &str,
+            _a: &str,
+            _container: &str,
+        ) -> Result<Option<TaskStatus>> {
             let mut q = self.statuses.lock().unwrap();
-            // Repeat the last scripted status once the queue drains.
             if q.len() > 1 {
-                Ok(q.pop_front().unwrap())
+                Ok(q.pop_front())
             } else {
-                Ok(q.front().cloned().unwrap())
+                Ok(q.front().cloned())
             }
         }
         async fn stop_task(&self, _c: &str, _a: &str, _r: &str) -> Result<()> {
             self.stop_called.store(true, Ordering::SeqCst);
             Ok(())
+        }
+        async fn list_tasks(&self, _c: &str, _started_by: &str) -> Result<Vec<String>> {
+            Ok(self.listed.clone())
         }
     }
 
@@ -322,6 +500,17 @@ mod tests {
             last_status: last.into(),
             exit_code: exit,
             stopped_reason: None,
+        }
+    }
+
+    fn spec() -> WorkerSpec {
+        WorkerSpec {
+            session: "session".into(),
+            worker_id: "worker".into(),
+            launch_token: "launch-token".into(),
+            idle: Duration::from_secs(600),
+            turn_timeout: Duration::from_secs(900),
+            start_timeout: Duration::from_secs(180),
         }
     }
 
@@ -336,6 +525,113 @@ mod tests {
         assert!(!req.assign_public_ip);
         assert_eq!(req.container_name, "cica-worker");
         assert_eq!(req.command, vec!["worker", "--turn", "turn-123"]);
+    }
+
+    #[test]
+    fn worker_run_task_request_carries_client_token() {
+        let launcher = FargateLauncher::with_client(Box::new(FakeEcs::new(vec![])), cfg());
+        let request = launcher.worker_task_request(&spec());
+        assert_eq!(request.client_token.as_deref(), Some("launch-token"));
+        assert_eq!(request.started_by.as_deref(), Some("launch-token"));
+        assert_eq!(request.command, spec().args());
+    }
+
+    #[tokio::test]
+    async fn start_waits_for_running() {
+        let fake = FakeEcs::new(vec![status("PENDING", None), status("RUNNING", None)]);
+        let launcher = FargateLauncher::with_client(Box::new(fake), cfg());
+        let handle = launcher.start(&spec()).await.unwrap();
+        assert_eq!(handle.kind, LauncherKind::Fargate);
+        assert_eq!(handle.id, "arn:task/1");
+    }
+
+    #[tokio::test]
+    async fn start_rejects_boot_failure() {
+        let mut stopped = status("STOPPED", Some(1));
+        stopped.stopped_reason = Some("image pull failed".into());
+        let launcher = FargateLauncher::with_client(Box::new(FakeEcs::new(vec![stopped])), cfg());
+        assert!(launcher.start(&spec()).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_stops_task_after_timeout() {
+        let fake = Arc::new(FakeEcs::new(vec![status("PENDING", None)]));
+        let mut config = cfg();
+        config.poll_interval_secs = 1;
+        let launcher = FargateLauncher::with_client(Box::new(ArcEcs(fake.clone())), config);
+        let mut worker = spec();
+        worker.start_timeout = Duration::from_secs(180);
+
+        let error = launcher.start(&worker).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "worker task not running after 180s");
+        assert!(fake.stop_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn status_maps_ecs_states() {
+        for (task, expected) in [
+            (Some(status("RUNNING", None)), Status::Running),
+            (Some(status("STOPPED", Some(0))), Status::Stopped),
+            (Some(status("PENDING", None)), Status::Unknown),
+            (None, Status::NotFound),
+        ] {
+            let fake = FakeEcs::new(task.into_iter().collect());
+            let launcher = FargateLauncher::with_client(Box::new(fake), cfg());
+            let handle = Handle {
+                kind: LauncherKind::Fargate,
+                id: "arn:task/1".into(),
+            };
+            assert_eq!(launcher.status(&handle).await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_and_wait_reports_terminal_and_unknown() {
+        let handle = Handle {
+            kind: LauncherKind::Fargate,
+            id: "arn:task/1".into(),
+        };
+        let terminal = FargateLauncher::with_client(
+            Box::new(FakeEcs::new(vec![
+                status("RUNNING", None),
+                status("STOPPED", Some(0)),
+            ])),
+            cfg(),
+        );
+        assert_eq!(
+            terminal
+                .stop_and_wait(&handle, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            StopOutcome::Terminated
+        );
+
+        let unknown = FargateLauncher::with_client(
+            Box::new(FakeEcs::new(vec![status("RUNNING", None)])),
+            cfg(),
+        );
+        assert_eq!(
+            unknown
+                .stop_and_wait(&handle, Duration::ZERO)
+                .await
+                .unwrap(),
+            StopOutcome::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_returns_first_matching_task_or_none() {
+        let mut found = FakeEcs::new(vec![]);
+        found.listed = vec!["arn:task/found".into()];
+        let launcher = FargateLauncher::with_client(Box::new(found), cfg());
+        assert_eq!(
+            launcher.reconcile(&spec()).await.unwrap().unwrap().id,
+            "arn:task/found"
+        );
+
+        let launcher = FargateLauncher::with_client(Box::new(FakeEcs::new(vec![])), cfg());
+        assert!(launcher.reconcile(&spec()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -363,19 +659,6 @@ mod tests {
         let mut c = cfg();
         c.timeout_secs = 0; // first not-stopped poll is already past deadline
         let fake = std::sync::Arc::new(FakeEcs::new(vec![status("RUNNING", None)]));
-        struct ArcEcs(std::sync::Arc<FakeEcs>);
-        #[async_trait]
-        impl EcsClient for ArcEcs {
-            async fn run_task(&self, r: &RunTaskRequest) -> Result<String> {
-                self.0.run_task(r).await
-            }
-            async fn describe_task(&self, c: &str, a: &str, n: &str) -> Result<TaskStatus> {
-                self.0.describe_task(c, a, n).await
-            }
-            async fn stop_task(&self, c: &str, a: &str, r: &str) -> Result<()> {
-                self.0.stop_task(c, a, r).await
-            }
-        }
         let l = FargateLauncher::with_client(Box::new(ArcEcs(fake.clone())), c);
         assert!(l.launch("t1").await.is_err());
         assert!(fake.stop_called.load(Ordering::SeqCst));

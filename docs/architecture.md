@@ -67,6 +67,8 @@ The router selects an execution **provider** via `[deployment].provider`:
 
 `subprocess`, `docker`, and `fargate` all use the same dispatch pattern: serialize a `TurnJob` to the store, launch `cica worker --turn <id>`, poll for the `TurnResult`. They differ only in *how* the worker process is launched. If the configured provider can't be built, the router logs the error and falls back to in-process so it still starts.
 
+Deploy the worker image before the router so the router never targets an older worker command contract.
+
 ## The state store
 
 `StateStore` supports atomic directory trees through `pull`, `push`, and `delete`, plus small point records through `get_record`, `put_record`, and `delete_record`. Point-record operations address one plain filesystem file or one S3 object at `<prefix>/<key>` and never list objects. Worker results use a point record at `turns/<turn_id>/result` containing a versioned envelope whose turn and affinity identities are validated before the router accepts the enclosed result or error; S3 deployments should apply a lifecycle expiry to `turns/` as a leak backstop.

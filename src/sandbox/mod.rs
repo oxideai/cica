@@ -95,6 +95,36 @@ pub struct TurnResult {
     pub backend_session_id: String,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<u64>,
+    /// File names the agent produced and named with an `[attachment:...]`
+    /// marker, relative to the turn's `out/` prefix in the store.
+    ///
+    /// A worker writes them inside a container the router cannot see, so they
+    /// travel through the store the same way inbound attachments do. Defaulted
+    /// so a result written by an older worker still deserializes.
+    #[serde(default)]
+    pub produced_files: Vec<String>,
+}
+
+/// Paths named by `[attachment:/path/to/file]` markers, in the order they
+/// appear, without checking whether any of them exist.
+///
+/// The check has to happen on whichever machine holds the file: the worker that
+/// wrote it, or the router after pulling it. Sharing the parser keeps those two
+/// readings of the same marker from drifting apart.
+pub fn attachment_markers(text: &str) -> Vec<String> {
+    const OPEN: &str = "[attachment:";
+    let mut out = Vec::new();
+    for (idx, _) in text.match_indices(OPEN) {
+        let start = idx + OPEN.len();
+        let Some(end) = text[start..].find(']') else {
+            continue;
+        };
+        let path = text[start..start + end].trim();
+        if !path.is_empty() && !out.iter().any(|p| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -290,6 +320,7 @@ mod tests {
             backend_session_id: "sess-2".into(),
             cost_usd: Some(0.1),
             duration_ms: Some(5),
+            produced_files: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: TurnResult = serde_json::from_str(&json).unwrap();

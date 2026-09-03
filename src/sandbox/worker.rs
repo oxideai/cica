@@ -217,9 +217,7 @@ impl DockerLauncher {
     }
 
     /// Extra `-e KEY=VALUE` env vars to pass into the container.
-    // Reached only from the Docker integration test today; cloud launchers
-    // (Fargate/Cloud Run, phase 3b-2) will use it to inject creds/config.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self

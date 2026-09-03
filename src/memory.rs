@@ -313,21 +313,6 @@ impl MemoryIndex {
 
         Ok(results)
     }
-
-    /// Get all memory file paths for a user (for context building)
-    #[allow(dead_code)]
-    pub fn list_memory_files(&self, channel: &str, user_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT path FROM memory_files WHERE channel = ? AND user_id = ?")?;
-
-        let paths = stmt
-            .query_map([channel, user_id], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        Ok(paths)
-    }
 }
 
 /// A chunk of text with line information

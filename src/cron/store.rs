@@ -32,26 +32,11 @@ pub struct DeliveryTarget {
 }
 
 impl DeliveryTarget {
-    /// Create a target that delivers to the owner's DM.
-    #[allow(dead_code)]
-    pub fn owner_dm() -> Self {
-        Self::default()
-    }
-
     /// Create a target that delivers to a specific channel.
     pub fn channel(channel_id: String) -> Self {
         Self {
             channel_id: Some(channel_id),
             thread_id: None,
-        }
-    }
-
-    /// Create a target that delivers to a specific thread in a channel.
-    #[allow(dead_code)]
-    pub fn thread(channel_id: String, thread_id: String) -> Self {
-        Self {
-            channel_id: Some(channel_id),
-            thread_id: Some(thread_id),
         }
     }
 
@@ -151,12 +136,6 @@ impl CronJob {
         };
         job.update_next_run(now);
         job
-    }
-
-    /// User key for ownership (channel:user_id).
-    #[allow(dead_code)]
-    pub fn user_key(&self) -> String {
-        format!("{}:{}", self.channel, self.user_id)
     }
 
     /// Calculate and update next_run_at based on given time.
@@ -266,12 +245,6 @@ impl CronStore {
     /// Get all jobs that are due to run.
     pub fn get_due_jobs(&self, now_ms: u64) -> Vec<&CronJob> {
         self.jobs.values().filter(|j| j.is_due(now_ms)).collect()
-    }
-
-    /// Get all enabled jobs (for scheduler).
-    #[allow(dead_code)]
-    pub fn get_enabled_jobs(&self) -> Vec<&CronJob> {
-        self.jobs.values().filter(|j| j.enabled).collect()
     }
 
     /// Reset any jobs stuck in Running state (e.g., after a crash).
@@ -401,30 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn test_user_key() {
-        let job = CronJob::new(
-            "Test".to_string(),
-            "Test".to_string(),
-            CronSchedule::Every(60_000),
-            "telegram".to_string(),
-            "12345".to_string(),
-            None,
-        );
-
-        assert_eq!(job.user_key(), "telegram:12345");
-    }
-
-    #[test]
     fn test_delivery_target_resolve() {
         let default_target = DeliveryTarget::default();
         assert_eq!(default_target.resolve_channel_id("U12345"), "U12345");
 
         let channel_target = DeliveryTarget::channel("C98765".to_string());
         assert_eq!(channel_target.resolve_channel_id("U12345"), "C98765");
-
-        let thread_target =
-            DeliveryTarget::thread("C98765".to_string(), "1234567890.123456".to_string());
-        assert_eq!(thread_target.resolve_channel_id("U12345"), "C98765");
     }
 
     #[test]

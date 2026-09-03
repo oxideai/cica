@@ -20,11 +20,6 @@ use async_trait::async_trait;
 use crate::config::{AiBackend, Config};
 
 /// A single agent turn to execute.
-///
-/// Some fields (`session_id`, `channel`, `user_id`, `backend`, `model`) are set
-/// by callers but not yet read by `LocalProcessProvider`; they're part of the
-/// turn contract for later phases (remote workers, per-job backend routing).
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnJob {
     /// Logical cica session key (e.g. "telegram:123").

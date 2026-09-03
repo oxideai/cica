@@ -2,8 +2,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Clock trait for abstracting time - enables testing without real timers.
@@ -32,52 +30,42 @@ impl Clock for SystemClock {
     }
 }
 
-/// Fake clock for testing - time can be manually advanced.
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct FakeClock {
-    current_time: Arc<AtomicU64>,
-}
-
-#[allow(dead_code)]
-impl FakeClock {
-    /// Create a new fake clock starting at the given time.
-    pub fn new(initial_time_ms: u64) -> Self {
-        Self {
-            current_time: Arc::new(AtomicU64::new(initial_time_ms)),
-        }
-    }
-
-    /// Advance time by the specified duration in milliseconds.
-    pub fn advance_ms(&self, duration_ms: u64) {
-        self.current_time.fetch_add(duration_ms, Ordering::SeqCst);
-    }
-
-    /// Advance time by a Duration.
-    pub fn advance(&self, duration: Duration) {
-        self.advance_ms(duration.as_millis() as u64);
-    }
-
-    /// Set time to a specific value.
-    pub fn set(&self, time_ms: u64) {
-        self.current_time.store(time_ms, Ordering::SeqCst);
-    }
-}
-
-impl Clock for FakeClock {
-    fn now_millis(&self) -> u64 {
-        self.current_time.load(Ordering::SeqCst)
-    }
-
-    fn sleep(&self, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        // In tests, sleep is instant - time is controlled manually via advance()
-        Box::pin(async { tokio::task::yield_now().await })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone)]
+    pub struct FakeClock {
+        current_time: Arc<AtomicU64>,
+    }
+
+    impl FakeClock {
+        pub fn new(initial_time_ms: u64) -> Self {
+            Self {
+                current_time: Arc::new(AtomicU64::new(initial_time_ms)),
+            }
+        }
+
+        pub fn advance_ms(&self, duration_ms: u64) {
+            self.current_time.fetch_add(duration_ms, Ordering::SeqCst);
+        }
+
+        pub fn set(&self, time_ms: u64) {
+            self.current_time.store(time_ms, Ordering::SeqCst);
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now_millis(&self) -> u64 {
+            self.current_time.load(Ordering::SeqCst)
+        }
+
+        fn sleep(&self, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async { tokio::task::yield_now().await })
+        }
+    }
 
     #[test]
     fn test_system_clock() {

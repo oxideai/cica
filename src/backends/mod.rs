@@ -76,15 +76,6 @@ async fn query_cursor(prompt: &str, options: QueryOptions, config: &Config) -> R
     cursor::query_with_options(prompt, cursor_options).await
 }
 
-#[allow(dead_code)]
-pub fn current_backend_name() -> Result<&'static str> {
-    let config = Config::load()?;
-    Ok(match config.backend {
-        AiBackend::Claude => "Claude Code",
-        AiBackend::Cursor => "Cursor CLI",
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

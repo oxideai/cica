@@ -147,30 +147,22 @@ async fn download_and_extract_bun(url: &str, dest_dir: &Path) -> Result<()> {
     bail!("Could not find bun binary in archive")
 }
 
-/// How Claude Code has to be launched, which depends on how npm shipped it.
-///
-/// Up to 2.1.112 the package was JavaScript with a `cli.js` entry point, run
-/// under bun. From 2.1.113 it ships a native binary per platform as an optional
-/// dependency, and the package's own `bin/claude.exe` is a stub that prints
-/// "claude native binary not installed" — the real executable is the one the
-/// installer links into `node_modules/.bin/claude`.
+/// Up to 2.1.112 the npm package was JavaScript with a `cli.js` run under bun.
+/// From 2.1.113 it is a native binary the installer links into
+/// `node_modules/.bin/claude`; the package's own `bin/claude.exe` is a
+/// non-executable stub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeCode {
-    /// A native executable. Run it directly; bun is not involved.
     Native(PathBuf),
-    /// A JavaScript entry point. Run it under bun.
     Script(PathBuf),
 }
 
 pub fn find_claude_code(paths: &Paths) -> Option<ClaudeCode> {
-    // Current layout (>= 2.1.113). Deliberately the linked binary rather than
-    // the package's own bin/claude.exe, which is the stub.
     let native = paths.claude_code_dir.join("node_modules/.bin/claude");
     if native.exists() {
         return Some(ClaudeCode::Native(native));
     }
 
-    // Legacy layout (<= 2.1.112).
     let script = paths
         .claude_code_dir
         .join("node_modules/@anthropic-ai/claude-code/cli.js");
@@ -745,8 +737,6 @@ mod claude_code_entry_tests {
         (tmp, paths)
     }
 
-    /// The layout npm has shipped since 2.1.113: a native binary per platform,
-    /// linked into node_modules/.bin by the installer.
     #[test]
     fn resolves_the_linked_native_binary() {
         let (_t, paths) = paths_with(&["node_modules/.bin/claude"]);
@@ -758,8 +748,6 @@ mod claude_code_entry_tests {
         );
     }
 
-    /// The layout up to 2.1.112, which has to keep working for an existing
-    /// install that has not been updated.
     #[test]
     fn falls_back_to_the_legacy_script() {
         let (_t, paths) = paths_with(&["node_modules/@anthropic-ai/claude-code/cli.js"]);
@@ -773,9 +761,6 @@ mod claude_code_entry_tests {
         );
     }
 
-    /// The package's own bin/claude.exe is a stub that prints "claude native
-    /// binary not installed" and is not executable. Picking it up would turn a
-    /// clear "not found" into a turn that fails once it is already running.
     #[test]
     fn never_resolves_the_packages_stub() {
         let (_t, paths) = paths_with(&["node_modules/@anthropic-ai/claude-code/bin/claude.exe"]);
@@ -788,8 +773,6 @@ mod claude_code_entry_tests {
         assert_eq!(find_claude_code(&paths), None);
     }
 
-    /// Both present: the native binary wins, because that is what a current
-    /// install actually runs.
     #[test]
     fn prefers_native_over_a_stale_script() {
         let (_t, paths) = paths_with(&[

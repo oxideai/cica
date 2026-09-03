@@ -69,9 +69,6 @@ pub async fn query_with_options(
     let claude_code = setup::find_claude_code(paths)
         .ok_or_else(|| anyhow!("Claude Code not found. Run `cica init` to set up Claude."))?;
 
-    // A native binary is executed directly. Only the legacy script entry needs
-    // bun, so a missing bun is only fatal in that case -- it is not a reason to
-    // refuse a turn an installed native binary could serve.
     let (program, prefix_args): (PathBuf, Vec<PathBuf>) = match &claude_code {
         setup::ClaudeCode::Native(exe) => (exe.clone(), Vec::new()),
         setup::ClaudeCode::Script(js) => {

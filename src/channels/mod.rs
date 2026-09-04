@@ -417,10 +417,6 @@ pub async fn execute_claude_query(
             .send_message_with_attachments(&cleaned_response, &attachments)
             .await
         {
-            // Send the answer anyway. A failed upload used to take the whole
-            // reply with it: the turn had already run, the text was ready, and
-            // the user got silence -- indistinguishable from a crash, and the
-            // most expensive part of the work thrown away over a file.
             warn!(
                 "Failed to send message with attachments, falling back to text: {}",
                 e

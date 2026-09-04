@@ -968,12 +968,6 @@ pub async fn run_worker_loop<P: SandboxProvider>(
         let timed_out =
             matches!(&outcome, Some(TurnOutcome::Error(error)) if error == "turn timed out");
         if let Some(mut outcome) = outcome {
-            // The warm loop reimplements the turn lifecycle that run_worker_turn
-            // owns, and this step was missed when it landed: files the agent
-            // produced stay in a container the router cannot read, so the
-            // `[attachment:...]` marker reaches the user as literal text. Every
-            // real turn takes this path -- `--turn` is only used by tooling --
-            // so outbound attachments were silently dead everywhere that matters.
             if let TurnOutcome::Result(result) = &mut outcome {
                 push_produced_files(store.as_ref(), &turn_id, result).await;
             }
@@ -2231,12 +2225,6 @@ mod warm_protocol_tests {
         (task, affinity, worker)
     }
 
-    /// The warm loop is the path every real turn takes -- `--turn` is only used
-    /// by tooling -- and it reimplements the turn lifecycle that run_worker_turn
-    /// owns. When it landed it did not carry produced files, so a file the agent
-    /// wrote stayed in the worker and the `[attachment:...]` marker reached the
-    /// user as literal text. The function-level tests all passed throughout,
-    /// because they call push_produced_files directly. This one drives the loop.
     #[tokio::test(start_paused = true)]
     async fn the_warm_loop_ships_a_file_the_agent_produced() {
         let root = tempfile::tempdir().unwrap();

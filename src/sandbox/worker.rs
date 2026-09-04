@@ -201,6 +201,20 @@ async fn pull_result(store: &dyn StateStore, turn_id: &str) -> Result<Option<Tur
         .transpose()
 }
 
+async fn turn_outcome(
+    store: &dyn StateStore,
+    turn_id: &str,
+    result: Result<TurnResult>,
+) -> TurnOutcome {
+    match result {
+        Ok(mut result) => {
+            push_produced_files(store, turn_id, &mut result).await;
+            TurnOutcome::Result(result)
+        }
+        Err(error) => TurnOutcome::Error(error.to_string()),
+    }
+}
+
 pub async fn run_worker_turn(
     store: &dyn StateStore,
     engine: &dyn crate::sandbox::SandboxProvider,
@@ -209,13 +223,7 @@ pub async fn run_worker_turn(
     static WORKER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let job = pull_job(store, turn_id).await?;
     let affinity_id = job.affinity.id();
-    let outcome = match engine.run_turn(job).await {
-        Ok(mut result) => {
-            push_produced_files(store, turn_id, &mut result).await;
-            TurnOutcome::Result(result)
-        }
-        Err(error) => TurnOutcome::Error(error.to_string()),
-    };
+    let outcome = turn_outcome(store, turn_id, engine.run_turn(job).await).await;
     push_result(
         store,
         &TurnEnvelope {
@@ -961,22 +969,13 @@ pub async fn run_worker_loop<P: SandboxProvider>(
         let timeout = sleep(timing.turn_timeout);
         tokio::pin!(timeout);
         let outcome = tokio::select! {
-            result = &mut run => Some(result.map(TurnOutcome::Result).unwrap_or_else(|error| TurnOutcome::Error(error.to_string()))),
+            result = &mut run => Some(turn_outcome(store.as_ref(), &turn_id, result).await),
             _ = &mut timeout => { engine.abandon(&job); Some(TurnOutcome::Error("turn timed out".into())) },
             _ = watch_abort(store.as_ref(), &spec.session, &turn_id, &spec.worker_id, timing.inbox_poll) => { engine.abandon(&job); None },
         };
         let timed_out =
             matches!(&outcome, Some(TurnOutcome::Error(error)) if error == "turn timed out");
-        if let Some(mut outcome) = outcome {
-            // The warm loop reimplements the turn lifecycle that run_worker_turn
-            // owns, and this step was missed when it landed: files the agent
-            // produced stay in a container the router cannot read, so the
-            // `[attachment:...]` marker reaches the user as literal text. Every
-            // real turn takes this path -- `--turn` is only used by tooling --
-            // so outbound attachments were silently dead everywhere that matters.
-            if let TurnOutcome::Result(result) = &mut outcome {
-                push_produced_files(store.as_ref(), &turn_id, result).await;
-            }
+        if let Some(outcome) = outcome {
             match still_owner(store.as_ref(), &spec.session, &spec.worker_id).await {
                 Ok(true) => {
                     let envelope = TurnEnvelope {
@@ -2231,12 +2230,6 @@ mod warm_protocol_tests {
         (task, affinity, worker)
     }
 
-    /// The warm loop is the path every real turn takes -- `--turn` is only used
-    /// by tooling -- and it reimplements the turn lifecycle that run_worker_turn
-    /// owns. When it landed it did not carry produced files, so a file the agent
-    /// wrote stayed in the worker and the `[attachment:...]` marker reached the
-    /// user as literal text. The function-level tests all passed throughout,
-    /// because they call push_produced_files directly. This one drives the loop.
     #[tokio::test(start_paused = true)]
     async fn the_warm_loop_ships_a_file_the_agent_produced() {
         let root = tempfile::tempdir().unwrap();

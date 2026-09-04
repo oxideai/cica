@@ -58,6 +58,8 @@ Configure one or more. A channel section's presence is what enables it.
 | `onboarding_prompt` | string | — | Per-channel override. |
 | `unfurl_links` | bool | `false` | Let Slack preview links in bot messages. |
 
+Files the agent names with an `[attachment:...]` marker are uploaded with the bot token, which needs the `files:write` scope. Without it the reply still arrives as text, with a note that the file could not be attached.
+
 ## Backends
 
 ### `[claude]`

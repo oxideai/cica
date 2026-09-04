@@ -438,9 +438,8 @@ impl LaunchedWorkerProvider {
         }
     }
 
-    /// Kept apart from inbound attachments so an outbound file cannot overwrite one of the same name.
     fn produced_dir(&self) -> PathBuf {
-        self.base.join("internal/attachments/outbound")
+        crate::sandbox::outbound_dir(&self.base)
     }
 
     fn owner_key(id: &str) -> String {

@@ -408,12 +408,17 @@ pub async fn execute_claude_query(
         false,
     );
 
-    deliver(channel.as_ref(), response).await;
+    deliver(
+        channel.as_ref(),
+        response,
+        &sandbox::outbound_dir(&rt.paths.base),
+    )
+    .await;
 
     reindex_user_memories(&rt, channel.name(), user_id).await;
 }
 
-async fn deliver(channel: &dyn Channel, response: &str) {
+async fn deliver(channel: &dyn Channel, response: &str, outbound: &Path) {
     let attachments = extract_media_attachments(response);
     if attachments.is_empty() {
         if let Err(e) = channel.send_message(response).await {
@@ -436,6 +441,28 @@ async fn deliver(channel: &dyn Channel, response: &str) {
             format!("{cleaned_response}\n\n(I produced a file for this but could not attach it.)");
         if let Err(e) = channel.send_message(&fallback).await {
             warn!("Failed to send the fallback message: {}", e);
+        }
+    }
+    discard_produced(&attachments, outbound);
+}
+
+/// The router's copy of a produced file exists only to be sent; the store copy
+/// went with the turn. Removes the per-turn directory under `outbound`, and
+/// leaves any other path (an inbound attachment the agent echoed) alone.
+fn discard_produced(attachments: &[PathBuf], outbound: &Path) {
+    for path in attachments {
+        let Some(turn_dir) = path.parent() else {
+            continue;
+        };
+        if turn_dir.parent() != Some(outbound) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(turn_dir) {
+            warn!(
+                "Failed to remove produced files {}: {}",
+                turn_dir.display(),
+                e
+            );
         }
     }
 }
@@ -482,6 +509,7 @@ mod delivery_tests {
 
     fn response_naming_a_file(dir: &Path) -> String {
         let file = dir.join("export.json");
+        std::fs::create_dir_all(dir).unwrap();
         std::fs::write(&file, b"{}").unwrap();
         format!("Here it is.\n[attachment:{}]", file.display())
     }
@@ -493,8 +521,18 @@ mod delivery_tests {
             fail_attachments: true,
             sent: Default::default(),
         };
-        deliver(&channel, &response_naming_a_file(dir.path())).await;
+        let outbound = dir.path().join("outbound");
+        deliver(
+            &channel,
+            &response_naming_a_file(&outbound.join("turn-1")),
+            &outbound,
+        )
+        .await;
 
+        assert!(
+            !outbound.join("turn-1").exists(),
+            "the router copy outlived the send"
+        );
         let sent = channel.sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "expected exactly one fallback message");
         let (text, attachments) = &sent[0];
@@ -511,12 +549,38 @@ mod delivery_tests {
             fail_attachments: false,
             sent: Default::default(),
         };
-        deliver(&channel, &response_naming_a_file(dir.path())).await;
+        let outbound = dir.path().join("outbound");
+        deliver(
+            &channel,
+            &response_naming_a_file(&outbound.join("turn-1")),
+            &outbound,
+        )
+        .await;
 
+        assert!(!outbound.join("turn-1").exists());
         let sent = channel.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].1, 1);
         assert!(!sent[0].0.contains("could not attach"));
+    }
+
+    #[tokio::test]
+    async fn a_file_outside_the_outbound_dir_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = Recording {
+            fail_attachments: false,
+            sent: Default::default(),
+        };
+        let inbound = dir.path().join("inbound");
+        deliver(
+            &channel,
+            &response_naming_a_file(&inbound),
+            &dir.path().join("outbound"),
+        )
+        .await;
+
+        assert!(inbound.join("export.json").is_file());
+        assert_eq!(channel.sent.lock().unwrap()[0].1, 1);
     }
 }
 

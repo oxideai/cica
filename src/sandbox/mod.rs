@@ -193,6 +193,13 @@ pub struct TurnResult {
     pub produced_files: Vec<String>,
 }
 
+/// Where the router lands files a worker produced, one directory per turn.
+/// Kept apart from inbound attachments so an outbound file cannot overwrite
+/// one of the same name.
+pub fn outbound_dir(base: &std::path::Path) -> std::path::PathBuf {
+    base.join("internal/attachments/outbound")
+}
+
 /// Paths named by `[attachment:/path/to/file]` markers, in order, whether or
 /// not they exist on this machine.
 pub fn attachment_markers(text: &str) -> Vec<String> {

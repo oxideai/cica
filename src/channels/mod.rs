@@ -417,7 +417,20 @@ pub async fn execute_claude_query(
             .send_message_with_attachments(&cleaned_response, &attachments)
             .await
         {
-            warn!("Failed to send message with attachments: {}", e);
+            // Send the answer anyway. A failed upload used to take the whole
+            // reply with it: the turn had already run, the text was ready, and
+            // the user got silence -- indistinguishable from a crash, and the
+            // most expensive part of the work thrown away over a file.
+            warn!(
+                "Failed to send message with attachments, falling back to text: {}",
+                e
+            );
+            let fallback = format!(
+                "{cleaned_response}\n\n_(I produced a file for this but could not attach it.)_"
+            );
+            if let Err(e) = channel.send_message(&fallback).await {
+                warn!("Failed to send the fallback message: {}", e);
+            }
         }
     } else if let Err(e) = channel.send_message(response).await {
         warn!("Failed to send message: {}", e);

@@ -967,7 +967,16 @@ pub async fn run_worker_loop<P: SandboxProvider>(
         };
         let timed_out =
             matches!(&outcome, Some(TurnOutcome::Error(error)) if error == "turn timed out");
-        if let Some(outcome) = outcome {
+        if let Some(mut outcome) = outcome {
+            // The warm loop reimplements the turn lifecycle that run_worker_turn
+            // owns, and this step was missed when it landed: files the agent
+            // produced stay in a container the router cannot read, so the
+            // `[attachment:...]` marker reaches the user as literal text. Every
+            // real turn takes this path -- `--turn` is only used by tooling --
+            // so outbound attachments were silently dead everywhere that matters.
+            if let TurnOutcome::Result(result) = &mut outcome {
+                push_produced_files(store.as_ref(), &turn_id, result).await;
+            }
             match still_owner(store.as_ref(), &spec.session, &spec.worker_id).await {
                 Ok(true) => {
                     let envelope = TurnEnvelope {
@@ -2220,6 +2229,82 @@ mod warm_protocol_tests {
             tokio::spawn(async move { run_worker_loop(store, &warm, spec, worker_timing).await });
         tokio::task::yield_now().await;
         (task, affinity, worker)
+    }
+
+    /// The warm loop is the path every real turn takes -- `--turn` is only used
+    /// by tooling -- and it reimplements the turn lifecycle that run_worker_turn
+    /// owns. When it landed it did not carry produced files, so a file the agent
+    /// wrote stayed in the worker and the `[attachment:...]` marker reached the
+    /// user as literal text. The function-level tests all passed throughout,
+    /// because they call push_produced_files directly. This one drives the loop.
+    #[tokio::test(start_paused = true)]
+    async fn the_warm_loop_ships_a_file_the_agent_produced() {
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn StateStore> =
+            Arc::new(FilesystemStateStore::new(root.path().join("store")));
+
+        let produced = root.path().join("export.json");
+        std::fs::write(&produced, br#"{"herd": 120}"#).unwrap();
+
+        struct Producing(String);
+        #[async_trait::async_trait]
+        impl crate::sandbox::SandboxProvider for Producing {
+            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+                Ok(TurnResult {
+                    response: format!("[attachment:{}]\n\nHere it is.", self.0),
+                    backend_session_id: "sess".into(),
+                    cost_usd: None,
+                    duration_ms: None,
+                    produced_files: Vec::new(),
+                })
+            }
+        }
+
+        let engine = Producing(produced.display().to_string());
+        let (task, affinity, worker) =
+            spawn_loop(root.path(), store.clone(), engine, timing()).await;
+        assign(store.as_ref(), &affinity, &worker, "t-warm").await;
+
+        for _ in 0..200 {
+            if store
+                .get_record(&result_key("t-warm"))
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let bytes = store
+            .get_record(&result_key("t-warm"))
+            .await
+            .unwrap()
+            .expect("the loop wrote a result");
+        let envelope: TurnEnvelope = serde_json::from_slice(&bytes).unwrap();
+        let TurnOutcome::Result(result) = envelope.outcome else {
+            panic!("expected a result, got {:?}", envelope.outcome);
+        };
+        assert_eq!(
+            result.produced_files,
+            vec!["export.json".to_string()],
+            "the warm loop dropped the produced file, so the marker reaches the user as text"
+        );
+
+        let dest = root.path().join("pulled");
+        assert!(
+            store.pull(&produced_key("t-warm"), &dest).await.unwrap(),
+            "produced files were named but never pushed"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("export.json")).unwrap(),
+            br#"{"herd": 120}"#
+        );
+
+        task.abort();
     }
 
     #[tokio::test(start_paused = true)]

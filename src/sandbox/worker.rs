@@ -849,6 +849,7 @@ pub async fn run_worker_loop<P: SandboxProvider>(
         policy_hash: spec.policy_hash.clone(),
     }));
     put_json(store.as_ref(), &heartbeat_key, &*heartbeat.lock().await).await?;
+    engine.warm_up().await;
     {
         let mut hb = heartbeat.lock().await;
         hb.phase = WorkerPhase::Ready;
@@ -1832,6 +1833,41 @@ mod warm_protocol_tests {
     use crate::sandbox::warm::WarmHydratingProvider;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    struct CountingStore {
+        inner: FilesystemStateStore,
+        skill_pulls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StateStore for CountingStore {
+        async fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.get_record(key).await
+        }
+
+        async fn put_record(&self, key: &str, bytes: &[u8]) -> Result<()> {
+            self.inner.put_record(key, bytes).await
+        }
+
+        async fn delete_record(&self, key: &str) -> Result<()> {
+            self.inner.delete_record(key).await
+        }
+
+        async fn pull(&self, key: &str, dest: &Path) -> Result<bool> {
+            if key == "skills" {
+                self.skill_pulls.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.pull(key, dest).await
+        }
+
+        async fn push(&self, src: &Path, key: &str) -> Result<()> {
+            self.inner.push(src, key).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
     #[derive(Default)]
     struct FaultStore {
         records: Mutex<HashMap<String, Vec<u8>>>,
@@ -2128,7 +2164,6 @@ mod warm_protocol_tests {
             root.path().join("claude"),
             root.path().join("cursor"),
             root.path().join("cwd"),
-            false,
             None,
         );
         let spec = WorkerSpec {
@@ -2170,7 +2205,6 @@ mod warm_protocol_tests {
             root.join("claude"),
             root.join("cursor"),
             root.join("cwd"),
-            false,
             Some((affinity.clone(), worker.clone())),
         );
         let spec = WorkerSpec {
@@ -2186,6 +2220,65 @@ mod warm_protocol_tests {
             tokio::spawn(async move { run_worker_loop(store, &warm, spec, worker_timing).await });
         tokio::task::yield_now().await;
         (task, affinity, worker)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_pulls_skills_before_ready_and_not_again_on_first_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingStore {
+            inner: FilesystemStateStore::new(root.path().join("store")),
+            skill_pulls: AtomicUsize::new(0),
+        });
+        let skills = root.path().join("seed");
+        std::fs::create_dir_all(skills.join("foo")).unwrap();
+        std::fs::write(skills.join("foo/SKILL.md"), "name: foo").unwrap();
+        store.push(&skills, "skills").await.unwrap();
+        store
+            .put_record("skills/head", br#"{"version":"one"}"#)
+            .await
+            .unwrap();
+        let (task, affinity, worker) = spawn_loop(
+            root.path(),
+            store.clone(),
+            StubEngine {
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            timing(),
+        )
+        .await;
+        let heartbeat: HeartbeatRecord = serde_json::from_slice(
+            &store
+                .get_record(&LaunchedWorkerProvider::heartbeat_key(&affinity, &worker))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(heartbeat.phase, WorkerPhase::Ready);
+        assert_eq!(store.skill_pulls.load(Ordering::SeqCst), 1);
+        assert!(root.path().join("cwd/skills/foo/SKILL.md").exists());
+        assign(store.as_ref(), &affinity, &worker, "one").await;
+        for _ in 0..50 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            if store
+                .get_record(&result_key("one"))
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+        }
+        assert!(
+            store
+                .get_record(&result_key("one"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(store.skill_pulls.load(Ordering::SeqCst), 1);
+        task.abort();
     }
 
     #[tokio::test(start_paused = true)]

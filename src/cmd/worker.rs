@@ -88,7 +88,6 @@ pub async fn run(
         paths.claude_home.clone(),
         paths.cursor_home.clone(),
         paths.base.clone(),
-        config.skills.is_some(),
         Some((session.into(), worker_id.into())),
     );
     run_worker_loop(store, &engine, spec, timing).await

@@ -408,31 +408,116 @@ pub async fn execute_claude_query(
         false,
     );
 
-    let attachments = extract_media_attachments(response);
-
-    if !attachments.is_empty() {
-        debug!("Sending response with {} attachment(s)", attachments.len());
-        let cleaned_response = remove_file_path_lines(response);
-        if let Err(e) = channel
-            .send_message_with_attachments(&cleaned_response, &attachments)
-            .await
-        {
-            warn!(
-                "Failed to send message with attachments, falling back to text: {}",
-                e
-            );
-            let fallback = format!(
-                "{cleaned_response}\n\n_(I produced a file for this but could not attach it.)_"
-            );
-            if let Err(e) = channel.send_message(&fallback).await {
-                warn!("Failed to send the fallback message: {}", e);
-            }
-        }
-    } else if let Err(e) = channel.send_message(response).await {
-        warn!("Failed to send message: {}", e);
-    }
+    deliver(channel.as_ref(), response).await;
 
     reindex_user_memories(&rt, channel.name(), user_id).await;
+}
+
+async fn deliver(channel: &dyn Channel, response: &str) {
+    let attachments = extract_media_attachments(response);
+    if attachments.is_empty() {
+        if let Err(e) = channel.send_message(response).await {
+            warn!("Failed to send message: {}", e);
+        }
+        return;
+    }
+
+    debug!("Sending response with {} attachment(s)", attachments.len());
+    let cleaned_response = remove_file_path_lines(response);
+    if let Err(e) = channel
+        .send_message_with_attachments(&cleaned_response, &attachments)
+        .await
+    {
+        warn!(
+            "Failed to send message with attachments, falling back to text: {}",
+            e
+        );
+        let fallback =
+            format!("{cleaned_response}\n\n(I produced a file for this but could not attach it.)");
+        if let Err(e) = channel.send_message(&fallback).await {
+            warn!("Failed to send the fallback message: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    struct Recording {
+        fail_attachments: bool,
+        sent: std::sync::Mutex<Vec<(String, usize)>>,
+    }
+
+    #[async_trait]
+    impl Channel for Recording {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+        fn display_name(&self) -> &'static str {
+            "Test"
+        }
+        async fn send_message(&self, message: &str) -> Result<()> {
+            self.sent.lock().unwrap().push((message.to_string(), 0));
+            Ok(())
+        }
+        async fn send_message_with_attachments(
+            &self,
+            message: &str,
+            paths: &[PathBuf],
+        ) -> Result<()> {
+            if self.fail_attachments {
+                anyhow::bail!("missing_scope");
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((message.to_string(), paths.len()));
+            Ok(())
+        }
+        fn start_typing(&self) -> TypingGuard {
+            TypingGuard::noop()
+        }
+    }
+
+    fn response_naming_a_file(dir: &Path) -> String {
+        let file = dir.join("export.json");
+        std::fs::write(&file, b"{}").unwrap();
+        format!("Here it is.\n[attachment:{}]", file.display())
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_still_delivers_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = Recording {
+            fail_attachments: true,
+            sent: Default::default(),
+        };
+        deliver(&channel, &response_naming_a_file(dir.path())).await;
+
+        let sent = channel.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "expected exactly one fallback message");
+        let (text, attachments) = &sent[0];
+        assert_eq!(*attachments, 0);
+        assert!(text.starts_with("Here it is."));
+        assert!(text.contains("could not attach"));
+        assert!(!text.contains("[attachment:"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_upload_sends_once_with_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = Recording {
+            fail_attachments: false,
+            sent: Default::default(),
+        };
+        deliver(&channel, &response_naming_a_file(dir.path())).await;
+
+        let sent = channel.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1, 1);
+        assert!(!sent[0].0.contains("could not attach"));
+    }
 }
 
 const DEBOUNCE_MS: u64 = 200;

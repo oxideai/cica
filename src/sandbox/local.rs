@@ -65,6 +65,7 @@ pub(crate) fn turn_result_from_query(qr: QueryResult) -> TurnResult {
         backend_session_id: qr.session_id,
         cost_usd: qr.cost_usd,
         duration_ms: qr.duration_ms,
+        tokens: qr.tokens,
         // A local run writes files where the channel can already read them.
         produced_files: Vec::new(),
     }
@@ -76,12 +77,14 @@ pub fn query_result_from_turn(tr: TurnResult) -> QueryResult {
         session_id: tr.backend_session_id,
         duration_ms: tr.duration_ms,
         cost_usd: tr.cost_usd,
+        tokens: tr.tokens,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::TokenUsage;
     use crate::config::AiBackend;
     use std::path::Path;
 
@@ -122,12 +125,25 @@ mod tests {
             session_id: "sess-9".into(),
             duration_ms: Some(123),
             cost_usd: Some(0.5),
+            tokens: Some(TokenUsage {
+                input: 20,
+                output: 4,
+                cached_input: 150,
+            }),
         };
         let tr = turn_result_from_query(qr);
         assert_eq!(tr.response, "hi");
         assert_eq!(tr.backend_session_id, "sess-9");
         assert_eq!(tr.duration_ms, Some(123));
         assert_eq!(tr.cost_usd, Some(0.5));
+        assert_eq!(
+            tr.tokens,
+            Some(TokenUsage {
+                input: 20,
+                output: 4,
+                cached_input: 150,
+            })
+        );
     }
 
     #[test]
@@ -138,6 +154,7 @@ mod tests {
             cost_usd: None,
             duration_ms: None,
             produced_files: Vec::new(),
+            tokens: None,
         };
         let qr = query_result_from_turn(tr);
         assert_eq!(qr.response, "yo");

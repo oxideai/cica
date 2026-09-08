@@ -186,6 +186,10 @@ pub struct TurnResult {
     pub backend_session_id: String,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<u64>,
+    /// Defaulted so a result from a worker that predates token reporting still
+    /// deserializes.
+    #[serde(default)]
+    pub tokens: Option<crate::backends::TokenUsage>,
     /// Names of files the agent marked `[attachment:...]`, stored under the
     /// turn's `out/` key. Defaulted so a result from an older worker still
     /// deserializes.
@@ -435,6 +439,7 @@ mod tests {
             cost_usd: Some(0.1),
             duration_ms: Some(5),
             produced_files: Vec::new(),
+            tokens: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: TurnResult = serde_json::from_str(&json).unwrap();

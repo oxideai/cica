@@ -8,7 +8,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::backends::{QueryOptions, QueryResult};
+use crate::backends::{QueryOptions, QueryResult, TokenUsage};
 use crate::config::{ClaudeConfig, Paths};
 use crate::setup;
 
@@ -39,6 +39,26 @@ fn served_models(usage: &Option<serde_json::Map<String, serde_json::Value>>) -> 
     let mut ids: Vec<&str> = usage.keys().map(String::as_str).collect();
     ids.sort_unstable();
     Some(ids.join(", "))
+}
+
+fn token_usage(usage: &Option<serde_json::Map<String, serde_json::Value>>) -> Option<TokenUsage> {
+    let usage = usage.as_ref()?;
+    if usage.is_empty() {
+        return None;
+    }
+    let field = |model: &serde_json::Value, key: &str| model.get(key).and_then(|v| v.as_u64());
+    let mut totals = TokenUsage {
+        input: 0,
+        output: 0,
+        cached_input: 0,
+    };
+    for model in usage.values() {
+        totals.input += field(model, "inputTokens").unwrap_or(0);
+        totals.output += field(model, "outputTokens").unwrap_or(0);
+        totals.cached_input += field(model, "cacheReadInputTokens").unwrap_or(0)
+            + field(model, "cacheCreationInputTokens").unwrap_or(0);
+    }
+    Some(totals)
 }
 
 // Claude Code's wording: "No conversation found with session ID: <uuid>".
@@ -215,10 +235,18 @@ pub async fn query_with_options(
         if response.response_type == "result"
             && let Some(result) = response.result
         {
+            let tokens = token_usage(&response.model_usage);
             info!(
-                "Claude response received ({}ms, ${:.4}, served by {})",
+                "Claude response received ({}ms, ${:.4}, {}, served by {})",
                 response.duration_ms.unwrap_or(0),
                 response.total_cost_usd.unwrap_or(0.0),
+                tokens.map_or_else(
+                    || "tokens unreported".to_string(),
+                    |t| format!(
+                        "{} in / {} out / {} cached tokens",
+                        t.input, t.output, t.cached_input
+                    )
+                ),
                 served_models(&response.model_usage).unwrap_or_else(|| "unreported".into())
             );
             return Ok(QueryResult {
@@ -226,6 +254,7 @@ pub async fn query_with_options(
                 session_id: response.session_id.unwrap_or_default(),
                 duration_ms: response.duration_ms,
                 cost_usd: response.total_cost_usd,
+                tokens,
             });
         }
     }
@@ -235,7 +264,10 @@ pub async fn query_with_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeResponse, config_relative_path, is_missing_conversation, served_models};
+    use super::{
+        ClaudeResponse, TokenUsage, config_relative_path, is_missing_conversation, served_models,
+        token_usage,
+    };
 
     #[test]
     fn vertex_credentials_resolve_from_config_directory() {
@@ -270,6 +302,32 @@ mod tests {
             served_models(&parsed.model_usage).as_deref(),
             Some("claude-haiku-4-5, claude-opus-4-6")
         );
+    }
+
+    #[test]
+    fn token_usage_sums_every_model_the_turn_billed() {
+        let parsed: ClaudeResponse = serde_json::from_str(
+            r#"{"type":"result","modelUsage":{
+                "claude-opus-4-6":{"inputTokens":12,"outputTokens":3,
+                    "cacheReadInputTokens":100,"cacheCreationInputTokens":50},
+                "claude-haiku-4-5":{"inputTokens":8,"outputTokens":1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            token_usage(&parsed.model_usage),
+            Some(TokenUsage {
+                input: 20,
+                output: 4,
+                cached_input: 150,
+            })
+        );
+    }
+
+    #[test]
+    fn a_turn_without_model_usage_reports_no_tokens() {
+        let parsed: ClaudeResponse =
+            serde_json::from_str(r#"{"type":"result","modelUsage":{}}"#).unwrap();
+        assert!(token_usage(&parsed.model_usage).is_none());
     }
 
     #[test]

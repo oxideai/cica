@@ -292,6 +292,7 @@ mod tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }

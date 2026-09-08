@@ -202,6 +202,7 @@ pub async fn query_with_options(
             session_id: final_session_id.unwrap_or_default(),
             duration_ms: duration,
             cost_usd: None,
+            tokens: None,
         }),
         None => Err(anyhow!("No result found in Cursor output")),
     }

@@ -1436,6 +1436,7 @@ mod tests {
             cost_usd: None,
             duration_ms: None,
             produced_files: Vec::new(),
+            tokens: None,
         }
     }
 
@@ -1639,6 +1640,7 @@ mod tests {
             cost_usd: None,
             duration_ms: None,
             produced_files: Vec::new(),
+            tokens: None,
         };
         push_result(
             &store,
@@ -1675,6 +1677,7 @@ mod tests {
                     cost_usd: None,
                     duration_ms: None,
                     produced_files: Vec::new(),
+                    tokens: None,
                 })
             }
         }
@@ -2035,6 +2038,7 @@ mod warm_protocol_tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }
@@ -2057,6 +2061,7 @@ mod warm_protocol_tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }
@@ -2077,6 +2082,7 @@ mod warm_protocol_tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }
@@ -2248,6 +2254,7 @@ mod warm_protocol_tests {
                     cost_usd: None,
                     duration_ms: None,
                     produced_files: Vec::new(),
+                    tokens: None,
                 })
             }
         }

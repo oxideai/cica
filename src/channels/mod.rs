@@ -376,16 +376,17 @@ pub async fn execute_claude_query(
         Err(e) => {
             warn!("AI query failed: {}", e);
             let err_msg = format!("Sorry, I encountered an error: {}", e);
-            audit::log_message(
-                channel.name(),
+            audit::log_message(audit::MessageRecord {
+                channel: channel.name(),
                 user_id,
-                &combined_text,
-                &err_msg,
-                None,
-                None,
-                None,
-                true,
-            );
+                user_message: &combined_text,
+                assistant_response: &err_msg,
+                session_id: None,
+                duration_ms: None,
+                cost_usd: None,
+                tokens: None,
+                is_error: true,
+            });
             let _ = channel.send_message(&err_msg).await;
             return;
         }
@@ -393,20 +394,17 @@ pub async fn execute_claude_query(
 
     let response = &qr.response;
 
-    audit::log_message(
-        channel.name(),
+    audit::log_message(audit::MessageRecord {
+        channel: channel.name(),
         user_id,
-        &combined_text,
-        response,
-        if qr.session_id.is_empty() {
-            None
-        } else {
-            Some(qr.session_id.as_str())
-        },
-        qr.duration_ms,
-        qr.cost_usd,
-        false,
-    );
+        user_message: &combined_text,
+        assistant_response: response,
+        session_id: (!qr.session_id.is_empty()).then_some(qr.session_id.as_str()),
+        duration_ms: qr.duration_ms,
+        cost_usd: qr.cost_usd,
+        tokens: qr.tokens,
+        is_error: false,
+    });
 
     deliver(
         channel.as_ref(),
@@ -1401,6 +1399,7 @@ mod runtime_store_tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }
@@ -1419,6 +1418,7 @@ mod runtime_store_tests {
                 cost_usd: None,
                 duration_ms: None,
                 produced_files: Vec::new(),
+                tokens: None,
             })
         }
     }

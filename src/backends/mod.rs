@@ -60,6 +60,17 @@ pub struct QueryResult {
     pub duration_ms: Option<u64>,
     /// Cost of this query in USD (backend-dependent; Claude provides this, Cursor does not).
     pub cost_usd: Option<f64>,
+    /// Tokens the query billed (backend-dependent; Claude provides this, Cursor does not).
+    pub tokens: Option<TokenUsage>,
+}
+
+/// Tokens a turn billed, summed over every model it used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    /// Cache reads plus cache writes, which bill at different rates than `input`.
+    pub cached_input: u64,
 }
 
 /// Deterministic stand-in for a real backend response. Used by the Docker
@@ -71,6 +82,7 @@ fn fake_result(prompt: &str) -> QueryResult {
         session_id: String::new(),
         duration_ms: Some(0),
         cost_usd: None,
+        tokens: None,
     }
 }
 

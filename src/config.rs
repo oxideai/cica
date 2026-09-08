@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ============================================================================
@@ -374,6 +375,7 @@ pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
     pub signal: Option<SignalConfig>,
     pub slack: Option<SlackConfig>,
+    pub linear: Option<LinearConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -442,6 +444,111 @@ impl SlackConfig {
     }
 }
 
+fn default_linear_listen() -> String {
+    "0.0.0.0:8080".to_string()
+}
+
+/// Linear agent channel. Unlike every other channel this one is *inbound*: Linear
+/// POSTs an `AgentSessionEvent` webhook when the app is @mentioned on an issue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearConfig {
+    /// The OAuth application's client credentials. Preferred: they mint 30-day
+    /// **app-actor** tokens on demand, so activities are authored by the app
+    /// user and nothing expires under a running channel.
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    /// Accepted and ignored.
+    ///
+    /// A Linear app has a single grant: minting a client-credentials token
+    /// revokes any outstanding authorization-code grant, so a channel holding a
+    /// refresh token loses it as soon as anything else authenticates as the
+    /// same app. Kept only so an existing config does not fail to parse; the
+    /// channel warns if it is set.
+    #[serde(default)]
+    pub refresh_token: String,
+    /// A pre-minted access token. Accepted for local testing only — Linear's
+    /// authorization-code tokens last 24 hours, so a token pasted here stops
+    /// working after a day. Ignored when a refresh token or client credentials
+    /// are set.
+    #[serde(default)]
+    pub access_token: String,
+    /// Webhook signing secret, from the webhook's detail page. Used to verify the
+    /// `Linear-Signature` header over the raw request body.
+    #[serde(default)]
+    pub webhook_secret: String,
+    /// Where the webhook listener binds. Behind a TLS terminator (ALB, reverse
+    /// proxy) — cica never terminates TLS itself.
+    #[serde(default = "default_linear_listen")]
+    pub listen_addr: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+    #[serde(default)]
+    pub shared_identity: bool,
+    pub onboarding_prompt: Option<String>,
+    /// Maps a Linear user's email to an identity on another channel, so the same
+    /// human keeps one set of memories and one USER.md. Values are
+    /// `"<channel>:<user_id>"`, e.g. `"slack:U0123ABC"`.
+    #[serde(default)]
+    pub identity: HashMap<String, String>,
+}
+
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            refresh_token: String::new(),
+            access_token: String::new(),
+            webhook_secret: String::new(),
+            listen_addr: default_linear_listen(),
+            auto_approve: false,
+            shared_identity: false,
+            onboarding_prompt: None,
+            identity: HashMap::new(),
+        }
+    }
+}
+
+impl LinearConfig {
+    pub fn new(client_id: String, client_secret: String, webhook_secret: String) -> Self {
+        Self {
+            client_id,
+            client_secret,
+            webhook_secret,
+            ..Default::default()
+        }
+    }
+
+    /// True when the channel has some way to authenticate.
+    pub fn has_credential(&self) -> bool {
+        (!self.client_id.is_empty() && !self.client_secret.is_empty())
+            || !self.access_token.is_empty()
+    }
+
+    /// True when the client credentials can be used to refresh an installed
+    /// agent's token, rather than to mint a fresh client-credentials one.
+    pub fn can_refresh(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+
+    /// Resolve a Linear commenter to the identity their memories are keyed under.
+    /// Falls back to `("linear", linear_user_id)` when no mapping applies, which
+    /// takes the person through the normal pairing flow.
+    pub fn resolve_identity(&self, email: Option<&str>, linear_user_id: &str) -> (String, String) {
+        if let Some(email) = email
+            && let Some(mapped) = self.identity.get(&email.to_lowercase())
+            && let Some((channel, user_id)) = mapped.split_once(':')
+            && !channel.is_empty()
+            && !user_id.is_empty()
+        {
+            return (channel.to_string(), user_id.to_string());
+        }
+        ("linear".to_string(), linear_user_id.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSettings {
     pub auto_approve: bool,
@@ -477,6 +584,16 @@ impl Config {
             "slack" => self
                 .channels
                 .slack
+                .as_ref()
+                .map(|c| ChannelSettings {
+                    auto_approve: c.auto_approve,
+                    shared_identity: c.shared_identity,
+                    onboarding_prompt: c.onboarding_prompt.clone().or(global_prompt.clone()),
+                })
+                .unwrap_or_default(),
+            "linear" => self
+                .channels
+                .linear
                 .as_ref()
                 .map(|c| ChannelSettings {
                     auto_approve: c.auto_approve,
@@ -599,6 +716,42 @@ impl Config {
         overlay_number!("CICA_TURN_TIMEOUT_SECS", turn_timeout_secs);
         overlay_number!("CICA_WORKER_CAP", worker_cap);
         overlay_number!("CICA_WORKER_MAX_AGE_SECS", worker_max_age_secs);
+        if let Some(v) = get("CICA_LINEAR_CLIENT_ID") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .client_id = v;
+        }
+        if let Some(v) = get("CICA_LINEAR_CLIENT_SECRET") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .client_secret = v;
+        }
+        if let Some(v) = get("CICA_LINEAR_REFRESH_TOKEN") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .refresh_token = v;
+        }
+        if let Some(v) = get("CICA_LINEAR_ACCESS_TOKEN") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .access_token = v;
+        }
+        if let Some(v) = get("CICA_LINEAR_WEBHOOK_SECRET") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .webhook_secret = v;
+        }
+        if let Some(v) = get("CICA_LINEAR_LISTEN_ADDR") {
+            self.channels
+                .linear
+                .get_or_insert_with(Default::default)
+                .listen_addr = v;
+        }
         if let Some(v) = get("CICA_S3_BUCKET") {
             self.deployment
                 .s3
@@ -639,6 +792,9 @@ impl Config {
         if self.channels.slack.is_some() {
             channels.push("slack");
         }
+        if self.channels.linear.is_some() {
+            channels.push("linear");
+        }
 
         channels
     }
@@ -676,6 +832,107 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn linear_with_mapping() -> LinearConfig {
+        let mut config = LinearConfig::new("id".into(), "secret".into(), "wh".into());
+        config
+            .identity
+            .insert("rodrigo@rootglobal.io".into(), "slack:U0123ABC".into());
+        config
+    }
+
+    #[test]
+    fn a_mapped_email_resolves_to_the_other_channels_identity() {
+        let config = linear_with_mapping();
+        assert_eq!(
+            config.resolve_identity(Some("rodrigo@rootglobal.io"), "usr_1"),
+            ("slack".to_string(), "U0123ABC".to_string())
+        );
+    }
+
+    #[test]
+    fn email_matching_ignores_case() {
+        // Linear hands back whatever casing the account was created with.
+        let config = linear_with_mapping();
+        assert_eq!(
+            config.resolve_identity(Some("Rodrigo@RootGlobal.io"), "usr_1"),
+            ("slack".to_string(), "U0123ABC".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unmapped_person_stays_a_linear_user_and_goes_through_pairing() {
+        let config = linear_with_mapping();
+        assert_eq!(
+            config.resolve_identity(Some("someone@else.com"), "usr_2"),
+            ("linear".to_string(), "usr_2".to_string())
+        );
+        assert_eq!(
+            config.resolve_identity(None, "usr_3"),
+            ("linear".to_string(), "usr_3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_malformed_mapping_falls_back_rather_than_producing_half_an_identity() {
+        let mut config = LinearConfig::new("id".into(), "secret".into(), "wh".into());
+        config.identity.insert("a@b.c".into(), "slack".into());
+        config.identity.insert("d@e.f".into(), "slack:".into());
+        config.identity.insert("g@h.i".into(), ":U1".into());
+
+        for email in ["a@b.c", "d@e.f", "g@h.i"] {
+            assert_eq!(
+                config.resolve_identity(Some(email), "usr_9"),
+                ("linear".to_string(), "usr_9".to_string()),
+                "{email} should not produce a partial identity"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_is_either_the_client_pair_or_a_static_token() {
+        assert!(!LinearConfig::default().has_credential());
+
+        let pair = LinearConfig::new("id".into(), "secret".into(), "wh".into());
+        assert!(pair.has_credential());
+
+        // Half a pair is not a credential.
+        let half = LinearConfig {
+            client_id: "id".into(),
+            ..Default::default()
+        };
+        assert!(!half.has_credential());
+
+        let static_only = LinearConfig {
+            access_token: "lin_static".into(),
+            ..Default::default()
+        };
+        assert!(static_only.has_credential());
+    }
+
+    #[test]
+    fn a_linear_config_from_env_alone_still_has_a_listen_address() {
+        // The env overlay reaches for Default::default(), which must not leave
+        // the listener bound to an empty string.
+        assert_eq!(LinearConfig::default().listen_addr, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn linear_joins_the_configured_channels() {
+        let mut config = Config::default();
+        assert!(!config.configured_channels().contains(&"linear"));
+
+        config.channels.linear = Some(LinearConfig::default());
+        assert!(config.configured_channels().contains(&"linear"));
+
+        // Without a channel_settings arm this silently defaults, which would
+        // disable onboarding for every Linear user.
+        config.channels.linear = Some(LinearConfig {
+            auto_approve: true,
+            ..Default::default()
+        });
+        assert!(config.channel_settings("linear").auto_approve);
+    }
 
     #[test]
     fn worker_paths_isolate_mutable_state_and_share_inputs() {

@@ -11,12 +11,19 @@ The same code runs both ways. Cloud mode is what the rest of this document expla
 
 **Router (brain).** A long-lived process (`cica`, no subcommand). It:
 
-- Listens on channels (Telegram / Signal / Slack) and debounces incoming messages per user.
+- Listens on channels (Telegram / Signal / Slack / Linear) and debounces incoming messages per user.
 - Builds each turn's **system prompt** (identity, user profile, persona, skills, memory).
 - Hosts the **memory index** (SQLite + vector search) and runs semantic recall when building a prompt.
 - Runs the **skills git-sync loop** — periodically pulls a skills repo and mirrors it to the store.
 - Runs the **cron scheduler** for scheduled jobs.
 - Dispatches each turn to a worker and returns the reply to the channel.
+
+> **Inbound vs outbound.** Telegram long-polls, Slack uses Socket Mode and Signal
+> talks to a local daemon — those channels only ever dial *out*. Linear is the
+> exception: it POSTs a webhook, so enabling `[channels.linear]` opens a
+> listening port on the router. cica does not terminate TLS (put an ALB or a
+> reverse proxy in front) but it always verifies the webhook HMAC itself, and
+> refuses to start without a signing secret.
 
 **Worker (hands).** A session-affine process (`cica worker --session <affinity_id> ...`). It:
 

@@ -27,6 +27,27 @@ bot_token = "123456:ABC-your-telegram-bot-token"
 # app_token = "xapp-..."
 # unfurl_links = false
 
+# Linear is the one *inbound* channel: it POSTs a webhook when the app is
+# @mentioned on an issue, so it needs a public HTTPS URL in front of cica.
+# cica does not terminate TLS — put an ALB or a reverse proxy ahead of it — but
+# it always verifies the webhook signature itself.
+# [channels.linear]
+# client_id = "..."                # the OAuth application's client id
+# client_secret = "..."            # and its secret
+#                                  # A Linear app has one grant: minting a client-credentials
+#                                  # token revokes any authorization-code grant, so
+#                                  # refresh_token is accepted and ignored. The actor=app
+#                                  # install is still required for webhook delivery.
+# webhook_secret = "lin_wh_..."    # from the webhook's detail page
+# listen_addr = "0.0.0.0:8080"     # webhook at POST /webhooks/linear, health at GET /health
+# access_token = "..."             # local testing only: Linear's tokens expire in 24h
+
+# Memories are keyed <channel>_<user_id>, so the same human is a stranger on a
+# new channel. Map a Linear email onto the identity they already use elsewhere
+# and their memories, USER.md and pairing carry over.
+# [channels.linear.identity]
+# "rodrigo@example.com" = "slack:U0123ABC"
+
 # ----------------------------------------------------------------------------
 # Backend credentials.
 # ----------------------------------------------------------------------------

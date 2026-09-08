@@ -17,7 +17,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
+    Channel, Identity, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
 use crate::config::{Paths, SignalConfig};
@@ -525,7 +525,7 @@ async fn handle_message(
             build_text_with_images(&rt.paths.base, &query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), sender);
         let channel_clone = channel.clone();
-        let sender_clone = sender.clone();
+        let identity = Identity::of(channel.as_ref(), &sender);
         let affinity = Affinity::Chat {
             channel: channel.name().to_string(),
             user: sender.clone(),
@@ -537,7 +537,7 @@ async fn handle_message(
                 execute_claude_query(
                     rt,
                     channel_clone,
-                    &sender_clone,
+                    &identity,
                     affinity,
                     messages,
                     None,

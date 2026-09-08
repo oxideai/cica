@@ -4,7 +4,9 @@ use tracing::info;
 
 use crate::backends::{claude, cursor};
 use crate::channels::{self, signal, slack, telegram};
-use crate::config::{self, AiBackend, Config, SignalConfig, SlackConfig, TelegramConfig};
+use crate::config::{
+    self, AiBackend, Config, LinearConfig, SignalConfig, SlackConfig, TelegramConfig,
+};
 use crate::setup;
 
 /// Run the init command
@@ -273,6 +275,7 @@ async fn add_channel(existing_config: Option<Config>) -> Result<Config> {
         "telegram" => setup_telegram(existing_config).await,
         "signal" => setup_signal(existing_config).await,
         "slack" => setup_slack(existing_config).await,
+        "linear" => setup_linear(existing_config).await,
         _ => bail!("Channel not yet supported: {}", channel.name),
     }
 }
@@ -845,6 +848,75 @@ async fn setup_slack(existing_config: Option<Config>) -> Result<Config> {
     config.save()?;
 
     info!("Slack setup complete");
+    Ok(config)
+}
+
+async fn setup_linear(existing_config: Option<Config>) -> Result<Config> {
+    println!();
+    println!("Linear Setup");
+    println!("────────────");
+    println!();
+    println!("Linear is the one channel that listens for an inbound connection:");
+    println!("it POSTs a webhook when the app is @mentioned on an issue. You will");
+    println!("need a public HTTPS URL that terminates TLS in front of cica.");
+    println!();
+    println!("1. Create an OAuth application:");
+    println!("   https://linear.app/settings/api/applications/new");
+    println!();
+    println!("2. Note its Client ID and Client Secret. cica exchanges them for a");
+    println!("   30-day app-actor token whenever it needs one, so activities are");
+    println!("   authored by the app rather than by a person, and nothing expires");
+    println!("   under a running channel. (Authorization-code tokens last only 24h.)");
+    println!();
+    println!("3. Scopes:");
+    println!("   - app:mentionable   (be @mentioned on issues)");
+    println!("   - read, write       (read tickets, post activities)");
+    println!("   Leave app:assignable OFF unless you want the agent delegated");
+    println!("   whole issues — assignment in Linear reads as 'you own this now'.");
+    println!();
+    println!("4. Add a webhook subscribed to 'Agent session events', pointed at");
+    println!("   https://<your-host>/webhooks/linear");
+    println!();
+
+    let client_id: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste the OAuth application's Client ID")
+        .interact_text()?;
+
+    let client_secret: String = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste the Client Secret")
+        .interact()?;
+
+    let webhook_secret: String = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Paste the webhook signing secret")
+        .interact()?;
+
+    let listen_addr: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Address to listen on (behind your TLS terminator)")
+        .default("0.0.0.0:8080".to_string())
+        .interact_text()?;
+
+    print!("Validating... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    match channels::linear::validate_credentials(&client_id, &client_secret).await {
+        Ok(name) => {
+            println!("OK");
+            println!("Connected as: {}", name);
+        }
+        Err(e) => {
+            println!("FAILED");
+            bail!("Invalid access token: {}", e);
+        }
+    }
+
+    let mut linear = LinearConfig::new(client_id, client_secret, webhook_secret);
+    linear.listen_addr = listen_addr;
+
+    let mut config = existing_config.unwrap_or_default();
+    config.channels.linear = Some(linear);
+    config.save()?;
+
+    info!("Linear setup complete");
     Ok(config)
 }
 

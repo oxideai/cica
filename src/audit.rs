@@ -263,6 +263,7 @@ mod tests {
 
     #[test]
     fn migrating_a_populated_database_keeps_its_rows() {
+        // The deployed schema: `cost_usd` already migrated in, tokens not yet.
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE messages (
@@ -273,23 +274,27 @@ mod tests {
                 user_message TEXT NOT NULL,
                 assistant_response TEXT NOT NULL,
                 duration_ms INTEGER,
+                cost_usd REAL,
                 error INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
-            INSERT INTO messages (channel, user_id, user_message, assistant_response, created_at)
-                VALUES ('slack', 'U1', 'hi', 'hello', datetime('now'));",
+            INSERT INTO messages (channel, user_id, user_message, assistant_response, cost_usd, created_at)
+                VALUES ('slack', 'U1', 'hi', 'hello', 0.154387, datetime('now'));",
         )
         .unwrap();
 
         prepare_schema(&mut conn).unwrap();
         prepare_schema(&mut conn).unwrap();
 
-        let (rows, tokens): (i64, Option<i64>) = conn
-            .query_row("SELECT COUNT(*), input_tokens FROM messages", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        let (rows, cost, tokens): (i64, Option<f64>, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), cost_usd, input_tokens FROM messages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .unwrap();
         assert_eq!(rows, 1);
+        assert_eq!(cost, Some(0.154387));
         assert_eq!(tokens, None);
     }
 

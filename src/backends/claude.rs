@@ -50,13 +50,14 @@ fn token_usage(usage: &Option<serde_json::Map<String, serde_json::Value>>) -> Op
     let mut totals = TokenUsage {
         input: 0,
         output: 0,
-        cached_input: 0,
+        cache_read: 0,
+        cache_write: 0,
     };
     for model in usage.values() {
         totals.input += field(model, "inputTokens").unwrap_or(0);
         totals.output += field(model, "outputTokens").unwrap_or(0);
-        totals.cached_input += field(model, "cacheReadInputTokens").unwrap_or(0)
-            + field(model, "cacheCreationInputTokens").unwrap_or(0);
+        totals.cache_read += field(model, "cacheReadInputTokens").unwrap_or(0);
+        totals.cache_write += field(model, "cacheCreationInputTokens").unwrap_or(0);
     }
     Some(totals)
 }
@@ -243,8 +244,8 @@ pub async fn query_with_options(
                 tokens.map_or_else(
                     || "tokens unreported".to_string(),
                     |t| format!(
-                        "{} in / {} out / {} cached tokens",
-                        t.input, t.output, t.cached_input
+                        "{} in / {} out / {} cache read / {} cache write tokens",
+                        t.input, t.output, t.cache_read, t.cache_write
                     )
                 ),
                 served_models(&response.model_usage).unwrap_or_else(|| "unreported".into())
@@ -318,7 +319,8 @@ mod tests {
             Some(TokenUsage {
                 input: 20,
                 output: 4,
-                cached_input: 150,
+                cache_read: 100,
+                cache_write: 50,
             })
         );
     }

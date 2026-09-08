@@ -69,8 +69,9 @@ pub struct QueryResult {
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
-    /// Cache reads plus cache writes, which bill at different rates than `input`.
-    pub cached_input: u64,
+    /// Cache hits and cache writes bill at different rates, so they stay apart.
+    pub cache_read: u64,
+    pub cache_write: u64,
 }
 
 /// Deterministic stand-in for a real backend response. Used by the Docker

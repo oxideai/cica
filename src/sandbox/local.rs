@@ -128,7 +128,8 @@ mod tests {
             tokens: Some(TokenUsage {
                 input: 20,
                 output: 4,
-                cached_input: 150,
+                cache_read: 100,
+                cache_write: 50,
             }),
         };
         let tr = turn_result_from_query(qr);
@@ -141,7 +142,8 @@ mod tests {
             Some(TokenUsage {
                 input: 20,
                 output: 4,
-                cached_input: 150,
+                cache_read: 100,
+                cache_write: 50,
             })
         );
     }

@@ -7,7 +7,7 @@
 //! but never block message delivery.
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::backends::TokenUsage;
 use std::path::PathBuf;
@@ -50,16 +50,19 @@ fn open_db() -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let conn = Connection::open(path)
+    let mut conn = Connection::open(path)
         .with_context(|| format!("Failed to open audit database: {:?}", path))?;
 
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-    prepare_schema(&conn)?;
+    // Another process (a second router, `cica approve`) may be migrating the
+    // same file; wait for its write lock instead of dropping the record.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    prepare_schema(&mut conn)?;
 
     Ok(conn)
 }
 
-fn prepare_schema(conn: &Connection) -> Result<()> {
+fn prepare_schema(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS messages (
             id              INTEGER PRIMARY KEY,
@@ -72,7 +75,8 @@ fn prepare_schema(conn: &Connection) -> Result<()> {
             cost_usd        REAL,
             input_tokens    INTEGER,
             output_tokens   INTEGER,
-            cached_input_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            cache_write_tokens INTEGER,
             error           INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL
         );
@@ -95,21 +99,26 @@ fn prepare_schema(conn: &Connection) -> Result<()> {
             ON events(created_at);",
     )?;
 
+    // One writer at a time: a concurrent migrator that read the same column list
+    // would ADD it twice and the loser's ALTER would fail.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (column, ty) in [
         ("cost_usd", "REAL"),
         ("input_tokens", "INTEGER"),
         ("output_tokens", "INTEGER"),
-        ("cached_input_tokens", "INTEGER"),
+        ("cache_read_tokens", "INTEGER"),
+        ("cache_write_tokens", "INTEGER"),
     ] {
-        let present: bool = conn
+        let present: bool = tx
             .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?1")?
             .query_row([column], |row| row.get::<_, i64>(0))
             .map(|n| n > 0)
             .unwrap_or(false);
         if !present {
-            conn.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {column} {ty};"))?;
+            tx.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {column} {ty};"))?;
         }
     }
+    tx.commit()?;
 
     Ok(())
 }
@@ -144,8 +153,9 @@ pub fn log_message(record: MessageRecord) {
 fn insert_message(conn: &Connection, record: MessageRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO messages (channel, user_id, session_id, user_message, assistant_response,
-            duration_ms, cost_usd, input_tokens, output_tokens, cached_input_tokens, error, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))",
+            duration_ms, cost_usd, input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens, error, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'))",
         rusqlite::params![
             record.channel,
             record.user_id,
@@ -156,7 +166,8 @@ fn insert_message(conn: &Connection, record: MessageRecord) -> Result<()> {
             record.cost_usd,
             record.tokens.map(|t| t.input as i64),
             record.tokens.map(|t| t.output as i64),
-            record.tokens.map(|t| t.cached_input as i64),
+            record.tokens.map(|t| t.cache_read as i64),
+            record.tokens.map(|t| t.cache_write as i64),
             record.is_error as i32,
         ],
     )?;
@@ -210,10 +221,11 @@ pub fn get_usage(channel: &str, user_id: &str) -> Result<(u64, Option<f64>)> {
 mod tests {
     use super::*;
     use crate::backends::TokenUsage;
+    use std::sync::Arc;
 
     #[test]
     fn an_existing_database_gains_the_token_columns() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE messages (
                 id INTEGER PRIMARY KEY,
@@ -229,7 +241,7 @@ mod tests {
         )
         .unwrap();
 
-        prepare_schema(&conn).unwrap();
+        prepare_schema(&mut conn).unwrap();
 
         let columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('messages')")
@@ -242,16 +254,95 @@ mod tests {
             "cost_usd",
             "input_tokens",
             "output_tokens",
-            "cached_input_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
         ] {
             assert!(columns.contains(&column.to_string()), "missing {column}");
         }
     }
 
     #[test]
+    fn migrating_a_populated_database_keeps_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                channel TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT,
+                user_message TEXT NOT NULL,
+                assistant_response TEXT NOT NULL,
+                duration_ms INTEGER,
+                error INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO messages (channel, user_id, user_message, assistant_response, created_at)
+                VALUES ('slack', 'U1', 'hi', 'hello', datetime('now'));",
+        )
+        .unwrap();
+
+        prepare_schema(&mut conn).unwrap();
+        prepare_schema(&mut conn).unwrap();
+
+        let (rows, tokens): (i64, Option<i64>) = conn
+            .query_row("SELECT COUNT(*), input_tokens FROM messages", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(tokens, None);
+    }
+
+    #[test]
+    fn concurrent_migrators_do_not_add_the_same_column_twice() {
+        for _ in 0..25 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("audit.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY,
+                        channel TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        session_id TEXT,
+                        user_message TEXT NOT NULL,
+                        assistant_response TEXT NOT NULL,
+                        duration_ms INTEGER,
+                        error INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL
+                    );",
+                )
+                .unwrap();
+
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let migrators: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        let mut conn = Connection::open(&path).unwrap();
+                        conn.busy_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        start.wait();
+                        prepare_schema(&mut conn)
+                    })
+                })
+                .collect();
+
+            for migrator in migrators {
+                migrator
+                    .join()
+                    .unwrap()
+                    .expect("a migrator lost the race and dropped its record");
+            }
+        }
+    }
+
+    #[test]
     fn a_logged_message_keeps_its_token_counts() {
-        let conn = Connection::open_in_memory().unwrap();
-        prepare_schema(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare_schema(&mut conn).unwrap();
 
         insert_message(
             &conn,
@@ -266,20 +357,22 @@ mod tests {
                 tokens: Some(TokenUsage {
                     input: 20,
                     output: 4,
-                    cached_input: 150,
+                    cache_read: 100,
+                    cache_write: 50,
                 }),
                 is_error: false,
             },
         )
         .unwrap();
 
-        let row: (i64, i64, i64) = conn
+        let row: (i64, i64, i64, i64) = conn
             .query_row(
-                "SELECT input_tokens, output_tokens, cached_input_tokens FROM messages",
+                "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+                 FROM messages",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(row, (20, 4, 150));
+        assert_eq!(row, (20, 4, 100, 50));
     }
 }

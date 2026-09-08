@@ -439,11 +439,17 @@ mod tests {
             cost_usd: Some(0.1),
             duration_ms: Some(5),
             produced_files: Vec::new(),
-            tokens: None,
+            tokens: Some(crate::backends::TokenUsage {
+                input: 20,
+                output: 4,
+                cache_read: 100,
+                cache_write: 50,
+            }),
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: TurnResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.backend_session_id, "sess-2");
+        assert_eq!(back.tokens, result.tokens);
     }
 
     #[test]

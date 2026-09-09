@@ -967,11 +967,19 @@ pub async fn run_worker_loop<P: SandboxProvider>(
         tokio::pin!(run);
         let timeout = sleep(timing.turn_timeout);
         tokio::pin!(timeout);
+        // `abandoned` is set instead of calling abandon() inside the arm: the
+        // partial transcript has to be captured *before* it is discarded, and
+        // that is an async push.
+        let mut abandoned = false;
         let outcome = tokio::select! {
             result = &mut run => Some(turn_outcome(store.as_ref(), &turn_id, result).await),
-            _ = &mut timeout => { engine.abandon(&job); Some(TurnOutcome::Error("turn timed out".into())) },
-            _ = watch_abort(store.as_ref(), &spec.session, &turn_id, &spec.worker_id, timing.inbox_poll) => { engine.abandon(&job); None },
+            _ = &mut timeout => { abandoned = true; Some(TurnOutcome::Error("turn timed out".into())) },
+            _ = watch_abort(store.as_ref(), &spec.session, &turn_id, &spec.worker_id, timing.inbox_poll) => { abandoned = true; None },
         };
+        if abandoned {
+            engine.preserve_abandoned(&job, &turn_id).await;
+            engine.abandon(&job);
+        }
         let timed_out =
             matches!(&outcome, Some(TurnOutcome::Error(error)) if error == "turn timed out");
         if let Some(outcome) = outcome {
@@ -2294,6 +2302,77 @@ mod warm_protocol_tests {
         assert_eq!(
             std::fs::read(dest.join("export.json")).unwrap(),
             br#"{"herd": 120}"#
+        );
+
+        task.abort();
+    }
+
+    /// A turn that times out returns no result, so nothing is persisted -- and
+    /// then `abandon` deletes the local session. The one turn worth reading was
+    /// the one that left nothing at all: a 900s timeout had to be diagnosed from
+    /// router logs and inference, because no transcript survived it anywhere.
+    ///
+    /// Drives the loop rather than calling preserve_abandoned directly, because
+    /// what matters is that it runs BEFORE the discard.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_turn_leaves_its_transcript_behind() {
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn StateStore> =
+            Arc::new(FilesystemStateStore::new(root.path().join("store")));
+
+        // The transcript Claude Code would have written while the turn ran.
+        let claude_home = root.path().join("claude");
+        let transcript = claude_home.join(".claude/projects/-work/sess-timeout.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, r#"{"partial":"work in progress"}"#).unwrap();
+
+        struct NeverReturns;
+        #[async_trait::async_trait]
+        impl crate::sandbox::SandboxProvider for NeverReturns {
+            async fn run_turn(&self, _job: TurnJob) -> Result<TurnResult> {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+
+        let (task, affinity, worker) =
+            spawn_loop(root.path(), store.clone(), NeverReturns, timing()).await;
+        assign(store.as_ref(), &affinity, &worker, "t-timeout").await;
+
+        // Past the turn timeout.
+        for _ in 0..400 {
+            if store
+                .get_record(&result_key("t-timeout"))
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let dest = root.path().join("recovered");
+        assert!(
+            store.pull("abandoned/t-timeout", &dest).await.unwrap(),
+            "the timed-out turn left nothing behind — it cannot be diagnosed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("transcript.jsonl")).unwrap(),
+            r#"{"partial":"work in progress"}"#,
+            "preserved the wrong thing"
+        );
+
+        // And it must not be resumable: a turn cut mid-flight restored into a
+        // thread would carry a broken conversation forward.
+        assert!(
+            !store
+                .pull("session/sess-timeout", &root.path().join("as-session"))
+                .await
+                .unwrap(),
+            "a partial turn was persisted as a resumable session"
         );
 
         task.abort();

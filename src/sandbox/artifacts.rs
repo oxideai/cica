@@ -21,6 +21,16 @@ pub trait SessionArtifacts {
     fn capture(&self, home: &Path, session_id: &str, staging: &Path) -> Result<bool>;
     fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()>;
     fn forget(&self, home: &Path, session_id: &str) -> Result<()>;
+
+    /// The session most recently written in `home`, if the backend can tell.
+    ///
+    /// A turn that times out never reports a session id -- there is no result to
+    /// carry one -- so a *fresh* turn cannot be captured by name. This is the
+    /// only way to find what it left behind. Default `None`: a backend that
+    /// cannot answer should say so rather than guess.
+    fn latest_session(&self, _home: &Path) -> Option<String> {
+        None
+    }
 }
 
 /// Slugify a working directory the way Claude Code names its project dir:
@@ -131,6 +141,35 @@ impl SessionArtifacts for ClaudeSessionArtifacts {
     fn restore(&self, home: &Path, cwd: &Path, session_id: &str, staging: &Path) -> Result<()> {
         ClaudeSessionArtifacts::restore(home, cwd, session_id, staging)
     }
+    /// Newest `projects/<slug>/<session>.jsonl` by mtime. Claude Code writes the
+    /// transcript as the turn runs, so a timed-out turn has one even though it
+    /// never returned an id.
+    fn latest_session(&self, home: &Path) -> Option<String> {
+        let projects = home.join(".claude").join("projects");
+        let mut newest: Option<(std::time::SystemTime, String)> = None;
+        for project in fs::read_dir(projects).ok()?.flatten() {
+            let Ok(entries) = fs::read_dir(project.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "jsonl") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                    continue;
+                };
+                if newest.as_ref().is_none_or(|(at, _)| modified > *at) {
+                    newest = Some((modified, stem.to_string()));
+                }
+            }
+        }
+        newest.map(|(_, session)| session)
+    }
+
     fn forget(&self, home: &Path, session_id: &str) -> Result<()> {
         let dot = home.join(".claude");
         let projects = dot.join("projects");
@@ -444,6 +483,54 @@ mod tests {
         assert!(!dot.join("todos/one-agent.json").exists());
         assert!(dot.join("projects/a/two.jsonl").exists());
         assert!(dot.join("todos/two-agent.json").exists());
+    }
+
+    /// A timed-out turn never reports a session id, so a fresh turn can only be
+    /// found by looking for what was written last. Without this, the one turn
+    /// worth reading is the one that leaves nothing behind.
+    #[test]
+    fn latest_session_finds_the_most_recently_written_transcript() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        write(&projects.join("-work-a/older.jsonl"), "{}");
+        write(&projects.join("-work-b/newer.jsonl"), "{}");
+        // Both files are written in the same instant, so age one explicitly
+        // rather than relying on filesystem mtime resolution.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        fs::File::options()
+            .write(true)
+            .open(projects.join("-work-a/older.jsonl"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        assert_eq!(
+            ClaudeSessionArtifacts.latest_session(home.path()),
+            Some("newer".to_string()),
+            "picked the wrong transcript, so an abandoned turn would be preserved under the wrong session"
+        );
+    }
+
+    #[test]
+    fn latest_session_is_none_when_nothing_was_written() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(ClaudeSessionArtifacts.latest_session(home.path()), None);
+    }
+
+    /// Only `.jsonl` files are transcripts; the projects dir holds other things.
+    #[test]
+    fn latest_session_ignores_non_transcripts() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude/projects");
+        write(&projects.join("-work-a/notes.txt"), "not a transcript");
+        assert_eq!(ClaudeSessionArtifacts.latest_session(home.path()), None);
+    }
+
+    /// Cursor cannot answer, and says so rather than guessing.
+    #[test]
+    fn cursor_does_not_pretend_to_know_the_latest_session() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(CursorSessionArtifacts.latest_session(home.path()), None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::{
-    Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
+    Channel, Identity, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
 use crate::config::{self, Paths, SlackConfig};
@@ -615,7 +615,7 @@ async fn handle_message_event(
         let (text_with_images, attachment_names) =
             build_text_with_images(&state.rt.paths.base, &query_text, &image_paths);
         let channel_clone = channel.clone();
-        let user_id_clone = user_id_str.clone();
+        let identity = Identity::of(channel.as_ref(), &user_id_str);
         let session_key_clone = session_key.clone();
         let affinity = Affinity::Chat {
             channel: channel.name().to_string(),
@@ -629,7 +629,7 @@ async fn handle_message_event(
                 execute_claude_query(
                     rt,
                     channel_clone,
-                    &user_id_clone,
+                    &identity,
                     affinity,
                     messages,
                     session_key_clone,
@@ -871,7 +871,7 @@ async fn handle_app_mention_event(
     // Debounce per user so rapid messages from one person batch, but session is shared.
     let user_key = format!("{}:{}:{}", channel.name(), user_id, thread_ts);
     let channel_clone = channel.clone();
-    let user_id_clone = user_id_str.clone();
+    let identity = Identity::of(channel.as_ref(), &user_id_str);
     let session_key = Some(shared_session_key);
     let affinity = Affinity::SlackThread {
         channel_id: channel_id.to_string(),
@@ -885,7 +885,7 @@ async fn handle_app_mention_event(
             execute_claude_query(
                 rt,
                 channel_clone,
-                &user_id_clone,
+                &identity,
                 affinity,
                 messages,
                 session_key,

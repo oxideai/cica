@@ -13,7 +13,7 @@ See [docs/architecture.md](docs/architecture.md) for how cloud mode works.
 
 ## Features
 
-- **Multi-channel** — Telegram, Signal, or Slack.
+- **Multi-channel** — Telegram, Signal, Slack, or Linear (`@mention` an agent on a ticket).
 - **Multi-user** — each user gets their own agent identity and memory; skills are shared.
 - **Continuous conversations** — context persists across messages.
 - **Memory** — remembers important things about each user across conversations (semantic search over saved notes).
@@ -92,6 +92,7 @@ flowchart LR
         TG[Telegram]
         SG[Signal]
         SL[Slack]
+        LN[Linear]
     end
 
     Channels --> Router

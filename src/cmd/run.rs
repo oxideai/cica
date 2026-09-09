@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use tokio::signal;
 use tracing::{error, info, warn};
 
-use crate::channels::{signal as signal_channel, slack, telegram};
+use crate::channels::{linear, signal as signal_channel, slack, telegram};
 use crate::config::Config;
 use crate::cron::{CronConfig, CronService, SystemClock};
 use crate::memory::MemoryIndex;
@@ -111,6 +111,15 @@ pub async fn run() -> Result<()> {
         }));
     }
 
+    if let Some(linear_config) = rt.config.channels.linear.clone() {
+        let rt = rt.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = linear::run(linear_config, rt).await {
+                error!("Linear channel error: {}", e);
+            }
+        }));
+    }
+
     tokio::select! {
         _ = signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down...");
@@ -146,12 +155,16 @@ fn cron_result_sender(rt: &Runtime) -> crate::cron::ResultSender {
         .slack
         .as_ref()
         .map(|c| c.bot_token.clone());
+    let linear_config = rt.config.channels.linear.clone();
+    let linear_paths = rt.paths.clone();
 
     let result_sender: crate::cron::ResultSender =
         Arc::new(move |channel, user_id, target, message| {
             let telegram_token = telegram_token.clone();
             let signal_phone = signal_phone.clone();
             let slack_bot_token = slack_bot_token.clone();
+            let linear_config = linear_config.clone();
+            let linear_paths = linear_paths.clone();
 
             Box::pin(async move {
                 match channel.as_str() {
@@ -181,6 +194,21 @@ fn cron_result_sender(rt: &Runtime) -> crate::cron::ResultSender {
                             .await
                         } else {
                             Err(anyhow::anyhow!("Slack not configured"))
+                        }
+                    }
+                    "linear" => {
+                        if let Some(config) = linear_config {
+                            // For Linear the "user id" a cron job carries is the
+                            // agent session the activity belongs to.
+                            crate::channels::linear::send_activity(
+                                &config,
+                                linear_paths.as_ref(),
+                                &user_id,
+                                &message,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!("Linear not configured"))
                         }
                     }
                     _ => Err(anyhow::anyhow!("Unknown channel: {}", channel)),

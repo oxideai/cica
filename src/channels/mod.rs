@@ -1,3 +1,4 @@
+pub mod linear;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
@@ -39,6 +40,14 @@ pub trait Channel: Send + Sync + 'static {
     /// Send a text message to the user
     async fn send_message(&self, message: &str) -> Result<()>;
 
+    /// Report a failed turn. Most transports have no notion of an error
+    /// message, so the default is an ordinary send; channels that do (Linear's
+    /// `error` agent activity) override it, which is what stops a timeout from
+    /// reading as a normal answer.
+    async fn send_error(&self, message: &str) -> Result<()> {
+        self.send_message(message).await
+    }
+
     /// Send a message with attachments (images, files, etc.)
     async fn send_message_with_attachments(
         &self,
@@ -50,6 +59,38 @@ pub trait Channel: Send + Sync + 'static {
 
     /// Start a typing indicator. Returns a guard that stops the indicator when dropped.
     fn start_typing(&self) -> TypingGuard;
+}
+
+/// Who a turn is attributed to: which memories, `USER.md` and pairing record it
+/// uses.
+///
+/// For most channels this is simply the channel the message arrived on. It is a
+/// separate value because those two things can differ — memories are keyed
+/// `<channel>_<user_id>`, so a channel that can recognise an incoming account as
+/// somebody who already talks to cica elsewhere (Linear knows the commenter's
+/// email) can attribute the turn to that existing identity instead of creating a
+/// second profile for the same human.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    pub channel: String,
+    pub user_id: String,
+}
+
+impl Identity {
+    /// The default: attribute the turn to the channel it arrived on.
+    pub fn of(channel: &dyn Channel, user_id: &str) -> Self {
+        Self {
+            channel: channel.name().to_string(),
+            user_id: user_id.to_string(),
+        }
+    }
+
+    /// Attribute the turn to an identity on another channel. Deliberately
+    /// carries no display name: which surface the user is looking at is the
+    /// `Channel`'s to say, not the identity's.
+    pub fn mapped(channel: String, user_id: String) -> Self {
+        Self { channel, user_id }
+    }
 }
 
 /// RAII guard for typing indicators; dropped when the response is ready.
@@ -333,7 +374,7 @@ fn remove_file_path_lines(response: &str) -> String {
 pub async fn execute_claude_query(
     rt: Arc<Runtime>,
     channel: Arc<dyn Channel>,
-    user_id: &str,
+    identity: &Identity,
     affinity: Affinity,
     messages: Vec<String>,
     session_key: Option<String>,
@@ -342,11 +383,22 @@ pub async fn execute_claude_query(
     let combined_text = messages.join("\n\n");
     let _typing = channel.start_typing();
 
+    // `identity` decides whose memories and profile this turn sees; `channel` is
+    // where the conversation is actually happening. They are the same for every
+    // channel that cannot recognise its users from elsewhere.
+    //
+    // Keep them apart here. The display name feeds "You are currently
+    // communicating via X", which is about the surface in front of the user, so
+    // it must be the transport: a Linear mention attributed to someone's Slack
+    // identity is still a Linear conversation. Passing the identity's name here
+    // told the agent it was on Slack and it said so in a Linear ticket.
+    let user_id = identity.user_id.as_str();
+
     let context_prompt = match onboarding::build_context_prompt_for_user(
         &rt.config,
         &rt.paths,
         Some(channel.display_name()),
-        Some(channel.name()),
+        Some(&identity.channel),
         Some(user_id),
         Some(&combined_text),
     ) {
@@ -354,7 +406,7 @@ pub async fn execute_claude_query(
         Err(e) => {
             warn!("Failed to build context prompt: {}", e);
             let _ = channel
-                .send_message(&format!("Sorry, I encountered an error: {}", e))
+                .send_error(&format!("Sorry, I encountered an error: {}", e))
                 .await;
             return;
         }
@@ -362,7 +414,7 @@ pub async fn execute_claude_query(
 
     let qr = match query_ai_with_session(
         &rt,
-        channel.name(),
+        &identity.channel,
         user_id,
         affinity,
         &combined_text,
@@ -386,7 +438,7 @@ pub async fn execute_claude_query(
                 None,
                 true,
             );
-            let _ = channel.send_message(&err_msg).await;
+            let _ = channel.send_error(&err_msg).await;
             return;
         }
     };
@@ -1244,11 +1296,70 @@ pub const SUPPORTED_CHANNELS: &[ChannelInfo] = &[
         name: "slack",
         display_name: "Slack",
     },
+    ChannelInfo {
+        name: "linear",
+        display_name: "Linear",
+    },
 ];
 
 /// Get channel info by name
 pub fn get_channel_info(name: &str) -> Option<&'static ChannelInfo> {
     SUPPORTED_CHANNELS.iter().find(|c| c.name == name)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    struct FakeChannel;
+
+    #[async_trait]
+    impl Channel for FakeChannel {
+        fn name(&self) -> &'static str {
+            "slack"
+        }
+        fn display_name(&self) -> &'static str {
+            "Slack"
+        }
+        async fn send_message(&self, _message: &str) -> Result<()> {
+            Ok(())
+        }
+        fn start_typing(&self) -> TypingGuard {
+            TypingGuard::noop()
+        }
+    }
+
+    #[test]
+    fn by_default_a_turn_is_attributed_to_the_channel_it_arrived_on() {
+        let identity = Identity::of(&FakeChannel, "U1");
+        assert_eq!(identity.channel, "slack");
+        assert_eq!(identity.user_id, "U1");
+    }
+
+    #[test]
+    fn a_mapped_identity_points_at_the_other_channels_memories() {
+        // This is what lets a Linear mention read the person's Slack USER.md:
+        // memories are keyed <channel>_<user_id>, so the channel has to be the
+        // mapped one, not the transport the comment arrived on.
+        let identity = Identity::mapped("slack".into(), "U0123ABC".into());
+        assert_eq!(identity.channel, "slack");
+        assert_eq!(identity.user_id, "U0123ABC");
+    }
+
+    #[test]
+    fn a_mapped_identity_does_not_decide_which_surface_the_user_sees() {
+        // Regression: the identity used to carry a display name, which fed
+        // "You are currently communicating via X". A Linear mention mapped to
+        // a Slack identity therefore told the agent it was on Slack, and it
+        // wrote "from a Slack conversation" into a Linear ticket. The surface
+        // is the Channel's to report; the identity only says whose memories to
+        // load.
+        let identity = Identity::mapped("slack".into(), "U0123ABC".into());
+        assert_eq!(identity.channel, "slack");
+        assert_eq!(FakeChannel.display_name(), "Slack");
+        // Nothing on Identity can be mistaken for the surface name.
+        let _: &str = &identity.channel;
+    }
 }
 
 #[cfg(test)]

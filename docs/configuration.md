@@ -60,6 +60,92 @@ Configure one or more. A channel section's presence is what enables it.
 
 Files the agent names with an `[attachment:...]` marker are uploaded with the bot token, which needs the `files:write` scope. Without it the reply still arrives as text, with a note that the file could not be attached.
 
+### `[channels.linear]`
+
+The one **inbound** channel. Telegram long-polls, Slack uses Socket Mode, Signal
+talks to a local daemon — Linear POSTs an `AgentSessionEvent` webhook when the
+app is `@mentioned` on an issue, so cica opens a listening port.
+
+cica never terminates TLS: put an ALB or a reverse proxy in front and point it
+at `listen_addr`. cica verifies the `Linear-Signature` HMAC itself regardless,
+and refuses to start if `webhook_secret` is empty.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `client_id` | string | — | The OAuth application's client id. |
+| `client_secret` | string | — | Its client secret. |
+| `refresh_token` | string | — | Accepted and **ignored** — see below. |
+| `access_token` | string | — | A pre-minted token. Local testing only — see the note below. |
+| `webhook_secret` | string | — | Webhook signing secret. Required — cica will not listen unverified. |
+| `listen_addr` | string | `"0.0.0.0:8080"` | Where the listener binds. Webhook at `POST /webhooks/linear`, health check at `GET /health`. |
+| `auto_approve` | bool | `false` | Auto-approve new users. |
+| `shared_identity` | bool | `false` | Use shared `PERSONA.md`. |
+| `onboarding_prompt` | string | — | Per-channel override. |
+
+Every key also has an env form, for deployments that would rather not write
+secrets into `config.toml`: `CICA_LINEAR_CLIENT_ID`,
+`CICA_LINEAR_CLIENT_SECRET`, `CICA_LINEAR_REFRESH_TOKEN`,
+`CICA_LINEAR_ACCESS_TOKEN`, `CICA_LINEAR_WEBHOOK_SECRET`,
+`CICA_LINEAR_LISTEN_ADDR`.
+
+> **Which credential, and why it matters.** Use `client_id` + `client_secret`.
+> cica mints a 30-day app-actor token from them and renews an hour before expiry.
+>
+> A Linear app has a **single grant**. Minting a client-credentials token
+> revokes any outstanding authorization-code grant — access token *and* refresh
+> token. So a channel holding a refresh token loses it the moment anything else
+> authenticates as the same app (a CLI, a skill, a CI job), and the failure is
+> quiet: the turn completes, the work lands, and only the closing activity
+> fails, leaving the Linear session "running" forever. `refresh_token` is
+> therefore accepted and ignored, with a warning.
+>
+> `access_token` is for a throwaway local test only — it cannot renew, so the
+> channel goes quiet after 24 hours with a 401 in the log.
+>
+> **The `actor=app` installation is still required**, and is separate from the
+> credential: it is what makes Linear deliver agent webhooks at all. It is
+> one-time setup and survives minting. Note that a live client-credentials token
+> *blocks* an installation from completing (`Scope updates are not supported for
+> client credentials tokens`), so revoke outstanding tokens — rotating the client
+> secret does it — before installing or re-installing.
+
+#### `[channels.linear.identity]`
+
+Memories and `USER.md` are keyed `<channel>_<user_id>`, so the same human is a
+stranger the first time they appear on a new channel. This table maps a Linear
+account's email onto an identity elsewhere, so their memories, preferences and
+pairing carry over:
+
+```toml
+[channels.linear.identity]
+"rodrigo@example.com" = "slack:U0123ABC"
+```
+
+Matching is case-insensitive. An unmapped person becomes `linear:<their user
+id>` and goes through the normal pairing flow.
+
+#### Setting up the Linear side
+
+1. Create an OAuth application at `https://linear.app/settings/api/applications/new`.
+2. Copy its **Client ID** and **Client Secret** into `client_id` / `client_secret`.
+   The app-actor token cica mints from them creates and acts as an app user in the
+   workspace, so everything the agent writes is authored by it rather than by a
+   colleague.
+3. Scopes are requested per authorization, not configured on the app. cica asks
+   for `read,write,comments:create,issues:create,app:mentionable`. It does **not**
+   ask for `app:assignable`: assignment in Linear reads as "you own this now",
+   which is a different promise from "answer this". Add it only if you want the
+   agent delegated whole issues.
+4. Add a webhook subscribed to **Agent session events**, pointed at
+   `https://<your-host>/webhooks/linear`, and copy its signing secret into
+   `webhook_secret`.
+
+`cica init` walks through this and validates the credentials by resolving
+`viewer`, which prints the name that will appear on every activity.
+
+A turn is keyed to the **issue**, not the agent session, so a mention next week
+resumes the same conversation rather than starting cold.
+
 ## Backends
 
 ### `[claude]`

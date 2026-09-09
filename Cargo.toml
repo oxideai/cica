@@ -68,6 +68,14 @@ libc = "0.2"
 # Slack
 slack-morphism = { version = "2", features = ["hyper"] }
 
+# Inbound HTTP (Linear webhooks). hyper is already in the tree via slack-morphism.
+axum = "0.8"
+
+# Webhook signature verification (HMAC-SHA256 over the raw body)
+hmac = "0.12"
+hex = "0.4"
+subtle = "2"
+
 # TLS (needed for slack-morphism)
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 

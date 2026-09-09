@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use super::{
-    Channel, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
+    Channel, Identity, TypingGuard, UserTaskManager, build_text_with_images, determine_action,
     execute_action, execute_claude_query,
 };
 use crate::config::{Paths, TelegramConfig};
@@ -252,7 +252,7 @@ async fn handle_message(
             build_text_with_images(&rt.paths.base, &query_text, &image_paths);
         let user_key = format!("{}:{}", channel.name(), user_id);
         let channel_clone = channel.clone();
-        let user_id_clone = user_id.clone();
+        let identity = Identity::of(channel.as_ref(), &user_id);
         let affinity = Affinity::Chat {
             channel: channel.name().to_string(),
             user: user_id.clone(),
@@ -264,7 +264,7 @@ async fn handle_message(
                 execute_claude_query(
                     rt,
                     channel_clone,
-                    &user_id_clone,
+                    &identity,
                     affinity,
                     messages,
                     None,

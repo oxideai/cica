@@ -77,6 +77,57 @@ impl<P: SandboxProvider> WarmHydratingProvider<P> {
         }
     }
 
+    /// Save what an abandoned turn left behind, before `abandon` discards it.
+    ///
+    /// A turn that times out returns no result, so the dehydrate step below
+    /// never runs and nothing is persisted -- and then `forget_local` deletes
+    /// the local copy. The one turn we most need to read is the one that
+    /// leaves nothing at all, which is how a 900s timeout was diagnosed from
+    /// router logs and inference.
+    ///
+    /// Deliberately **not** `session/<id>`: a turn cut mid-flight must never
+    /// become resumable, or the next message in that thread restores a broken
+    /// conversation. This is a copy for humans, under `abandoned/<turn_id>`,
+    /// and nothing reads it back.
+    ///
+    /// Best-effort throughout. The turn has already failed; failing to file the
+    /// evidence must not make that worse.
+    pub async fn preserve_abandoned(&self, job: &TurnJob, turn_id: &str) {
+        let (artifacts, home): (&dyn SessionArtifacts, &Path) = match job.backend {
+            AiBackend::Claude => (&ClaudeSessionArtifacts, &self.claude_home),
+            AiBackend::Cursor => (&CursorSessionArtifacts, &self.cursor_home),
+        };
+
+        // A resumed turn knows its session. A fresh one never reported an id,
+        // so fall back to whatever was written last.
+        let session = match job.resume_session.clone() {
+            Some(session) => Some(session),
+            None => artifacts.latest_session(home),
+        };
+        let Some(session) = session else {
+            warn!("turn {turn_id} abandoned with no session to preserve");
+            return;
+        };
+
+        let staging = self.staging();
+        match artifacts.capture(home, &session, &staging) {
+            Ok(true) => {
+                let key = format!("abandoned/{turn_id}");
+                match self.store.push(&staging, &key).await {
+                    Ok(()) => warn!(
+                        "turn {turn_id} abandoned; partial transcript for session {session} preserved at {key}"
+                    ),
+                    Err(error) => {
+                        warn!("failed to preserve the abandoned turn {turn_id}: {error}")
+                    }
+                }
+            }
+            Ok(false) => warn!("turn {turn_id} abandoned; session {session} left no transcript"),
+            Err(error) => warn!("failed to capture the abandoned turn {turn_id}: {error}"),
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     pub async fn warm_up(&self) {
         self.refresh_skills().await;
     }

@@ -157,15 +157,62 @@ pub enum ClaudeCode {
     Script(PathBuf),
 }
 
+/// Whether the kernel could actually `exec` this file.
+///
+/// `@anthropic-ai/claude-code` publishes `bin/claude.exe` as a shim that prints
+/// "claude native binary not installed". The real executable arrives in a
+/// per-platform optional dependency, and the package's postinstall is what
+/// repoints `node_modules/.bin/claude` at it. When that postinstall does not run
+/// -- npm with `--ignore-scripts`, a restricted CI, some bun installs -- the link
+/// is left aimed at the shim.
+///
+/// Existence is therefore not enough. Crucially the shim has **no shebang**, so
+/// exec'ing it fails with `Exec format error (os error 8)` at the moment a user
+/// is waiting for an answer. That is the real discriminator, and it is not
+/// "binary vs text": npm routinely puts legitimate shell wrappers in `.bin/`.
+///
+/// So: a compiled binary (NUL bytes in the first block, covering ELF and Mach-O)
+/// or anything starting `#!`.
+fn is_runnable_entry(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 1024];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    let head = &head[..read];
+    head.starts_with(b"#!") || head.contains(&0)
+}
+
 pub fn find_claude_code(paths: &Paths) -> Option<ClaudeCode> {
-    let native = paths.claude_code_dir.join("node_modules/.bin/claude");
-    if native.exists() {
+    let modules = paths.claude_code_dir.join("node_modules");
+
+    // What the installer linked, when it linked the real thing.
+    let native = modules.join(".bin/claude");
+    if is_runnable_entry(&native) {
         return Some(ClaudeCode::Native(native));
     }
 
-    let script = paths
-        .claude_code_dir
-        .join("node_modules/@anthropic-ai/claude-code/cli.js");
+    // Otherwise go to the platform package directly. The link being wrong does
+    // not mean the binary is missing -- it is usually sitting right here.
+    let scoped = modules.join("@anthropic-ai");
+    if let Ok(entries) = std::fs::read_dir(&scoped) {
+        let mut candidates: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("claude"))
+            .filter(|candidate| is_runnable_entry(candidate))
+            .collect();
+        // Deterministic across runs; read_dir order is not guaranteed.
+        candidates.sort();
+        if let Some(candidate) = candidates.into_iter().next() {
+            return Some(ClaudeCode::Native(candidate));
+        }
+    }
+
+    // Legacy layout: a JavaScript entry point run under bun (<= 2.1.112).
+    let script = scoped.join("claude-code/cli.js");
     if script.exists() {
         return Some(ClaudeCode::Script(script));
     }
@@ -726,6 +773,11 @@ pub fn ensure_skill_deps(bun: &Path, skill_dir: &Path) {
 mod claude_code_entry_tests {
     use super::*;
 
+    fn write_file(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+        std::fs::write(path, bytes).expect("write");
+    }
+
     fn paths_with(files: &[&str]) -> (tempfile::TempDir, Paths) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = Paths::for_base(tmp.path().to_path_buf());
@@ -735,6 +787,76 @@ mod claude_code_entry_tests {
             std::fs::write(&p, b"#!/bin/sh\n").expect("write");
         }
         (tmp, paths)
+    }
+
+    /// The production failure this guards. On 2026-09-09 the router's
+    /// `.bin/claude` pointed at the package's text stub, so every Linear turn
+    /// died with `Exec format error (os error 8)` -- the real binary was sitting
+    /// in the platform package the whole time.
+    #[test]
+    fn skips_the_text_stub_and_finds_the_platform_binary() {
+        let (_t, paths) = paths_with(&[]);
+        let modules = paths.claude_code_dir.join("node_modules");
+        // The shim npm ships: text, no NUL bytes.
+        write_file(
+            &modules.join("@anthropic-ai/claude-code/bin/claude.exe"),
+            b"echo \"Error: claude native binary not installed.\" >&2\n",
+        );
+        // What the installer *should* have linked, and did install.
+        write_file(
+            &modules.join("@anthropic-ai/claude-code-linux-x64/claude"),
+            b"\x7fELF\x02\x01\x01\0native",
+        );
+        // The link, aimed at the stub.
+        write_file(
+            &modules.join(".bin/claude"),
+            b"echo \"Error: claude native binary not installed.\" >&2\n",
+        );
+
+        assert_eq!(
+            find_claude_code(&paths),
+            Some(ClaudeCode::Native(
+                modules.join("@anthropic-ai/claude-code-linux-x64/claude")
+            )),
+            "resolved the stub — every turn would fail with Exec format error"
+        );
+    }
+
+    /// A correctly linked install still takes the short path.
+    #[test]
+    fn prefers_the_link_when_it_points_at_a_real_binary() {
+        let (_t, paths) = paths_with(&[]);
+        let modules = paths.claude_code_dir.join("node_modules");
+        write_file(&modules.join(".bin/claude"), b"\x7fELF\x02\x01\x01\0linked");
+        write_file(
+            &modules.join("@anthropic-ai/claude-code-linux-x64/claude"),
+            b"\x7fELF\x02\x01\x01\0platform",
+        );
+        assert_eq!(
+            find_claude_code(&paths),
+            Some(ClaudeCode::Native(modules.join(".bin/claude")))
+        );
+    }
+
+    /// Nothing native anywhere: fall back to the legacy script, not the stub.
+    #[test]
+    fn falls_back_to_the_script_rather_than_a_stub() {
+        let (_t, paths) = paths_with(&[]);
+        let modules = paths.claude_code_dir.join("node_modules");
+        write_file(
+            &modules.join(".bin/claude"),
+            b"echo \"Error: claude native binary not installed.\"\n",
+        );
+        write_file(
+            &modules.join("@anthropic-ai/claude-code/cli.js"),
+            b"#!/usr/bin/env node\n",
+        );
+        assert_eq!(
+            find_claude_code(&paths),
+            Some(ClaudeCode::Script(
+                modules.join("@anthropic-ai/claude-code/cli.js")
+            ))
+        );
     }
 
     #[test]
